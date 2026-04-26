@@ -1,0 +1,923 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin - Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f6f8fb;
+      color: #111827;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      background: #ffffff;
+      border-right: 1px solid #e5e7eb;
+      padding: 24px 18px;
+    }
+
+    .brand {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 28px;
+    }
+
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .nav a {
+      text-decoration: none;
+      color: #374151;
+      padding: 10px 12px;
+      border-radius: 10px;
+      display: block;
+    }
+
+    .nav a.active {
+      background: #eef2ff;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+
+    .sidebar-footer {
+      margin-top: 32px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .main {
+      padding: 24px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .page-title h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+
+    .page-title p {
+      margin: 6px 0 0;
+      color: #6b7280;
+    }
+
+    .config-card,
+    .stat-card,
+    .panel,
+    .side-card,
+    .lead-card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .config-card {
+      padding: 18px;
+      margin-bottom: 24px;
+    }
+
+    .config-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+      background: #fff;
+    }
+
+    button,
+    .btn-link {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: #111827;
+      color: #fff;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .btn-secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+
+    .btn-soft {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+    }
+
+    .muted {
+      color: #6b7280;
+      font-size: 13px;
+    }
+
+    .danger {
+      color: #b00020;
+      font-size: 13px;
+    }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+
+      
+    }
+
+    
+
+    .stat-card {
+      padding: 18px;
+      min-height: 110px;
+      cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 3px 10px rgba(0,0,0,0.06);
+    }
+
+    .stat-card.active {
+      outline: 2px solid #1d4ed8;
+      outline-offset: 0;
+    }
+
+    .stat-number {
+      font-size: 34px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .stat-label {
+      font-size: 14px;
+      color: #6b7280;
+    }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 24px;
+    }
+
+    .panel,
+    .side-card {
+      padding: 18px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .panel-header h2,
+    .side-card h3 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .search-wrap {
+      min-width: 260px;
+      width: 320px;
+    }
+
+    .filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .filter-btn {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .filter-btn.active {
+      background: #111827;
+      color: #fff;
+      border-color: #111827;
+    }
+
+    .lead-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .lead-card {
+      padding: 16px;
+    }
+
+    .lead-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 1fr 0.9fr auto;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .lead-name {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .lead-sub {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 4px;
+      word-break: break-word;
+    }
+
+    .lead-detail {
+      font-size: 14px;
+      margin-bottom: 6px;
+      line-height: 1.45;
+    }
+
+    .lead-detail b {
+      color: #111827;
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge-emergency {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .badge-priority {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .badge-outside {
+      background: #dbeafe;
+      color: #1d4ed8;
+    }
+
+    .badge-new {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .badge-returning {
+      background: #e5e7eb;
+      color: #374151;
+    }
+
+    .lead-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .lead-actions button {
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .empty-state {
+      color: #6b7280;
+      padding: 22px 0;
+      text-align: center;
+      border: 1px dashed #d1d5db;
+      border-radius: 14px;
+      background: #fafafa;
+    }
+
+    .side-panels {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .mini-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .mini-item {
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px;
+      background: #fafafa;
+    }
+
+    .mini-item-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .mini-item-sub {
+      font-size: 13px;
+      color: #6b7280;
+      line-height: 1.4;
+    }
+
+    .snapshot-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .snapshot-box {
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 14px;
+      background: #fafafa;
+    }
+
+    .snapshot-number {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .snapshot-label {
+      font-size: 13px;
+      color: #6b7280;
+    }
+
+    .evidence {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed #e5e7eb;
+      font-size: 12px;
+      color: #6b7280;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 1100px) {
+      .dashboard-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lead-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lead-actions {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .stats-row {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .config-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .panel-header {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .search-wrap {
+        width: 100%;
+        min-width: 0;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .stats-row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">DentalBot Admin</div>
+
+      <nav class="nav">
+        <a href="#" class="active">Dashboard</a>
+        <a href="#">Leads</a>
+        <a href="#">Conversations</a>
+        <a href="/static/admin/faqs.html">FAQs</a>
+        <a href="#">Settings</a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div>Internal dashboard</div>
+        <div style="margin-top:6px;">Use your admin key + client key to load practice data.</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div class="page-title">
+          <h1>Dashboard</h1>
+          <p>Prioritize leads fast, review urgency, and keep your front desk organized.</p>
+        </div>
+      </div>
+
+      <section class="config-card">
+        <div class="config-grid">
+          <div>
+            <label><b>Admin Key</b></label>
+            <input id="adminKey" type="text" placeholder="x-admin-key value" />
+          </div>
+
+          <div>
+            <label><b>Client Key</b></label>
+            <input id="clientKey" type="text" placeholder="CLIENT_API_KEY" />
+          </div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button id="saveBtn" class="btn-secondary">Save</button>
+            <button id="loadBtn">Load</button>
+            <a href="/static/admin/faqs.html" class="btn-link btn-soft">FAQs</a>
+          </div>
+        </div>
+        <div id="status" class="muted" style="margin-top:12px;"></div>
+      </section>
+
+      <section class="stats-row">
+        <div class="stat-card active" data-filter="all">
+          <div class="stat-number" id="statTotalLeads">0</div>
+          <div class="stat-label">Recent Leads</div>
+        </div>
+
+        <div class="stat-card" data-filter="priority">
+          <div class="stat-number" id="statPriority">0</div>
+          <div class="stat-label">Priority / ASAP</div>
+        </div>
+
+        <div class="stat-card" data-filter="emergency">
+          <div class="stat-number" id="statEmergency">0</div>
+          <div class="stat-label">Emergency</div>
+        </div>
+
+        <div class="stat-card" data-filter="outside_hours">
+          <div class="stat-number" id="statOutsideHours">0</div>
+          <div class="stat-label">Outside Hours</div>
+        </div>
+      </section>
+
+      <p style="font-size:12px; color:#6b7280; margin-top:-12px; margin-bottom:16px;">
+        Click a card to filter leads
+      </p>
+
+      <section class="dashboard-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Lead Triage Board</h2>
+            <div class="search-wrap">
+              <input id="searchInput" type="text" placeholder="Search name, phone, email, reason" />
+            </div>
+          </div>
+
+          <div class="filter-row">
+            <button class="filter-btn active" data-filter="all">All</button>
+            <button class="filter-btn" data-filter="emergency">Emergency</button>
+            <button class="filter-btn" data-filter="priority">Priority</button>
+            <button class="filter-btn" data-filter="outside_hours">Outside Hours</button>
+            <button class="filter-btn" data-filter="new_patient">New Patients</button>
+            <button class="filter-btn" data-filter="returning">Returning</button>
+          </div>
+
+          <div id="leadList" class="lead-list">
+            <div class="empty-state">Load a client to view leads.</div>
+          </div>
+        </section>
+
+        <aside class="side-panels">
+          <section class="side-card">
+            <h3>Overview Snapshot</h3>
+            <div class="snapshot-grid">
+              <div class="snapshot-box">
+                <div class="snapshot-number" id="snapshotConversations">0</div>
+                <div class="snapshot-label">Total Conversations</div>
+              </div>
+              <div class="snapshot-box">
+                <div class="snapshot-number" id="snapshotLeads">0</div>
+                <div class="snapshot-label">Total Leads</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-card">
+            <h3>Recent Lead Activity</h3>
+            <div id="recentLeadsMini" class="mini-list">
+              <div class="mini-item">
+                <div class="mini-item-title">No activity yet</div>
+                <div class="mini-item-sub">Load a practice to see the latest lead activity.</div>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <script>
+     //const API_BASE = ""; 
+
+     const API_BASE = "http://127.0.0.1:8000";
+
+    let allLeads = [];
+    let currentFilter = "all";
+
+    function $(id){ return document.getElementById(id); }
+
+    function handleCall(phone) {
+      if (phone) {
+        window.location.href = 'tel:' + phone;
+      } else {
+        alert('No phone number available');
+      }
+    }
+
+    async function updateLeadStatus(conversationId, newStatus) {
+      try {
+        const res = await fetch(API_BASE + "/admin/leads/status", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            conversation_id: conversationId,
+            lead_status: newStatus,
+          }),
+        });
+
+        const txt = await res.text();
+        let data = null;
+        try { data = txt ? JSON.parse(txt) : null; } catch (e) {}
+
+        if (!res.ok) {
+          throw new Error((data && data.detail) ? JSON.stringify(data.detail) : txt || res.statusText);
+        }
+
+        const lead = allLeads.find(l => l.conversation_id === conversationId);
+        if (lead) {
+          lead.lead_status = newStatus;
+        }
+
+        renderLeads(allLeads);
+        renderMiniRecent(allLeads);
+        setStatus(`Lead marked as ${newStatus}.`);
+      } catch (e) {
+        setStatus("Status update failed: " + e.message, true);
+      }
+    }
+
+    function handleCall(phone) {
+      if (phone) {
+        window.location.href = 'tel:' + phone;
+      } else {
+        alert('No phone number available');
+      }
+    }
+
+    function setStatus(msg, isError=false){
+      const el = $("status");
+      el.textContent = msg;
+      el.className = isError ? "danger" : "muted";
+    }
+
+    function getAdminKey(){ return ($("adminKey").value || "").trim(); }
+    function getClientKey(){ return ($("clientKey").value || "").trim(); }
+
+    function authHeaders(){
+      return {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+        "x-admin-key": getAdminKey(),
+      };
+    }
+
+    async function apiGet(path){
+      const res = await fetch(API_BASE + path, { headers: authHeaders() });
+      const txt = await res.text();
+      let data = null;
+      try { data = txt ? JSON.parse(txt) : null; } catch(e) {}
+      if (!res.ok) throw new Error((data && data.detail) ? JSON.stringify(data.detail) : txt || res.statusText);
+      return data;
+    }
+
+    function saveLocal(){
+      localStorage.setItem("adminKey", $("adminKey").value);
+      localStorage.setItem("clientKey", $("clientKey").value);
+      setStatus("Saved to this browser.");
+    }
+
+    function loadLocal(){
+      $("adminKey").value = localStorage.getItem("adminKey") || "";
+      $("clientKey").value = localStorage.getItem("clientKey") || "";
+    }
+
+    function escapeHtml(str) {
+      return String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function formatWhen(value){
+      if (!value) return "—";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return value;
+      return d.toLocaleString();
+    }
+
+    function patientTypeLabel(lead){
+      const t = String(lead.lead_patient_type || "").toLowerCase();
+      if (t === "new") return "New Patient";
+      if (t === "returning") return "Returning";
+      return "";
+    }
+
+    function getLeadBadges(lead){
+      const badges = [];
+
+      if (lead.lead_is_emergency) {
+        badges.push('<span class="badge badge-emergency">🔥 Emergency</span>');
+      }
+      if (lead.lead_is_priority) {
+        badges.push('<span class="badge badge-priority">⚡ Priority</span>');
+      }
+      if (lead.lead_is_outside_hours) {
+        badges.push('<span class="badge badge-outside">⏰ Outside Hours</span>');
+      }
+
+      const pt = patientTypeLabel(lead);
+      if (pt === "New Patient") {
+        badges.push('<span class="badge badge-new">🆕 New Patient</span>');
+      } else if (pt === "Returning") {
+        badges.push('<span class="badge badge-returning">↩️ Returning</span>');
+      }
+
+      return badges.join("");
+    }
+
+    function matchesFilter(lead, filter){
+      if (filter === "all") return true;
+      if (filter === "emergency") return !!lead.lead_is_emergency;
+      if (filter === "priority") return !!lead.lead_is_priority;
+      if (filter === "outside_hours") return !!lead.lead_is_outside_hours;
+      if (filter === "new_patient") return String(lead.lead_patient_type || "").toLowerCase() === "new";
+      if (filter === "returning") return String(lead.lead_patient_type || "").toLowerCase() === "returning";
+      return true;
+    }
+
+    function matchesSearch(lead, query){
+      if (!query) return true;
+      const haystack = [
+        lead.lead_name,
+        lead.lead_phone,
+        lead.lead_email,
+        lead.lead_reason,
+        lead.lead_status,
+      ].join(" ").toLowerCase();
+
+      return haystack.includes(query.toLowerCase());
+    }
+
+    function renderStats(leads, overview){
+      const priorityCount = leads.filter(l => l.lead_is_priority).length;
+      const emergencyCount = leads.filter(l => l.lead_is_emergency).length;
+      const outsideHoursCount = leads.filter(l => l.lead_is_outside_hours).length;
+
+      $("statTotalLeads").textContent = String(leads.length || 0);
+      $("statPriority").textContent = String(priorityCount);
+      $("statEmergency").textContent = String(emergencyCount);
+      $("statOutsideHours").textContent = String(outsideHoursCount);
+
+      $("snapshotConversations").textContent = String(overview?.total_conversations || 0);
+      $("snapshotLeads").textContent = String(overview?.total_leads || 0);
+    }
+
+    function renderMiniRecent(leads){
+      const wrap = $("recentLeadsMini");
+      const rows = (leads || []).slice(0, 5);
+
+      if (!rows.length) {
+        wrap.innerHTML = `
+          <div class="mini-item">
+            <div class="mini-item-title">No recent leads</div>
+            <div class="mini-item-sub">New lead activity will appear here.</div>
+          </div>
+        `;
+        return;
+      }
+
+      wrap.innerHTML = rows.map(l => `
+        <div class="mini-item">
+          <div class="mini-item-title">
+            ${escapeHtml(l.lead_name || "Unnamed lead")}
+            ${l.lead_is_emergency ? "🔥" : ""}
+            ${l.lead_is_priority ? "⚡" : ""}
+            ${l.lead_is_outside_hours ? "⏰" : ""}
+          </div>
+          <div class="mini-item-sub">
+            ${escapeHtml(l.lead_reason || "No reason provided")}<br>
+            ${escapeHtml(formatWhen(l.last_lead_at))}
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderLeads(leads){
+      const list = $("leadList");
+      const q = ($("searchInput").value || "").trim();
+
+      const filtered = (leads || []).filter(l => matchesFilter(l, currentFilter) && matchesSearch(l, q));
+
+      if (!filtered.length) {
+        list.innerHTML = `<div class="empty-state">No leads match this view.</div>`;
+        return;
+      }
+
+      list.innerHTML = filtered.map(l => `
+        <div class="lead-card">
+          <div class="lead-grid">
+            <div>
+              <div class="lead-name">${escapeHtml(l.lead_name || "Unnamed lead")}</div>
+              <div class="lead-sub">${escapeHtml(l.lead_phone || "No phone provided")}</div>
+              <div class="lead-sub">${escapeHtml(l.lead_email || "No email provided")}</div>
+              <div class="lead-sub">Received: ${escapeHtml(formatWhen(l.last_lead_at || l.created_at))}</div>
+            </div>
+
+            <div>
+              <div class="lead-detail"><b>Reason:</b> ${escapeHtml(l.lead_reason || "—")}</div>
+              <div class="lead-detail"><b>Status:</b> ${escapeHtml((l.lead_status || "new").replace("_", " "))}</div>
+              <div class="lead-detail"><b>Preferred Time:</b> ${escapeHtml(l.lead_time_window || "—")}</div>
+            </div>
+
+            <div>
+              <div class="badges">${getLeadBadges(l)}</div>
+              ${l.lead_outside_hours_note ? `
+                <div class="lead-sub" style="margin-top:6px;">
+                  ${escapeHtml(l.lead_outside_hours_note)}
+                </div>
+              ` : ""}
+              <div class="evidence">
+                <div><b>Name evidence:</b> ${escapeHtml(l.lead_name_source_text || "—")}</div>
+                <div style="margin-top:4px;"><b>Reason evidence:</b> ${escapeHtml(l.lead_reason_source_text || "—")}</div>
+              </div>
+            </div>
+
+            <div class="lead-actions">
+              <button class="btn-soft" type="button"
+                onclick="handleCall('${escapeHtml(l.lead_phone || "")}')">
+                Call
+              </button>
+
+              <button class="btn-soft" type="button"
+                onclick="updateLeadStatus('${l.conversation_id}', 'contacted')">
+                ${l.lead_status === "contacted" ? "✓ Contacted" : "Contacted"}
+              </button>
+
+              <button class="btn-soft" type="button"
+                onclick="updateLeadStatus('${l.conversation_id}', 'booked')">
+                ${l.lead_status === "booked" ? "✓ Booked" : "Booked"}
+              </button>
+
+              <button class="btn-soft" type="button"
+                onclick="alert('Transcript feature coming soon')">
+                Transcript
+              </button>
+            </div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function setActiveFilter(filter){
+      currentFilter = filter;
+
+      document.querySelectorAll(".filter-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.filter === filter);
+      });
+
+      document.querySelectorAll(".stat-card").forEach(card => {
+        card.classList.toggle("active", card.dataset.filter === filter);
+      });
+
+      renderLeads(allLeads);
+    }
+
+    async function loadAll(){
+      const adminKey = getAdminKey();
+      const clientKey = getClientKey();
+      if (!adminKey) { setStatus("Enter admin key.", true); return; }
+      if (!clientKey) { setStatus("Enter client key.", true); return; }
+
+      try {
+        setStatus("Loading...");
+
+        const overview = await apiGet(`/admin/dashboard/overview?client_key=${encodeURIComponent(clientKey)}&days=30`);
+        const leads = await apiGet(`/admin/leads?client_key=${encodeURIComponent(clientKey)}&days=30&limit=25&offset=0`);
+
+        allLeads = leads || [];
+
+        renderStats(allLeads, overview);
+        renderMiniRecent(overview?.recent_leads || allLeads);
+        renderLeads(allLeads);
+
+        setStatus("Loaded.");
+      } catch (e) {
+        setStatus("Load failed: " + e.message, true);
+      }
+    }
+
+    $("saveBtn").addEventListener("click", saveLocal);
+    $("loadBtn").addEventListener("click", loadAll);
+    $("searchInput").addEventListener("input", () => renderLeads(allLeads));
+
+    document.querySelectorAll(".filter-btn").forEach(btn => {
+      btn.addEventListener("click", () => setActiveFilter(btn.dataset.filter));
+    });
+
+    document.querySelectorAll(".stat-card").forEach(card => {
+      card.addEventListener("click", () => setActiveFilter(card.dataset.filter));
+    });
+
+    loadLocal();
+    setStatus("Enter admin key + client key, then click Load.");
+  </script>
+</body>
+</html>

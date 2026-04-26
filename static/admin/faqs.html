@@ -1,0 +1,273 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin - FAQs</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 18px; max-width: 1100px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin: 12px 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #eee; padding: 8px; vertical-align: top; }
+    th { background: #fafafa; text-align: left; }
+    input[type="text"], textarea { width: 100%; padding: 8px; }
+    textarea { min-height: 70px; }
+    button { padding: 8px 12px; cursor: pointer; }
+    .muted { color: #666; font-size: 12px; }
+    .danger { color: #b00020; }
+    .ok { color: #0a7a0a; }
+    .pill { display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }
+  </style>
+</head>
+<body>
+  <h2>FAQs Admin</h2>
+
+  <div class="card">
+    <div class="row">
+      <div style="flex: 1; min-width: 260px;">
+        <label><b>Admin Key</b> <span class="muted">(stored in this browser only)</span></label>
+        <input id="adminKey" type="text" placeholder="x-admin-key value" />
+      </div>
+      <div style="flex: 1; min-width: 260px;">
+        <label><b>Client Key</b> <span class="muted">(this is the office api_key)</span></label>
+        <input id="clientKey" type="text" placeholder="CLIENT_API_KEY" />
+      </div>
+      <div>
+        <button id="saveBtn">Save</button>
+        <button id="loadBtn">Load FAQs</button>
+        <a href="/static/admin/dashboard.html" style="margin-left:10px;">Dashboard →</a>
+      </div>
+    </div>
+    <div id="status" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <h3>Add FAQ</h3>
+    <div class="row">
+      <div style="flex: 1; min-width: 300px;">
+        <label><b>Question</b></label>
+        <input id="newQuestion" type="text" placeholder="What time do you open?" />
+      </div>
+    </div>
+    <div class="row">
+      <div style="flex: 1; min-width: 300px;">
+        <label><b>Answer</b></label>
+        <textarea id="newAnswer" placeholder="We’re open Monday–Friday 9am–5pm."></textarea>
+      </div>
+    </div>
+    <div class="row">
+      <div style="flex: 1; min-width: 300px;">
+        <label><b>Keywords</b> <span class="muted">(comma separated)</span></label>
+        <input id="newKeywords" type="text" placeholder="hours, open, opening time" />
+      </div>
+      <div>
+        <label><b>Enabled</b></label><br/>
+        <input id="newEnabled" type="checkbox" checked />
+      </div>
+      <div>
+        <button id="addBtn">Add</button>
+      </div>
+    </div>
+    <div id="addStatus" class="muted"></div>
+  </div>
+
+  <div class="card">
+    <h3>FAQs</h3>
+    <div class="muted">Tip: Edit fields inline, then click “Save”.</div>
+    <table id="faqTable">
+      <thead>
+        <tr>
+          <th>Enabled</th>
+          <th>Question</th>
+          <th>Answer</th>
+          <th>Keywords</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="faqBody"></tbody>
+    </table>
+  </div>
+
+<script>
+  const API_BASE = ""; // same origin
+
+  function $(id){ return document.getElementById(id); }
+
+  function setStatus(msg, isError=false){
+    const el = $("status");
+    el.textContent = msg;
+    el.className = isError ? "danger" : "muted";
+  }
+
+  function setAddStatus(msg, isError=false){
+    const el = $("addStatus");
+    el.textContent = msg;
+    el.className = isError ? "danger" : "muted";
+  }
+
+  function getAdminKey(){
+    return ($("adminKey").value || "").trim();
+  }
+
+  function getClientKey(){
+    return ($("clientKey").value || "").trim();
+  }
+
+  function authHeaders(){
+    const k = getAdminKey();
+    return {
+      "accept": "application/json",
+      "Content-Type": "application/json",
+      "x-admin-key": k,
+    };
+  }
+
+  async function apiGet(path){
+    const res = await fetch(API_BASE + path, { headers: authHeaders() });
+    const txt = await res.text();
+    let data = null;
+    try { data = txt ? JSON.parse(txt) : null; } catch(e) {}
+    if (!res.ok) throw new Error((data && data.detail) ? JSON.stringify(data.detail) : txt || res.statusText);
+    return data;
+  }
+
+  async function apiPost(path, bodyObj){
+    const res = await fetch(API_BASE + path, { method: "POST", headers: authHeaders(), body: JSON.stringify(bodyObj) });
+    const txt = await res.text();
+    let data = null;
+    try { data = txt ? JSON.parse(txt) : null; } catch(e) {}
+    if (!res.ok) throw new Error((data && data.detail) ? JSON.stringify(data.detail) : txt || res.statusText);
+    return data;
+  }
+
+  function saveLocal(){
+    localStorage.setItem("adminKey", $("adminKey").value);
+    localStorage.setItem("clientKey", $("clientKey").value);
+    setStatus("Saved to this browser.");
+  }
+
+  function loadLocal(){
+    $("adminKey").value = localStorage.getItem("adminKey") || "";
+    $("clientKey").value = localStorage.getItem("clientKey") || "";
+  }
+
+  function renderFaqs(rows){
+    const body = $("faqBody");
+    body.innerHTML = "";
+
+    rows.forEach(f => {
+      const tr = document.createElement("tr");
+
+      const tdEnabled = document.createElement("td");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!f.enabled;
+      cb.addEventListener("change", async () => {
+        try {
+          await apiPost(`/admin/faqs/${f.id}/toggle?enabled=${cb.checked}`, {});
+          setStatus("Updated enabled.");
+        } catch (e) {
+          cb.checked = !cb.checked;
+          setStatus("Toggle failed: " + e.message, true);
+        }
+      });
+      tdEnabled.appendChild(cb);
+
+      const tdQ = document.createElement("td");
+      const q = document.createElement("input");
+      q.type = "text";
+      q.value = f.question || "";
+      tdQ.appendChild(q);
+
+      const tdA = document.createElement("td");
+      const a = document.createElement("textarea");
+      a.value = f.answer || "";
+      tdA.appendChild(a);
+
+      const tdK = document.createElement("td");
+      const k = document.createElement("input");
+      k.type = "text";
+      k.value = f.keywords || "";
+      tdK.appendChild(k);
+
+      const tdAct = document.createElement("td");
+      const saveBtn = document.createElement("button");
+      saveBtn.textContent = "Save";
+      saveBtn.addEventListener("click", async () => {
+        try {
+          const clientKey = getClientKey();
+          await apiPost(`/admin/faqs/${f.id}/edit`, {
+            client_key: clientKey,
+            question: q.value,
+            answer: a.value,
+            keywords: k.value,
+            enabled: cb.checked,
+          });
+          setStatus("Saved changes.");
+        } catch (e) {
+          setStatus("Save failed: " + e.message, true);
+        }
+      });
+
+      tdAct.appendChild(saveBtn);
+
+      tr.appendChild(tdEnabled);
+      tr.appendChild(tdQ);
+      tr.appendChild(tdA);
+      tr.appendChild(tdK);
+      tr.appendChild(tdAct);
+
+      body.appendChild(tr);
+    });
+  }
+
+  async function loadFaqs(){
+    const adminKey = getAdminKey();
+    const clientKey = getClientKey();
+    if (!adminKey) { setStatus("Enter admin key.", true); return; }
+    if (!clientKey) { setStatus("Enter client key.", true); return; }
+
+    try {
+      setStatus("Loading FAQs...");
+      const rows = await apiGet(`/admin/faqs?client_key=${encodeURIComponent(clientKey)}`);
+      renderFaqs(rows || []);
+      setStatus(`Loaded ${rows.length} FAQs.`);
+    } catch (e) {
+      setStatus("Load failed: " + e.message, true);
+    }
+  }
+
+  async function addFaq(){
+    const clientKey = getClientKey();
+    const question = ($("newQuestion").value || "").trim();
+    const answer = ($("newAnswer").value || "").trim();
+    const keywords = ($("newKeywords").value || "").trim();
+    const enabled = $("newEnabled").checked;
+
+    if (!clientKey) { setAddStatus("Client key required.", true); return; }
+    if (!question || !answer) { setAddStatus("Question and answer required.", true); return; }
+
+    try {
+      setAddStatus("Adding...");
+      await apiPost(`/admin/faqs?client_key=${encodeURIComponent(clientKey)}&question=${encodeURIComponent(question)}&answer=${encodeURIComponent(answer)}&keywords=${encodeURIComponent(keywords)}&enabled=${enabled}`, {});
+      setAddStatus("Added.");
+      $("newQuestion").value = "";
+      $("newAnswer").value = "";
+      $("newKeywords").value = "";
+      $("newEnabled").checked = true;
+      await loadFaqs();
+    } catch (e) {
+      setAddStatus("Add failed: " + e.message, true);
+    }
+  }
+
+  $("saveBtn").addEventListener("click", saveLocal);
+  $("loadBtn").addEventListener("click", loadFaqs);
+  $("addBtn").addEventListener("click", addFaq);
+
+  loadLocal();
+  setStatus("Enter admin key + client key, then click Load FAQs.");
+</script>
+</body>
+</html>
