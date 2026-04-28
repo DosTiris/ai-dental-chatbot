@@ -1,6 +1,7 @@
 from fastapi import FastAPI  # Import FastAPI to create the web application
 from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware to control which frontends can call this API
 from fastapi.staticfiles import StaticFiles  # Import StaticFiles so we can serve /static/*
+from fastapi.responses import FileResponse
 from app.database import Base, engine  # Import SQLAlchemy Base and engine so we can create tables
 from app.routes.chat import router as chat_router  # Import the chat router (the /chat endpoint)
 from app.routes.admin import router as admin_router  # Import the admin router (the /admin/* endpoints)
@@ -33,14 +34,10 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(admin_router)
 
-# --- Database init (simple Week 2 approach) ---
-Base.metadata.create_all(bind=engine)  # Create tables in the connected database if they do not exist yet
+# --- Database init ---
+Base.metadata.create_all(bind=engine)
 
-# --- Routers (API endpoints) ---
-app.include_router(chat_router)  # Register chat endpoints (POST /chat)
-app.include_router(admin_router)  # Register admin endpoints (GET /admin/*)
-
-# --- Simple root endpoint ---
-@app.get("/")
-def root():
-    return {"ok": True, "service": "ai-dental-chatbot-backend"}
+# --- Serve chatbot UI at homepage ---
+@app.get("/demo")
+def serve_demo_chat():
+    return FileResponse("static/chat.html")
