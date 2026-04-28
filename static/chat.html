@@ -50,7 +50,7 @@ async function send() {
     const data = await res.json();
 
     // IMPORTANT: adjust this depending on your backend response shape
-    const reply = data.reply || data.message || "No response";
+    const reply = data.response || data.reply || data.message || "No response";
 
     document.getElementById("messages").innerHTML +=
       `<div class="msg bot">Bot: ${reply}</div>`;
