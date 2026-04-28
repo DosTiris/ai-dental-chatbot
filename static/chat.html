@@ -27,24 +27,38 @@ async function send() {
   const input = document.getElementById("input");
   const msg = input.value;
 
+  if (!msg) return;
+
+  // Show user message
   document.getElementById("messages").innerHTML +=
     `<div class="msg user">You: ${msg}</div>`;
 
   input.value = "";
 
-  const res = await fetch("/chat", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ message: msg })
-  });
+  try {
+    const res = await fetch("https://ai-dental-chatbot.onrender.com/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: msg,
+        client_key: "demo"
+      })
+    });
 
-  const data = await res.json();
+    const data = await res.json();
 
-  document.getElementById("messages").innerHTML +=
-  const botText = data.reply || data.response || data.answer || data.message || JSON.stringify(data);
+    // IMPORTANT: adjust this depending on your backend response shape
+    const reply = data.reply || data.message || "No response";
 
-  document.getElementById("messages").innerHTML +=
-  `  <div class="msg bot">Bot: ${botText}</div>`;
+    document.getElementById("messages").innerHTML +=
+      `<div class="msg bot">Bot: ${reply}</div>`;
+
+  } catch (err) {
+    document.getElementById("messages").innerHTML +=
+      `<div class="msg bot">Bot: Error connecting</div>`;
+  }
 }
 </script>
 
