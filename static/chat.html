@@ -41,7 +41,10 @@ async function send() {
   const data = await res.json();
 
   document.getElementById("messages").innerHTML +=
-    `<div class="msg bot">Bot: ${data.reply}</div>`;
+  const botText = data.reply || data.response || data.answer || data.message || JSON.stringify(data);
+
+  document.getElementById("messages").innerHTML +=
+  `  <div class="msg bot">Bot: ${botText}</div>`;
 }
 </script>
 
