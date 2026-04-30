@@ -37,15 +37,15 @@ async function send() {
 
   try {
     const res = await fetch("https://ai-dental-chatbot.onrender.com/chat", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        message: msg,
-        client_key: "demo"
-      })
-    });
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    message: userInput,
+    client_key: "demo"   // 🔥 ADD THIS LINE
+  })
+})
 
     const data = await res.json();
 
