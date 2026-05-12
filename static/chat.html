@@ -105,6 +105,10 @@
       bottom: 0;
     }
 
+    .hidden {
+      display: none;
+    }
+
     input {
       flex: 1;
       padding: 12px 14px;
@@ -189,6 +193,10 @@
 
   <script>
 
+    function showServiceMenu() {
+      const serviceMenu = document.getElementById("service-menu");
+      serviceMenu.classList.toggle("hidden");
+    }
     function sendQuickMessage(message) {
       document.getElementById("input").value = message;
       sendMessage();
