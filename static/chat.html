@@ -2,25 +2,87 @@
 <html>
 <head>
   <title>AI Dental Assistant</title>
+
   <style>
     body {
       font-family: Arial, sans-serif;
       background: #0f172a;
       color: white;
-      padding: 24px;
       margin: 0;
+      padding: 0;
+      height: 100vh;
+      overflow: hidden;
     }
 
     #chat {
       max-width: 420px;
+      height: 100vh;
       margin: auto;
+      display: flex;
+      flex-direction: column;
+      background: #0f172a;
+    }
+
+    .chat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .chat-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .chat-header p {
+      margin: 2px 0 0;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+
+    .chat-header button {
+      background: transparent;
+      border: 1px solid #334155;
+      color: #cbd5e1;
+      border-radius: 999px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .quick-actions button {
+      background: #111827;
+      color: #e5e7eb;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 9px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      padding-bottom: 90px;
     }
 
     .msg {
       margin: 10px 0;
       padding: 10px 12px;
-      border-radius: 12px;
+      border-radius: 14px;
       max-width: 80%;
+      line-height: 1.35;
+      font-size: 14px;
     }
 
     .user {
@@ -33,82 +95,109 @@
       margin-right: auto;
     }
 
-    #messages {
-      min-height: 300px;
-      margin-bottom: 12px;
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      background: #0f172a;
+      border-top: 1px solid #1e293b;
+      position: sticky;
+      bottom: 0;
     }
 
     input {
-      width: 75%;
-      padding: 12px;
-      border-radius: 8px;
-      border: none;
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      background: #020617;
+      color: white;
+      outline: none;
+    }
+
+    input::placeholder {
+      color: #64748b;
     }
 
     button {
-      padding: 12px;
-      border-radius: 8px;
+      padding: 12px 14px;
+      border-radius: 999px;
       border: none;
       cursor: pointer;
     }
 
-  .chat-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 16px;
-  }
-  
-  .chat-header h2 {
-    margin: 0;
-    font-size: 20px;
-  }
-  
-  .chat-header p {
-    margin: 2px 0 0;
-    font-size: 12px;
-    color: #94a3b8;
-  }
-  
-  .chat-header button {
-    background: transparent;
-    border: 1px solid #334155;
-    color: #cbd5e1;
-    border-radius: 999px;
-    padding: 6px 10px;
-    cursor: pointer;
-  }
-  
-  .chat-input-row {
-    display: flex;
-    gap: 8px;
-  }
+    @media (max-width: 640px) {
+      #chat {
+        max-width: none;
+        width: 100%;
+        height: 100dvh;
+      }
+
+      .chat-input-row {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      }
+    }
   </style>
 </head>
+
 <body>
+
   <div id="chat">
 
-  <div class="chat-header">
-    <div>
-      <h2>Mia</h2>
-      <p>AI dental receptionist</p>
+    <div class="chat-header">
+      <div>
+        <h2>Mia</h2>
+        <p>AI dental receptionist</p>
+      </div>
+
+      <button onclick="startOver()">Start over</button>
     </div>
-    <button onclick="startOver()">Start over</button>
+
+    <div class="quick-actions">
+      <button type="button" onclick="sendQuickMessage('I need an appointment')">
+        Book appointment
+      </button>
+
+      <button type="button" onclick="sendQuickMessage('I have tooth pain')">
+        Tooth pain
+      </button>
+
+      <button type="button" onclick="sendQuickMessage('Do you take insurance?')">
+        Insurance
+      </button>
+
+      <button type="button" onclick="sendQuickMessage('What are your hours?')">
+        Hours
+      </button>
+    </div>
+
+    <div id="messages">
+      <div class="msg bot">
+        Hi, I’m Mia. How can I help today?
+      </div>
+    </div>
+
+    <div class="chat-input-row">
+      <input id="input" placeholder="Ask something..." />
+      <button onclick="sendMessage()">Send</button>
+    </div>
+
   </div>
-
-  <div id="messages"></div>
-
-  <div class="chat-input-row">
-    <input id="input" placeholder="Ask something..." />
-    <button onclick="sendMessage()">Send</button>
-  </div>
-  
-</div>
-
-
 
   <script>
+
+    function sendQuickMessage(message) {
+      document.getElementById("input").value = message;
+      sendMessage();
+    }
+
     async function sendMessage() {
+
       const input = document.getElementById("input");
       const message = input.value.trim();
 
@@ -116,21 +205,32 @@
 
       const messages = document.getElementById("messages");
 
-      messages.innerHTML += `<div class="msg user">${message}</div>`;
+      messages.innerHTML += `
+        <div class="msg user">${message}</div>
+      `;
+
+      messages.scrollTop = messages.scrollHeight;
+
       input.value = "";
 
       try {
-        const res = await fetch("https://ai-dental-chatbot.onrender.com/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            message: message,
-            client_key: "demo_clinic_key"
-          })
-        });
-  
+
+        const res = await fetch(
+          "https://ai-dental-chatbot.onrender.com/chat",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+              message: message,
+              client_key: "demo_clinic_key"
+            })
+          }
+        );
+
         const data = await res.json();
 
         const reply =
@@ -141,23 +241,48 @@
           data.bot_response ||
           JSON.stringify(data);
 
-        messages.innerHTML += `<div class="msg bot">${reply}</div>`;
+        messages.innerHTML += `
+          <div class="msg bot">${reply}</div>
+        `;
+
+        messages.scrollTop = messages.scrollHeight;
+
       } catch (err) {
+
         console.error(err);
-        messages.innerHTML += `<div class="msg bot">Error connecting</div>`;
+
+        messages.innerHTML += `
+          <div class="msg bot">
+            Error connecting
+          </div>
+        `;
+
+        messages.scrollTop = messages.scrollHeight;
       }
     }
 
     function startOver() {
-      document.getElementById("messages").innerHTML = "";
+
+      document.getElementById("messages").innerHTML = `
+        <div class="msg bot">
+          Hi, I’m Mia. How can I help today?
+        </div>
+      `;
+
       document.getElementById("input").value = "";
     }
 
-    document.getElementById("input").addEventListener("keydown", function(e) {
-      if (e.key === "Enter") {
-        sendMessage();
-      }
-    });
+    document
+      .getElementById("input")
+      .addEventListener("keydown", function(e) {
+
+        if (e.key === "Enter") {
+          sendMessage();
+        }
+
+      });
+
   </script>
+
 </body>
 </html>
