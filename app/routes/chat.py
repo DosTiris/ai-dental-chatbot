@@ -1761,6 +1761,10 @@ def extract_lead_fields_with_ai(user_text: str) -> Dict[str, Any]:
         "If you return a non-null field, its *_source_text must also be non-null and must appear verbatim in the user message."
     )
 
+            
+    print("USING CHAT_MODEL:", CHAT_MODEL)  # confirms which model Render/local is using
+    print("OPENAI KEY EXISTS:", bool(OPENAI_API_KEY))  # confirms API key is loaded without exposing it
+    
     response = ai.responses.create(
         model=EXTRACTOR_MODEL,
         input=[
@@ -3897,10 +3901,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = (response.output_text or "").strip()
         if not reply_text:
             reply_text = "Sure—what can I help with?"
+
     except Exception as e:
-        print("OPENAI ERROR:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(502, "Upstream AI service error")
+        print("OPENAI ERROR:", repr(e))  # log the real OpenAI error in Render/local console
+        traceback.print_exc()  # print full traceback for debugging
+
+        reply_text = (  # friendly message shown to the user instead of ugly JSON
+            "I’m sorry, I had trouble processing that. "
+            "I can still help you schedule an appointment. "
+            "What phone number should the office use to follow up?"
+        )  # safe fallback reply
 
     db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
     db.commit()
