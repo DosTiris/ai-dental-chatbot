@@ -157,24 +157,22 @@
 
       <button onclick="startOver()">Start over</button>
     </div>
+<div class="quick-actions">
+  <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
+  <button type="button" onclick="showServiceMenu()">Services</button>
+  <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
+  <button type="button" onclick="sendQuickMessage('What are your hours?')">Hours</button>
+  <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
+</div>
 
-    <div class="quick-actions">
-      <button type="button" onclick="sendQuickMessage('I need an appointment')">
-        Book appointment
-      </button>
-
-      <button type="button" onclick="sendQuickMessage('I have tooth pain')">
-        Tooth pain
-      </button>
-
-      <button type="button" onclick="sendQuickMessage('Do you take insurance?')">
-        Insurance
-      </button>
-
-      <button type="button" onclick="sendQuickMessage('What are your hours?')">
-        Hours
-      </button>
-    </div>
+<div id="service-menu" class="quick-actions hidden">
+  <button type="button" onclick="sendQuickMessage('I need a cleaning or checkup')">Cleaning / Checkup</button>
+  <button type="button" onclick="sendQuickMessage('I have tooth pain')">Tooth Pain</button>
+  <button type="button" onclick="sendQuickMessage('I broke a tooth or filling')">Broken Tooth / Filling</button>
+  <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
+  <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
+  <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Orthodontics</button>
+</div>
 
     <div id="messages">
       <div class="msg bot">
