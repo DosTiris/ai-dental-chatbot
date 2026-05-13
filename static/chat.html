@@ -161,7 +161,7 @@
 
       <button onclick="startOver()">Start over</button>
     </div>
-<div class="quick-actions">
+<div id="main-menu" class="quick-actions">
   <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
   <button type="button" onclick="showServiceMenu()">Services</button>
   <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
@@ -176,6 +176,7 @@
   <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
   <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
   <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Orthodontics</button>
+  <button type="button" onclick="showMainMenu()">Back</button>
 </div>
 
     <div id="messages">
@@ -193,15 +194,22 @@
 
   <script>
 
-    function showServiceMenu() {
-      const serviceMenu = document.getElementById("service-menu");
-      serviceMenu.classList.toggle("hidden");
-    }
-    function sendQuickMessage(message) {
-      document.getElementById("input").value = message;
-      sendMessage();
-    }
+function showServiceMenu() {
+  document.getElementById("main-menu").classList.add("hidden");
+  document.getElementById("service-menu").classList.remove("hidden");
+}
 
+function showMainMenu() {
+  document.getElementById("service-menu").classList.add("hidden");
+  document.getElementById("main-menu").classList.remove("hidden");
+}
+
+function sendQuickMessage(message) {
+  document.getElementById("service-menu").classList.add("hidden");
+  document.getElementById("main-menu").classList.remove("hidden");
+  document.getElementById("input").value = message;
+  sendMessage();
+}
     async function sendMessage() {
 
       const input = document.getElementById("input");
