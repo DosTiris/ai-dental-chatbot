@@ -313,7 +313,25 @@ function sendQuickMessage(message) {
     const typing = document.getElementById("typingIndicator");
     if (typing) typing.remove();
   }
-    
+    // ADD THIS RIGHT HERE
+  window.addEventListener("load", () => {
+
+    setTimeout(() => {
+
+      const messages = document.getElementById("messages");
+
+      messages.innerHTML += `
+        <div class="msg bot">
+          Hi 👋 I’m Mia, your AI dental receptionist.
+          How can I help today?
+        </div>
+      `;
+
+      messages.scrollTop = messages.scrollHeight;
+
+    }, 800);
+
+  });
   
   async function sendMessage() {
 
