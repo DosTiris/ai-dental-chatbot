@@ -278,21 +278,44 @@ function sendQuickMessage(message) {
   sendMessage();
 }
 
-  // Consent popup
+  // Consent popup UNBLOCK AFTER PASSING TWILIO
   const consentModal = document.getElementById("consentModal");
   const agreeBtn = document.getElementById("agreeBtn");
-
-  const consentAccepted = localStorage.getItem("chat_consent_accepted");
-
-  if (consentAccepted === "1") {
-    consentModal.style.display = "none";
-  }
-
   agreeBtn.addEventListener("click", () => {
-    localStorage.setItem("chat_consent_accepted", "1");
-    consentModal.style.display = "none";
-  });
-    async function sendMessage() {
+  consentModal.style.display = "none";
+});
+  //const consentAccepted = localStorage.getItem("chat_consent_accepted");
+
+  //if (consentAccepted === "1") {
+    //consentModal.style.display = "none";
+  //}
+
+  //agreeBtn.addEventListener("click", () => {
+    //localStorage.setItem("chat_consent_accepted", "1");
+    //consentModal.style.display = "none";
+  //});
+
+  // Consent popup UNBLOCK AFTER PASSING TWILIO END OF COMMENTS
+    
+  function showTyping() {
+  const messages = document.getElementById("messages");
+
+  if (document.getElementById("typingIndicator")) return;
+
+  messages.innerHTML += `
+    <div id="typingIndicator" class="msg bot">
+      Mia is typing...
+    </div>
+  `;
+}
+
+  function hideTyping() {
+    const typing = document.getElementById("typingIndicator");
+    if (typing) typing.remove();
+  }
+    
+  
+  async function sendMessage() {
 
       const input = document.getElementById("input");
       const message = input.value.trim();
@@ -308,6 +331,7 @@ function sendQuickMessage(message) {
       messages.scrollTop = messages.scrollHeight;
 
       input.value = "";
+      showTyping();
 
       try {
 
@@ -337,6 +361,8 @@ function sendQuickMessage(message) {
           data.bot_response ||
           JSON.stringify(data);
 
+        hideTyping();
+        
         messages.innerHTML += `
           <div class="msg bot">${reply}</div>
         `;
@@ -346,6 +372,8 @@ function sendQuickMessage(message) {
       } catch (err) {
 
         console.error(err);
+
+        hideTyping();
 
         messages.innerHTML += `
           <div class="msg bot">
