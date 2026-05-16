@@ -313,17 +313,18 @@ function sendQuickMessage(message) {
     const typing = document.getElementById("typingIndicator");
     if (typing) typing.remove();
   }
-    // ADD THIS RIGHT HERE
+
   window.addEventListener("load", () => {
 
     setTimeout(() => {
 
       const messages = document.getElementById("messages");
 
+      if (messages.children.length > 0) return;
+
       messages.innerHTML += `
         <div class="msg bot">
-          Hi 👋 I’m Mia, your AI dental receptionist.
-          How can I help today?
+          Hi 👋 I’m Mia, your AI dental receptionist. How can I help today?
         </div>
       `;
 
