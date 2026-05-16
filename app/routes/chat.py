@@ -667,7 +667,22 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
         return "cleaning/checkup"
     if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling"]):
         return "tooth pain"
-    if any(k in t for k in ["broken", "cracked", "chipped", "fell out", "lost filling"]):
+    if any(k in t for k in [
+    "broken",
+    "broke",
+    "broke a tooth",
+    "broke tooth",
+    "broken tooth",
+    "cracked",
+    "cracked tooth",
+    "chipped",
+    "chipped tooth",
+    "fell out",
+    "filling fell out",
+    "lost filling",
+    "broke a filling",
+    "broke filling",
+    "broken filling",]): 
         return "broken tooth/filling"
     if any(k in t for k in ["crown", "crowns", "cap", "caps"]):
         return "crown"
@@ -766,6 +781,16 @@ def detect_service_selection(user_text: str) -> Optional[str]:
         "fillings": "broken tooth/filling",
         "cavity": "broken tooth/filling",
         "cavities": "broken tooth/filling",
+        "broken tooth": "broken tooth/filling",
+        "broke tooth": "broken tooth/filling",
+        "broke a tooth": "broken tooth/filling",
+        "broken filling": "broken tooth/filling",
+        "broke filling": "broken tooth/filling",
+        "broke a filling": "broken tooth/filling",
+        "lost filling": "broken tooth/filling",
+        "filling fell out": "broken tooth/filling",
+        "chipped tooth": "broken tooth/filling",
+        "cracked tooth": "broken tooth/filling",
         "crown": "crown",
         "crowns": "crown",
         "cap": "crown",
