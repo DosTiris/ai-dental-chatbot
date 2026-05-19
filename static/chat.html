@@ -106,9 +106,6 @@
     }
 
     .nudge {
-      position: fixed;
-      right: 18px;
-      bottom: 78px;
       background: white;
       color: #111827;
       border-radius: 14px;
@@ -117,11 +114,20 @@
       max-width: 230px;
       box-shadow: 0 12px 30px rgba(0,0,0,0.25);
       cursor: pointer;
+
       opacity: 0;
-      transform: translateY(8px);
+      transform: translateY(10px);
+
       pointer-events: none;
-      transition: opacity 220ms ease, transform 220ms ease;
-      z-index: 9999;
+
+      transition:
+        opacity 220ms ease,
+        transform 220ms ease;
+
+      margin: 12px 16px 0 auto;
+
+      position: relative;
+      z-index: 5;
     }
 
     .nudge.visible {
@@ -176,9 +182,13 @@
 
 <body>
 
-<div id="nudge" class="nudge">
-  Need help booking? Tap here to chat.
-</div>
+<div id="chat">
+
+  <div id="nudge" class="nudge">
+    Need help booking? Tap here to chat.
+  </div>
+
+  <div class="chat-header">
 
   <!-- Consent Modal -->
 <div id="consentModal" style="
@@ -354,6 +364,8 @@ function sendQuickMessage(message) {
 
       if (!message) return;
 
+      nudgeEl.classList.remove("visible");
+
       const messages = document.getElementById("messages");
 
       messages.innerHTML += `
@@ -431,10 +443,22 @@ function sendQuickMessage(message) {
     const nudgeEl = document.getElementById("nudge");
 
     window.addEventListener("load", () => {
+
+      const messages = document.getElementById("messages");
+
       setTimeout(() => {
+
         if (!nudgeEl) return;
-        nudgeEl.classList.add("visible");
+
+        const messageCount =
+          messages.querySelectorAll(".msg").length;
+
+        if (messageCount <= 1) {
+          nudgeEl.classList.add("visible");
+        }
+
       }, 4500);
+
     });
 
     if (nudgeEl) {
