@@ -1,133 +1,66 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>AI Dental Assistant</title>
+  <meta charset="utf-8" />
+  <!-- ✅ Mobile critical -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+  <title>Dental Chat</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
+    body { font-family: Arial, sans-serif; }
+
+    /* ---- Bottom-right widget placement ---- */
+    .widget-shell{
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 9999;
+      width: 380px;
+      max-width: calc(100vw - 36px);
+      /* ✅ iPhone safe area (prevents being too close to the home bar) */
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-right: env(safe-area-inset-right);
+    }
+
+    /* Collapsed launcher button */
+    .launcher {
+      width: 56px;
+      height: 56px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      background: #2b6cb0;
       color: white;
-      margin: 0;
-      padding: 0;
-      height: 100vh;
-      overflow: hidden;
-    }
-
-    #chat {
-      max-width: 420px;
-      height: 100vh;
-      margin: auto;
+      font-size: 22px;
+      box-shadow: 0 8px 28px rgba(0,0,0,0.22);
       display: flex;
-      flex-direction: column;
-      background: #0f172a;
-    }
-
-    .chat-header {
-      display: flex;
-      justify-content: space-between;
       align-items: center;
-      padding: 16px 16px 12px;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .chat-header h2 {
-      margin: 0;
-      font-size: 20px;
-    }
-
-    .chat-header p {
-      margin: 2px 0 0;
-      font-size: 12px;
-      color: #94a3b8;
-    }
-
-    .chat-header button {
-      background: transparent;
-      border: 1px solid #334155;
-      color: #cbd5e1;
-      border-radius: 999px;
-      padding: 6px 10px;
-      cursor: pointer;
-    }
-
-    .quick-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 12px 16px;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .quick-actions button {
-      background: #111827;
-      color: #e5e7eb;
-      border: 1px solid #334155;
-      border-radius: 999px;
-      padding: 9px 12px;
-      font-size: 13px;
-      cursor: pointer;
-    }
-
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-      padding-bottom: 90px;
-    }
-
-    .msg {
-      margin: 10px 0;
-      padding: 10px 12px;
-      border-radius: 14px;
-      max-width: 80%;
-      line-height: 1.35;
-      font-size: 14px;
-    }
-
-    .user {
-      background: #2563eb;
+      justify-content: center;
       margin-left: auto;
+      -webkit-tap-highlight-color: transparent;
     }
 
-    .bot {
-      background: #374151;
-      margin-right: auto;
-    }
-
-    .chat-input-row {
-      display: flex;
-      gap: 8px;
-      padding: 12px;
-      background: #0f172a;
-      border-top: 1px solid #1e293b;
-      position: sticky;
-      bottom: 0;
-    }
-
+    /* --- Nudge bubble (polished) --- */
     .nudge {
+      position: absolute;
+      right: 70px;               /* sits to the left of the launcher */
+      bottom: 8px;
+      max-width: 260px;
       background: white;
-      color: #111827;
-      border-radius: 14px;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
       padding: 10px 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.15);
       font-size: 13px;
-      max-width: 230px;
-      box-shadow: 0 12px 30px rgba(0,0,0,0.25);
+      color: #111827;
       cursor: pointer;
+      user-select: none;
 
       opacity: 0;
-      transform: translateY(10px);
+      transform: translateY(8px);
+      pointer-events: none;      /* off until visible */
 
-      pointer-events: none;
-
-      transition:
-        opacity 220ms ease,
-        transform 220ms ease;
-
-      margin: 12px 16px 0 auto;
-
-      position: relative;
-      z-index: 5;
+      transition: opacity 220ms ease, transform 220ms ease;
     }
 
     .nudge.visible {
@@ -136,59 +69,299 @@
       pointer-events: auto;
     }
 
-    .hidden {
-      display: none;
+    /* tiny arrow pointing to launcher */
+    .nudge::after {
+      content: "";
+      position: absolute;
+      right: -8px;
+      bottom: 14px;
+      width: 14px;
+      height: 14px;
+      background: white;
+      border-right: 1px solid #e5e7eb;
+      border-bottom: 1px solid #e5e7eb;
+      transform: rotate(-45deg);
     }
 
-    input {
-      flex: 1;
+    /* gentle pulse (once) */
+    @keyframes nudgePulse {
+      0%   { transform: translateY(0) scale(1); }
+      50%  { transform: translateY(0) scale(1.03); }
+      100% { transform: translateY(0) scale(1); }
+    }
+
+    .nudge.pulse {
+      animation: nudgePulse 600ms ease-in-out 1;
+    }
+
+    /* optional: smaller on phones */
+    @media (max-width: 420px) {
+      .nudge {
+        right: 62px;
+        max-width: 220px;
+        font-size: 12px;
+      }
+    }
+
+
+    /* Chat widget */
+    .widget {
+      width: 380px;
+      max-width: calc(100vw - 36px);
+      border: 1px solid #ccc;
+      border-radius: 12px;
+      overflow: hidden;
+      background: white;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.20);
+
+      /* ✅ Mobile-friendly layout: let chatbox grow/shrink */
+      display: flex;
+      flex-direction: column;
+
+      /* ✅ Nice on phones: limit height so it never runs off-screen */
+      height: 540px;
+      max-height: calc(100vh - 36px - env(safe-area-inset-bottom));
+    }
+
+    .header {
       padding: 12px 14px;
-      border-radius: 999px;
-      border: 1px solid #334155;
-      background: #020617;
-      color: white;
-      outline: none;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-weight: bold;
+      flex: 0 0 auto; /* ✅ prevent shrinking */
     }
 
-    input::placeholder {
-      color: #64748b;
+    .header .sub {
+      font-weight: normal;
+      font-size: 12px;
+      color: #666;
+      margin-top: 2px;
     }
 
-    button {
-      padding: 12px 14px;
-      border-radius: 999px;
-      border: none;
+    .header-left {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header button {
+      border: 1px solid #ddd;
+      background: white;
+      border-radius: 8px;
+      padding: 8px 10px;
       cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .header button:hover { background: #f2f2f2; }
+
+    /* ✅ Chat area now flexes instead of fixed height */
+    #chatbox {
+      flex: 1 1 auto;
+      min-height: 0;          /* ✅ important for overflow scrolling inside flex */
+      overflow: auto;
+      padding: 12px;
+      background: #fafafa;
+      -webkit-overflow-scrolling: touch; /* ✅ smooth iOS scrolling */
     }
 
-    @media (max-width: 640px) {
-      #chat {
-        max-width: none;
-        width: 100%;
-        height: 100dvh;
-      }
+    .msg { margin: 10px 0; line-height: 1.35; }
+    .msg .row {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+    }
 
-      .chat-input-row {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 50;
-        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    .role {
+      width: 85px;
+      font-weight: bold;
+      flex: 0 0 auto;
+    }
+
+    .bubble {
+      flex: 1;
+      background: white;
+      border: 1px solid #eee;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    .you .bubble {
+      background: #eaf2ff;
+      border-color: #dbe8ff;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #ddd;
+      background: #fff7da;
+    }
+
+    /* Quick actions inside chat */
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .quick-actions button {
+      border: 1px solid #ddd;
+      background: white;
+      border-radius: 999px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .quick-actions button:hover { background: #f2f2f2; }
+
+    /* Input row */
+    .input-row {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      border-top: 1px solid #eee;
+      background: white;
+      align-items: center;
+      flex: 0 0 auto; /* ✅ prevent shrinking */
+    }
+
+    #msg {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      outline: none;
+
+      /* ✅ prevents iOS zoom on focus */
+      font-size: 16px;
+    }
+
+    .btn {
+      padding: 10px 12px;
+      border: 1px solid #ccc;
+      background: white;
+      border-radius: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+
+      /* ✅ better tap target */
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn:hover { background: #f2f2f2; }
+
+    .btn-primary {
+      border-color: #2b6cb0;
+      background: #2b6cb0;
+      color: white;
+    }
+    .btn-primary:hover { filter: brightness(0.95); }
+
+    .hint {
+      font-size: 12px;
+      color: #666;
+      padding: 8px 12px 0;
+    }
+
+   /* Small hint under assistant reply */
+    .hint-wrap .row {
+      align-items: flex-start;
+    }
+
+    .hint-bubble {
+      background: transparent;
+      border: none;
+      padding: 6px 10px 0 10px;
+      margin-left: 52px; /* aligns under assistant bubble; tweak if needed */
+      color: #6b7280;    /* slate/gray */
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .hint-bubble small {
+      display: block;
+    }
+
+
+/* =========================
+   CTA ROWS (Booking / Call)
+   ========================= */
+
+.msg.cta-wrap .row {
+  align-items: flex-start;
+}
+
+.bubble.cta-bubble {
+  background: transparent !important;
+  border: none !important;
+  padding: 10px 0 0 95px !important; /* aligns under assistant bubble */
+}
+
+@media (max-width: 420px) {
+  .bubble.cta-bubble {
+    padding-left: 70px !important; /* aligns under smaller role width */
+  }
+}
+
+/* Call button emphasis (emergency) */
+.call-btn.pulse {
+  animation: pulseGlow 1.1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-btn.pulse { animation: none !important; }
+}
+
+@keyframes pulseGlow {
+  0%   { transform: scale(1); filter: brightness(1); }
+  50%  { transform: scale(1.04); filter: brightness(1.15); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+.cta-subtext {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.35;
+}
+
+    /* Links */
+    a.linkish {
+      color: #2b6cb0;
+      text-decoration: none;
+      border-bottom: 1px dotted #2b6cb0;
+    }
+    a.linkish:hover { text-decoration: underline; }
+
+    /* hidden state */
+    .hidden { display: none; }
+
+    /* ✅ Mobile layout tweaks */
+    @media (max-width: 420px) {
+      .widget-shell{
+        right: 10px;
+        left: 10px;    /* ✅ take most of the screen width */
+        width: auto;
+        bottom: 10px;
       }
+      .widget{
+        width: auto;
+        max-width: none;
+        height: 70vh;  /* ✅ good phone height */
+      }
+      .role { width: 70px; } /* ✅ tighter */
     }
   </style>
 </head>
 
 <body>
-
-<div id="chat">
-
-  <div id="nudge" class="nudge">
-    Need help booking? Tap here to chat.
-  </div>
-
-  <div class="chat-header">
 
   <!-- Consent Modal -->
 <div id="consentModal" style="
@@ -225,8 +398,8 @@
       line-height:1.6;
       color:#374151;
     ">
-      By using this chatbot and submitting your phone number,
-      you agree to receive SMS messages from Dos Tiris LLC
+      By clicking I Agree, using this chatbot, and submitting your phone number,
+      you consent to receive SMS communications from Dos Tiris LLC
       regarding your inquiry or appointment request.
     </p>
 
@@ -257,228 +430,678 @@
   </div>
 </div>
 
-  <div id="chat">
-
-    <div class="chat-header">
-      <div>
-        <h2>Mia</h2>
-        <p>AI dental receptionist</p>
-      </div>
-
-      <button onclick="startOver()">Start over</button>
+  <div class="widget-shell">
+    <!-- Nudge bubble -->
+    <div id="nudge" class="nudge hidden">
+      Need help booking? Tap here to chat.
     </div>
-<div id="main-menu" class="quick-actions">
-  <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
-  <button type="button" onclick="showServiceMenu()">Services</button>
-  <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
-  <button type="button" onclick="sendQuickMessage('What are your hours?')">Hours</button>
-  <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
-</div>
 
-<div id="service-menu" class="quick-actions hidden">
-  <button type="button" onclick="sendQuickMessage('I need a cleaning or checkup')">Cleaning / Checkup</button>
-  <button type="button" onclick="sendQuickMessage('I have tooth pain')">Tooth Pain</button>
-  <button type="button" onclick="sendQuickMessage('I broke a tooth or filling')">Broken Tooth / Filling</button>
-  <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
-  <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
-  <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Orthodontics</button>
-  <button type="button" onclick="showMainMenu()">Back</button>
-</div>
+    <!-- launcher shown when widget is closed -->
+    <button id="launcher" class="launcher" title="Open chat">💬</button>
 
-    <div id="messages">
-      <div class="msg bot">
-        Hi, I’m Mia. How can I help today?
+
+  <!-- widget shown when open -->
+  <div id="widget" class="widget hidden">
+    <div class="header">
+      <div class="header-left">
+        <div>Mia</div>
+        <div class="sub">AI Dental Receptionist</div>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button id="minBtn" type="button" title="Minimize">—</button>
+        <button id="clearBtn" type="button" title="Start over" style="display:none;">Start Over</button>
       </div>
     </div>
 
-    <div class="chat-input-row">
-      <input id="input" placeholder="Ask something..." />
-      <button onclick="sendMessage()">Send</button>
-    </div>
+    <div id="chatbox"></div>
 
+    <form id="chatForm" class="input-row">
+      <input id="msg" placeholder="Type message..." autocomplete="off" />
+      <button id="sendBtn" class="btn btn-primary" type="submit">Send</button>
+    </form>
   </div>
+</div>
 
-  <script>
+<script>
+  const API_URL = "https://ai-dental-chatbot.onrender.com/chat";
+  const CLIENT_KEY = "demo_clinic_key";
 
-function showServiceMenu() {
-  document.getElementById("main-menu").classList.add("hidden");
-  document.getElementById("service-menu").classList.remove("hidden");
-}
+  // ---- Persisted session state ----
+  let conversationId = localStorage.getItem("conversation_id") || null;
+  let isSending = false; // comment
 
-function showMainMenu() {
-  document.getElementById("service-menu").classList.add("hidden");
-  document.getElementById("main-menu").classList.remove("hidden");
-}
+   // ✅ Step 1: submenu state (front-end only)
+  let menuState = { view: "main" }; // "main" | "services"
 
-function sendQuickMessage(message) {
-  document.getElementById("service-menu").classList.add("hidden");
-  document.getElementById("main-menu").classList.remove("hidden");
-  document.getElementById("input").value = message;
-  sendMessage();
-}
 
-  // Consent popup UNBLOCK AFTER PASSING TWILIO
-  const consentModal = document.getElementById("consentModal");
-  const agreeBtn = document.getElementById("agreeBtn");
-  agreeBtn.addEventListener("click", () => {
-  consentModal.style.display = "none";
-});
-  //const consentAccepted = localStorage.getItem("chat_consent_accepted");
 
-  //if (consentAccepted === "1") {
-    //consentModal.style.display = "none";
-  //}
 
-  //agreeBtn.addEventListener("click", () => {
-    //localStorage.setItem("chat_consent_accepted", "1");
-    //consentModal.style.display = "none";
-  //});
+  // ✅ Step 1: default services (Step 2 will make this per-client)
+  const DEFAULT_SERVICES = [
+    { label: "Cleaning / Checkup", msg: "I need a cleaning or checkup" },
+    { label: "Tooth Pain", msg: "I have tooth pain" },
+    { label: "Broken Tooth / Filling", msg: "I broke a tooth or filling" },
+    { label: "Implants / Extraction", msg: "I am interested in implants or an extraction" },
+    { label: "Cosmetic / Whitening", msg: "I want whitening or cosmetic treatment" },
+    { label: "Orthodontics", msg: "I am interested in braces or Invisalign" },
+  ];
 
-  // Consent popup UNBLOCK AFTER PASSING TWILIO END OF COMMENTS
-    
-  function showTyping() {
-    const messages = document.getElementById("messages");
 
-    if (document.getElementById("typingIndicator")) return;
+  if (!localStorage.getItem("visitor_id")) {
+    localStorage.setItem("visitor_id", crypto.randomUUID());
+  }
+  const visitorId = localStorage.getItem("visitor_id");
 
-    messages.innerHTML += `
-      <div id="typingIndicator" class="msg bot">
-        <em>Typing…</em>
+  // ---- Persisted UI transcript ----
+  const TRANSCRIPT_KEY = "chat_transcript_v1";
+
+
+
+  function loadTranscript() {
+    try {
+      const raw = localStorage.getItem(TRANSCRIPT_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveTranscript(arr) {
+    localStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(arr));
+  }
+
+  function resetTranscript() {
+    localStorage.removeItem(TRANSCRIPT_KEY);
+  }
+
+  
+
+  // ---- HTML safety ----
+  function escapeHtml(str) {
+    return (str || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  // ---- Linkify phone + email inside assistant messages ----
+  function linkify(text) {
+    let t = escapeHtml(text);
+
+    // email
+    t = t.replace(
+      /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g,
+      `<a class="linkish" href="mailto:$1">$1</a>`
+    );
+
+    // phone (simple US-ish)
+    t = t.replace(
+      /(\+?1?\s?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/g,
+      (m) => {
+        const digits = m.replace(/\D/g, "");
+        const tel = digits.length === 11 && digits.startsWith("1") ? digits : digits;
+        return `<a class="linkish" href="tel:${tel}">${m}</a>`;
+      }
+    );
+
+    // bare URLs
+    t = t.replace(
+      /(https?:\/\/[^\s<]+)/g,
+      `<a class="linkish" href="$1" target="_blank" rel="noopener noreferrer">$1</a>`
+    );
+
+    return t;
+  }
+
+  // ---- Render message bubble ----
+ 
+  function renderMessage(role, text, meta = null) {
+    const box = document.getElementById("chatbox");
+
+    const isYou = role === "You";
+    const cls = isYou ? "msg you" : "msg";
+
+    const bodyHtml = (role === "Assistant")
+      ? linkify(text)
+      : escapeHtml(text);
+
+    const DEBUG_BADGES = false;
+    const faqBadge = (DEBUG_BADGES && meta?.faq_match === true)
+    ? `<div class="badge">FAQ match</div>`
+    : "";
+
+  
+    const html = `
+      <div class="${cls}">
+        <div class="row">
+          <div class="role">${escapeHtml(role)}:</div>
+          <div class="bubble">
+            <div>${bodyHtml}</div>
+            ${faqBadge}
+          </div>
+        </div>
       </div>
     `;
 
-    messages.scrollTop = messages.scrollHeight;
+    box.insertAdjacentHTML("beforeend", html);
+    box.scrollTop = box.scrollHeight;
   }
 
-  function hideTyping() {
-    const typing = document.getElementById("typingIndicator");
-    if (typing) typing.remove();
+  function showTyping() {
+  const box = document.getElementById("chatbox");
+  if (box.querySelector("#typing-indicator")) return;
+
+  const html = `
+    <div class="msg" id="typing-indicator">
+      <div class="row">
+        <div class="role">Assistant:</div>
+        <div class="bubble"><em>Typing…</em></div>
+      </div>
+    </div>
+  `;
+  box.insertAdjacentHTML("beforeend", html);
+  box.scrollTop = box.scrollHeight;
+}
+
+
+function hideTyping() {
+  const el = document.getElementById("typing-indicator");
+  if (el) el.remove();
+}
+
+function renderSmallHint(text) {
+  const box = document.getElementById("chatbox");
+  const html = `
+    <div class="msg hint-wrap">
+      <div class="row">
+        <div class="role"></div>
+        <div class="bubble hint-bubble">
+          <small>${escapeHtml(text)}</small>
+        </div>
+      </div>
+    </div>
+  `;
+  box.insertAdjacentHTML("beforeend", html);
+  box.scrollTop = box.scrollHeight;
+}
+
+  function appendToTranscript(role, text, meta = null) {
+    const transcript = loadTranscript();
+    transcript.push({ role, text, meta: meta || null });
+    saveTranscript(transcript);
   }
 
-  
-  
-  async function sendMessage() {
+  function replayTranscript() {
+    const box = document.getElementById("chatbox");
+    box.innerHTML = "";
 
-      const input = document.getElementById("input");
-      const message = input.value.trim();
+    const transcript = loadTranscript();
+    for (const item of transcript) {
+      renderMessage(item.role, item.text, item.meta || null);
+    }
 
-      if (!message) return;
-
-      nudgeEl.classList.remove("visible");
-
-      const messages = document.getElementById("messages");
-
-      messages.innerHTML += `
-        <div class="msg user">${message}</div>
-      `;
-
-      messages.scrollTop = messages.scrollHeight;
-
-      input.value = "";
-      showTyping();
-
-      try {
-
-        const res = await fetch(
-          "https://ai-dental-chatbot.onrender.com/chat",
-          {
-            method: "POST",
-
-            headers: {
-              "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-              message: message,
-              client_key: "demo_clinic_key"
-            })
-          }
-        );
-
-        const data = await res.json();
-
-        const reply =
-          data.response ||
-          data.reply ||
-          data.answer ||
-          data.message ||
-          data.bot_response ||
-          JSON.stringify(data);
-
-        hideTyping();
-        
-        messages.innerHTML += `
-          <div class="msg bot">${reply}</div>
-        `;
-
-        messages.scrollTop = messages.scrollHeight;
-
-      } catch (err) {
-
-        console.error(err);
-
-        hideTyping();
-
-        messages.innerHTML += `
-          <div class="msg bot">
-            Error connecting
-          </div>
-        `;
-
-        messages.scrollTop = messages.scrollHeight;
+    // Restore CTA from the last assistant message that had meta
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      const item = transcript[i];
+      if (item.role === "Assistant" && item.meta) {
+        renderCTAs(item.meta);
+        break;
       }
     }
 
-    function startOver() {
+    // ✅ Keep UI locked if transcript shows a lock response
+    const last = transcript[transcript.length - 1];
+    const lastMeta = last?.meta || null;
+    if (lastMeta?.locked || lastMeta?.mode === "one_strike_locked") {
+      disableChatInput(true);
+      hideQuickActions();
+    }
 
-      document.getElementById("messages").innerHTML = `
-        <div class="msg bot">
-          Hi, I’m Mia. How can I help today?
+    const hasUserMessage = transcript.some(it => it.role === "You");
+    if (!hasUserMessage) {
+      // caller decides whether to show greeting
+    }
+}
+function hideQuickActions() {
+  const box = document.getElementById("chatbox");
+  const existing = box.querySelector(".quick-actions-wrap");
+  if (existing) existing.remove();
+}
+
+function disableChatInput(disabled) {
+  const input = document.getElementById("msg");
+  const btn = document.getElementById("sendBtn"); // whatever your send button id is
+  if (input) input.disabled = disabled;
+  if (btn) btn.disabled = disabled;
+}
+// ✅ Ensure input starts enabled (in case a prior session locked it)
+disableChatInput(false);
+
+
+  function renderQuickActions(opts = {}) {
+  const showGreeting = !!opts.showGreeting;
+    const box = document.getElementById("chatbox");
+
+    // Clear any existing quick-actions block before re-adding
+    const existing = box.querySelector(".quick-actions-wrap");
+    if (existing) existing.remove();
+
+    let contentHtml = "";
+
+    if (menuState.view === "main") {
+      contentHtml = `
+        <div class="quick-actions">
+          <button type="button" data-action="book" data-msg="I need an appointment">Book Appointment</button>
+          <button type="button" data-action="services_menu">Services</button>
+          <button type="button" data-action="insurance" data-msg="Do you take insurance?">Insurance</button>
+          <button type="button" data-action="hours" data-msg="What are your hours?">Hours</button>
+          <button type="button" data-action="location" data-msg="Where are you located?">Location</button>
         </div>
       `;
-
-      document.getElementById("input").value = "";
     }
 
-    const nudgeEl = document.getElementById("nudge");
+    if (menuState.view === "services") {
+      const serviceBtns = DEFAULT_SERVICES.map(s =>
+        `<button type="button" data-action="service_pick" data-msg="${escapeHtml(s.msg)}">${escapeHtml(s.label)}</button>`
+      ).join("");
 
-    window.addEventListener("load", () => {
-
-      const messages = document.getElementById("messages");
-
-      setTimeout(() => {
-
-        if (!nudgeEl) return;
-
-        const messageCount =
-          messages.querySelectorAll(".msg").length;
-
-        if (messageCount <= 1) {
-          nudgeEl.classList.add("visible");
-        }
-
-      }, 4500);
-
-    });
-
-    if (nudgeEl) {
-      nudgeEl.addEventListener("click", () => {
-        nudgeEl.classList.remove("visible");
-        document.getElementById("input").focus();
-      });
+      contentHtml = `
+        <div style="margin-top:8px; font-size:13px; color:#555;">
+          Select a service so I can capture the reason for your visit:
+        </div>
+        <div class="quick-actions" style="margin-top:10px;">
+          ${serviceBtns}
+          <button type="button" data-action="back_main">← Back</button>
+        </div>
+      `;
     }
 
-    document
-      .getElementById("input")
-      .addEventListener("keydown", function(e) {
+const headerText = showGreeting
+  ? "Hi, I’m Mia. How can I help today?"
+  : "How can I help you today?";
 
-        if (e.key === "Enter") {
-          sendMessage();
-        }
 
+const html = `
+  <div class="msg quick-actions-wrap">
+    <div class="row">
+      <div class="role">Assistant:</div>
+      <div class="bubble">
+        <div>${headerText}</div>
+        ${contentHtml}
+      </div>
+    </div>
+  </div>
+`;
+
+    box.insertAdjacentHTML("beforeend", html);
+    box.scrollTop = box.scrollHeight;
+
+    // ✅ One delegated handler (prevents double sending)
+  const wrap = box.querySelector(".quick-actions-wrap");
+  wrap.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+
+    const action = btn.getAttribute("data-action");
+
+    if (action === "services_menu") {
+      menuState.view = "services";
+      renderQuickActions();   // ✅ better than replayTranscript here
+      return;
+    }
+
+    if (action === "back_main") {
+      menuState.view = "main";
+      renderQuickActions();
+      return;
+    }
+
+    const msg = btn.getAttribute("data-msg");
+    if (msg) sendMessage(msg);
+  });
+}
+
+function renderCTAs(meta) {
+  const box = document.getElementById("chatbox");
+  if (!box) return;
+
+  // remove old CTA rows so they don't duplicate
+  box.querySelector(".booking-btn-wrap")?.remove();
+  box.querySelector(".call-btn-wrap")?.remove();
+
+  if (!meta) return;
+
+  const emergencyMode = !!meta.emergency_mode;
+
+  // -------------------------
+  // BOOKING BUTTON
+  // -------------------------
+  const shouldShowBooking =
+    !!meta.show_booking_button &&
+    !meta.hide_booking_button &&
+    !emergencyMode;
+
+  if (shouldShowBooking) {
+    const bookingType = meta.booking_type || "consultation";
+    const reason = meta.booking_service_reason || "appointment request";
+
+    const wrap = document.createElement("div");
+    wrap.className = "msg cta-wrap booking-btn-wrap";
+    wrap.innerHTML = `
+      <div class="row">
+        <div class="role"></div>
+        <div class="bubble cta-bubble">
+          <button type="button" class="btn btn-primary">
+            ${escapeHtml(meta.booking_cta_label || "Book")}
+          </button>
+        </div>
+      </div>
+    `;
+
+    box.appendChild(wrap);
+
+wrap.querySelector("button").onclick = (e) => {
+  e.currentTarget.disabled = true;
+
+  if (meta.booking_url) {
+    const target = meta.open_booking_in_new_tab ? "_blank" : "_self";
+    window.open(meta.booking_url, target, "noopener");
+    return;
+  }
+
+  const reasonMap = {
+    "extraction/implant": "implants",
+    "orthodontics": "braces or Invisalign",
+    "crown": "a crown",
+    "cosmetic/whitening": "teeth whitening",
+    "broken tooth/filling": "a filling",
+    "cleaning/checkup": "a cleaning",
+    "appointment request": "an appointment",
+  };
+
+  const humanReason = reasonMap[reason] || "an appointment";
+
+  const forced =
+    bookingType === "appointment"
+      ? `I want to book an appointment for ${humanReason}`
+      : `I want to schedule a consultation for ${humanReason}`;
+
+  sendMessage(forced);
+};
+  }
+
+  // -------------------------
+  // CALL BUTTON
+  // -------------------------
+  const shouldShowCall = !!meta.show_call_button && !!meta.call_phone;
+
+  if (shouldShowCall) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg cta-wrap call-btn-wrap";
+    wrap.innerHTML = `
+      <div class="row">
+        <div class="role"></div>
+        <div class="bubble cta-bubble">
+          <a
+            class="btn btn-danger call-btn ${emergencyMode ? "pulse" : ""}"
+            href="tel:${escapeHtml(meta.call_phone)}"
+          >
+            ${escapeHtml(meta.call_cta_label || "Call Now")}
+          </a>
+          ${emergencyMode ? `<div class="cta-subtext">For urgent issues, please call now.</div>` : ``}
+        </div>
+      </div>
+    `;
+
+    box.appendChild(wrap);
+  }
+
+  box.scrollTop = box.scrollHeight;
+}
+  
+
+  // ---- Send message ----
+  
+async function sendMessage(forcedText = null) { // comment
+  const input = document.getElementById("msg"); // comment
+  const message = (forcedText ?? input.value).trim(); // comment
+  if (!message) return; // comment
+  if (isSending) return; // comment
+  isSending = true; // comment
+
+  const typingStartedAt = Date.now();
+
+  try { // comment
+    if (!forcedText) input.value = ""; // comment
+
+    renderMessage("You", message);  // comment
+    appendToTranscript("You", message);  // comment
+
+    const typingStartedAt = Date.now();
+    showTyping();
+
+  const payload = {  // comment
+    client_key: CLIENT_KEY,  // comment
+    visitor_id: visitorId,  // comment
+    conversation_id: conversationId,  // comment
+    message: message,  // comment
+};  // comment
+
+
+
+const res = await fetch(API_URL, {  // comment
+  method: "POST",  // comment
+  headers: { "Content-Type": "application/json" },  // comment
+  body: JSON.stringify(payload),  // comment
+});  // comment
+
+if (!res.ok) {
+  console.error("Backend error:", await res.text());
+
+  const friendly =
+    "I’m sorry, I had trouble processing that. I can still help you schedule an appointment.";
+
+  renderMessage("Assistant", friendly);
+  appendToTranscript("Assistant", friendly);
+
+  return;
+}
+
+const data = await res.json();  // comment
+console.log("[CHAT_RESPONSE]", data);
+
+if (data.conversation_id && data.conversation_id !== conversationId) {  // comment
+  conversationId = data.conversation_id;  // comment
+  localStorage.setItem("conversation_id", conversationId);  // comment
+}  // comment
+
+const reply = data.reply || "(no reply)";
+const meta = data.meta || null;
+
+const clearBtn = document.getElementById("clearBtn");
+
+if (meta?.show_start_over === false) {
+  clearBtn.style.display = "none";
+} else {
+  clearBtn.style.display = "inline-block";
+}
+
+renderMessage("Assistant", reply, meta);
+appendToTranscript("Assistant", reply, meta);
+renderCTAs(meta);
+
+// hours hint
+if (meta?.hours_hint) renderSmallHint(meta.hours_hint);
+
+// lock UI control (MUST come before show_menu)
+if (meta?.locked || meta?.mode === "one_strike_locked") {
+  menuState.view = "none";
+  disableChatInput(true);
+  hideQuickActions();
+  return;
+}
+
+// show menu if allowed
+if (meta?.show_menu) {
+  menuState.view = meta.menu_view || "main";
+  renderQuickActions();
+}
+
+
+
+
+} catch (e) {
+  console.error("sendMessage error:", e);
+  const errMsg = `Client error — check console: ${e?.message || e}`;
+  renderMessage("Assistant", errMsg);
+  appendToTranscript("Assistant", errMsg);
+} finally {
+  const elapsed = Date.now() - typingStartedAt;
+  const minTypingMs = 350;
+
+  if (elapsed < minTypingMs) {
+    setTimeout(() => {
+      hideTyping();
+      isSending = false;
+    }, minTypingMs - elapsed);
+  } else {
+    hideTyping();
+    isSending = false;
+  } // comment
+  } // comment
+} // comment
+
+
+  // ---- Open/close widget ----
+  const launcher = document.getElementById("launcher");
+  const widget = document.getElementById("widget");
+  const minBtn = document.getElementById("minBtn");
+  const nudgeEl = document.getElementById("nudge");   // ✅ ADD THIS
+  const NUDGE_KEY = "chat_nudge_shown_v1";            // ✅ MOVE THIS HERE (before functions)
+  let nudgeTimer = null;
+
+
+  function showNudge() {
+    if (!nudgeEl) return;
+    if (!widget.classList.contains("hidden")) return; // widget open, no nudge
+    if (!launcher.classList.contains("hidden")) {
+      nudgeEl.classList.remove("hidden");
+      requestAnimationFrame(() => {
+        nudgeEl.classList.add("visible");
+        nudgeEl.classList.add("pulse");
+        setTimeout(() => nudgeEl.classList.remove("pulse"), 700);
       });
+    }
+  }
 
-  </script>
+  function hideNudge() {
+    if (!nudgeEl) return;
+    nudgeEl.classList.remove("visible");
+    setTimeout(() => nudgeEl.classList.add("hidden"), 220);
+  }
+
+  function scheduleNudgeOnce(delayMs = 4500) {
+    if (!nudgeEl) return;
+
+    // only once per visitor unless reset
+    if (localStorage.getItem(NUDGE_KEY) === "1") return;
+
+    // don't show if chat already has user activity
+    const transcript = loadTranscript();
+    const hasUserMessage = transcript.some(it => it.role === "You");
+    if (hasUserMessage) return;
+
+    // mark as seen immediately so it won't spam on reloads
+    localStorage.setItem(NUDGE_KEY, "1");
+
+    clearTimeout(nudgeTimer);
+    nudgeTimer = setTimeout(showNudge, delayMs);
+  }
+
+
+
+  function openWidget() {
+    hideNudge();               // ✅ add
+    disableChatInput(false);   // ✅ add
+    launcher.classList.add("hidden");
+    widget.classList.remove("hidden");
+
+    replayTranscript();
+    const transcript = loadTranscript();
+    const hasUserMessage = transcript.some(it => it.role === "You");
+    if (!hasUserMessage) {
+      menuState.view = "main";
+      renderQuickActions({ showGreeting: true }); // ✅ first-time greeting
+}
+
+    document.getElementById("msg").focus();
+  }
+
+  function closeWidget() {
+    widget.classList.add("hidden");
+    launcher.classList.remove("hidden");
+    hideNudge(); // ✅ optional
+  }
+
+
+  launcher.addEventListener("click", openWidget);
+  minBtn.addEventListener("click", closeWidget);
+  if (nudgeEl) nudgeEl.addEventListener("click", openWidget);
+
+  scheduleNudgeOnce(4500);
+
+
+  // ---- Form submit = Enter sends ----
+  document.getElementById("chatForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    sendMessage();
+  });
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  disableChatInput(false);
+  hideNudge();
+
+  localStorage.removeItem(NUDGE_KEY);
+  localStorage.removeItem("conversation_id");
+  localStorage.removeItem(TRANSCRIPT_KEY);
+
+  conversationId = null;
+  menuState.view = "main";
+
+  const box = document.getElementById("chatbox");
+  box.innerHTML = "";
+
+  hideQuickActions();
+  renderQuickActions({ showGreeting: true });
+
+  document.getElementById("msg").focus();
+});
+
+  // Start minimized (launcher only). If you want it open by default, call openWidget() here.
+
+// Consent popup
+const consentModal = document.getElementById("consentModal");
+const agreeBtn = document.getElementById("agreeBtn");
+
+const consentAccepted = localStorage.getItem("chat_consent_accepted");
+
+if (consentAccepted === "1") {
+  consentModal.style.display = "none";
+}
+
+agreeBtn.addEventListener("click", () => {
+  localStorage.setItem("chat_consent_accepted", "1");
+  consentModal.style.display = "none";
+});
+
+
+  // openWidget();
+  
+
+</script>
 
 </body>
 </html>
