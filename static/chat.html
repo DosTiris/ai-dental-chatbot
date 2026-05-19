@@ -182,11 +182,13 @@
 
 <body>
 
-<div id="chat">
+
 
   <div id="nudge" class="nudge">
     Need help booking? Tap here to chat.
   </div>
+
+  <div id="chat"></div>
 
   <div class="chat-header">
 
@@ -444,16 +446,15 @@ function sendQuickMessage(message) {
 
     window.addEventListener("load", () => {
 
-      const messages = document.getElementById("messages");
-
       setTimeout(() => {
 
         if (!nudgeEl) return;
 
-        const messageCount =
-          messages.querySelectorAll(".msg").length;
+        // only show if user has not interacted
+        const inputValue =
+          document.getElementById("input").value.trim();
 
-        if (messageCount <= 1) {
+        if (inputValue === "") {
           nudgeEl.classList.add("visible");
         }
 
