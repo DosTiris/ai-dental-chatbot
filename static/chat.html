@@ -2,471 +2,178 @@
 <html>
 <head>
   <title>AI Dental Assistant</title>
-
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: white;
-      margin: 0;
-      padding: 0;
-      height: 100vh;
-      overflow: hidden;
-    }
-
-    #chat {
-      max-width: 420px;
-      height: 100vh;
-      margin: auto;
-      display: flex;
-      flex-direction: column;
-      background: #0f172a;
-    }
-
-    .chat-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 16px 12px;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .chat-header h2 {
-      margin: 0;
-      font-size: 20px;
-    }
-
-    .chat-header p {
-      margin: 2px 0 0;
-      font-size: 12px;
-      color: #94a3b8;
-    }
-
-    .chat-header button {
-      background: transparent;
-      border: 1px solid #334155;
-      color: #cbd5e1;
-      border-radius: 999px;
-      padding: 6px 10px;
-      cursor: pointer;
-    }
-
-    .quick-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 12px 16px;
-      border-bottom: 1px solid #1e293b;
-    }
-
-    .quick-actions button {
-      background: #111827;
-      color: #e5e7eb;
-      border: 1px solid #334155;
-      border-radius: 999px;
-      padding: 9px 12px;
-      font-size: 13px;
-      cursor: pointer;
-    }
-
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-      padding-bottom: 90px;
-    }
-
-    .msg {
-      margin: 10px 0;
-      padding: 10px 12px;
-      border-radius: 14px;
-      max-width: 80%;
-      line-height: 1.35;
-      font-size: 14px;
-    }
-
-    .user {
-      background: #2563eb;
-      margin-left: auto;
-    }
-
-    .bot {
-      background: #374151;
-      margin-right: auto;
-    }
-
-    .chat-input-row {
-      display: flex;
-      gap: 8px;
-      padding: 12px;
-      background: #0f172a;
-      border-top: 1px solid #1e293b;
-      position: sticky;
-      bottom: 0;
-    }
-    .nudge {
-      background: white;
-      color: #111827;
-      border-radius: 14px;
-      padding: 10px 12px;
-      font-size: 13px;
-      max-width: 230px;
-      box-shadow: 0 12px 30px rgba(0,0,0,0.25);
-      cursor: pointer;
-      opacity: 0;
-      transform: translateY(10px);
-      pointer-events: none;
-      transition: opacity 220ms ease, transform 220ms ease;
-      position: absolute;
-      top: -52px;
-      right: 12px;
-      z-index: 5;
-    }
-    .nudge.visible {
-      opacity: 1;
-      transform: translateY(0);
-      pointer-events: auto;
-    }
-
-    .hidden {
-      display: none;
-    }
-
-    input {
-      flex: 1;
-      padding: 12px 14px;
-      border-radius: 999px;
-      border: 1px solid #334155;
-      background: #020617;
-      color: white;
-      outline: none;
-    }
-
-    input::placeholder {
-      color: #64748b;
-    }
-
-    button {
-      padding: 12px 14px;
-      border-radius: 999px;
-      border: none;
-      cursor: pointer;
-    }
-
+    body { font-family: Arial, sans-serif; background: transparent; color: white; margin: 0; padding: 0; height: 100vh; overflow: hidden; }
+    #chat { max-width: 420px; height: 100vh; margin: auto; display: flex; flex-direction: column; background: #0f172a; position: relative; }
+    .chat-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 16px 12px; border-bottom: 1px solid #1e293b; }
+    .chat-header h2 { margin: 0; font-size: 20px; }
+    .chat-header p { margin: 2px 0 0; font-size: 12px; color: #94a3b8; }
+    .chat-header button { background: transparent; border: 1px solid #334155; color: #cbd5e1; border-radius: 999px; padding: 6px 10px; cursor: pointer; }
+    .quick-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-bottom: 1px solid #1e293b; }
+    .quick-actions button { background: #111827; color: #e5e7eb; border: 1px solid #334155; border-radius: 999px; padding: 9px 12px; font-size: 13px; cursor: pointer; }
+    #messages { flex: 1; overflow-y: auto; padding: 16px; padding-bottom: 90px; }
+    .msg { margin: 10px 0; padding: 10px 12px; border-radius: 14px; max-width: 80%; line-height: 1.35; font-size: 14px; }
+    .user { background: #2563eb; margin-left: auto; }
+    .bot { background: #374151; margin-right: auto; }
+    .chat-input-row { display: flex; gap: 8px; padding: 12px; background: #0f172a; border-top: 1px solid #1e293b; position: sticky; bottom: 0; }
+    .nudge { position: absolute; right: 12px; bottom: 58px; background: white; color: #111827; border-radius: 14px; padding: 10px 12px; font-size: 13px; max-width: 230px; box-shadow: 0 12px 30px rgba(0,0,0,0.25); cursor: pointer; opacity: 0; transform: translateY(10px); pointer-events: none; transition: opacity 220ms ease, transform 220ms ease; z-index: 20; }
+    .nudge.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .hidden { display: none; }
+    input { flex: 1; padding: 12px 14px; border-radius: 999px; border: 1px solid #334155; background: #020617; color: white; outline: none; }
+    input::placeholder { color: #64748b; }
+    button { padding: 12px 14px; border-radius: 999px; border: none; cursor: pointer; }
     @media (max-width: 640px) {
-      #chat {
-        max-width: none;
-        width: 100%;
-        height: 100dvh;
-      }
-
-      .chat-input-row {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 50;
-        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-      }
+      #chat { max-width: none; width: 100%; height: 100dvh; }
+      .chat-input-row { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+      .nudge { right: 16px; bottom: 72px; }
     }
   </style>
 </head>
-
 <body>
+  <div id="chat">
+    <div id="nudge" class="nudge">Need help booking? Tap here to chat.</div>
 
+    <div id="consentModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;">
+      <div style="background:white;max-width:420px;width:100%;border-radius:16px;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,0.35);font-family:Arial,sans-serif;">
+        <h2 style="margin-top:0;font-size:22px;color:#111827;">Before We Begin</h2>
+        <p style="font-size:14px;line-height:1.6;color:#374151;">By using this chatbot and submitting your phone number, you agree to receive SMS messages from Dos Tiris LLC regarding your inquiry or appointment request.</p>
+        <p style="font-size:13px;line-height:1.5;color:#6b7280;">Message frequency may vary.<br>Message & data rates may apply.<br>Reply STOP to opt out.</p>
+        <button id="agreeBtn" style="width:100%;margin-top:18px;padding:14px;border:none;border-radius:12px;cursor:pointer;font-size:16px;color:white;background:linear-gradient(90deg,#ec4899,#8b5cf6);">I Agree</button>
+      </div>
+    </div>
 
-
-  <div style="
-    background:white;
-    max-width:420px;
-    width:100%;
-    border-radius:16px;
-    padding:24px;
-    box-shadow:0 20px 50px rgba(0,0,0,0.35);
-    font-family:Arial,sans-serif;
-  ">
-
-    <h2 style="
-      margin-top:0;
-      font-size:22px;
-      color:#111827;
-    ">
-      Before We Begin
-    </h2>
-
-    <p style="
-      font-size:14px;
-      line-height:1.6;
-      color:#374151;
-    ">
-      By using this chatbot and submitting your phone number,
-      you agree to receive SMS messages from Dos Tiris LLC
-      regarding your inquiry or appointment request.
-    </p>
-
-    <p style="
-      font-size:13px;
-      line-height:1.5;
-      color:#6b7280;
-    ">
-      Message frequency may vary.<br>
-      Message & data rates may apply.<br>
-      Reply STOP to opt out.
-    </p>
-
-    <button id="agreeBtn" style="
-      width:100%;
-      margin-top:18px;
-      padding:14px;
-      border:none;
-      border-radius:12px;
-      cursor:pointer;
-      font-size:16px;
-      color:white;
-      background:linear-gradient(90deg,#ec4899,#8b5cf6);
-    ">
-      I Agree
-    </button>
-
-  </div>
-</div>
-
-<div id="chat">
-
-  <div id="nudge" class="nudge">
-    Need help booking? Tap here to chat.
-  </div>
-
-  <!-- Consent Modal -->
-  <div id="consentModal" style="
-    position:fixed;
-    inset:0;
-    background:rgba(0,0,0,0.65);
-    z-index:100000;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    padding:20px;
-  ">
     <div class="chat-header">
       <div>
         <h2>Mia</h2>
-        <p>AI dental receptionist</p>
+        <p>AI Dental Receptionist</p>
       </div>
-
       <button onclick="startOver()">Start over</button>
     </div>
-<div id="main-menu" class="quick-actions">
-  <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
-  <button type="button" onclick="showServiceMenu()">Services</button>
-  <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
-  <button type="button" onclick="sendQuickMessage('What are your hours?')">Hours</button>
-  <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
-</div>
 
-<div id="service-menu" class="quick-actions hidden">
-  <button type="button" onclick="sendQuickMessage('I need a cleaning or checkup')">Cleaning / Checkup</button>
-  <button type="button" onclick="sendQuickMessage('I have tooth pain')">Tooth Pain</button>
-  <button type="button" onclick="sendQuickMessage('I broke a tooth or filling')">Broken Tooth / Filling</button>
-  <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
-  <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
-  <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Orthodontics</button>
-  <button type="button" onclick="showMainMenu()">Back</button>
-</div>
+    <div id="main-menu" class="quick-actions">
+      <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
+      <button type="button" onclick="showServiceMenu()">Services</button>
+      <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
+      <button type="button" onclick="sendQuickMessage('What are your hours?')">Hours</button>
+      <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
+    </div>
+
+    <div id="service-menu" class="quick-actions hidden">
+      <button type="button" onclick="sendQuickMessage('I need a cleaning or checkup')">Cleaning / Checkup</button>
+      <button type="button" onclick="sendQuickMessage('I have tooth pain')">Tooth Pain</button>
+      <button type="button" onclick="sendQuickMessage('I broke a tooth or filling')">Broken Tooth / Filling</button>
+      <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
+      <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
+      <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Orthodontics</button>
+      <button type="button" onclick="showMainMenu()">Back</button>
+    </div>
 
     <div id="messages">
-      <div class="msg bot">
-        Hi, I’m Mia. How can I help today?
-      </div>
+      <div class="msg bot">Hi, I’m Mia. How can I help today?</div>
     </div>
 
     <div class="chat-input-row">
       <input id="input" placeholder="Ask something..." />
       <button onclick="sendMessage()">Send</button>
     </div>
-
   </div>
 
   <script>
+    const nudgeEl = document.getElementById("nudge");
 
-function showServiceMenu() {
-  document.getElementById("main-menu").classList.add("hidden");
-  document.getElementById("service-menu").classList.remove("hidden");
-}
+    function hideNudge() { if (nudgeEl) nudgeEl.classList.remove("visible"); }
 
-function showMainMenu() {
-  document.getElementById("service-menu").classList.add("hidden");
-  document.getElementById("main-menu").classList.remove("hidden");
-}
+    function showServiceMenu() {
+      document.getElementById("main-menu").classList.add("hidden");
+      document.getElementById("service-menu").classList.remove("hidden");
+    }
 
-function sendQuickMessage(message) {
-  document.getElementById("service-menu").classList.add("hidden");
-  document.getElementById("main-menu").classList.remove("hidden");
-  document.getElementById("input").value = message;
-  sendMessage();
-}
+    function showMainMenu() {
+      document.getElementById("service-menu").classList.add("hidden");
+      document.getElementById("main-menu").classList.remove("hidden");
+    }
 
-  // Consent popup UNBLOCK AFTER PASSING TWILIO
-  const consentModal = document.getElementById("consentModal");
-  const agreeBtn = document.getElementById("agreeBtn");
-  agreeBtn.addEventListener("click", () => {
-  consentModal.style.display = "none";
-});
-  //const consentAccepted = localStorage.getItem("chat_consent_accepted");
+    function sendQuickMessage(message) {
+      hideNudge();
+      document.getElementById("service-menu").classList.add("hidden");
+      document.getElementById("main-menu").classList.remove("hidden");
+      document.getElementById("input").value = message;
+      sendMessage();
+    }
 
-  //if (consentAccepted === "1") {
-    //consentModal.style.display = "none";
-  //}
+    const consentModal = document.getElementById("consentModal");
+    const agreeBtn = document.getElementById("agreeBtn");
+    agreeBtn.addEventListener("click", () => { consentModal.style.display = "none"; });
 
-  //agreeBtn.addEventListener("click", () => {
-    //localStorage.setItem("chat_consent_accepted", "1");
-    //consentModal.style.display = "none";
-  //});
+    function showTyping() {
+      const messages = document.getElementById("messages");
+      if (document.getElementById("typingIndicator")) return;
+      messages.innerHTML += `<div id="typingIndicator" class="msg bot"><em>Typing…</em></div>`;
+      messages.scrollTop = messages.scrollHeight;
+    }
 
-  // Consent popup UNBLOCK AFTER PASSING TWILIO END OF COMMENTS
-    
-  function showTyping() {
-    const messages = document.getElementById("messages");
+    function hideTyping() {
+      const typing = document.getElementById("typingIndicator");
+      if (typing) typing.remove();
+    }
 
-    if (document.getElementById("typingIndicator")) return;
-
-    messages.innerHTML += `
-      <div id="typingIndicator" class="msg bot">
-        <em>Typing…</em>
-      </div>
-    `;
-
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  function hideTyping() {
-    const typing = document.getElementById("typingIndicator");
-    if (typing) typing.remove();
-  }
-
-  
-  
-  async function sendMessage() {
-
+    async function sendMessage() {
       const input = document.getElementById("input");
       const message = input.value.trim();
-
       if (!message) return;
 
-      nudgeEl.classList.remove("visible");
-
+      hideNudge();
       const messages = document.getElementById("messages");
-
-      messages.innerHTML += `
-        <div class="msg user">${message}</div>
-      `;
-
+      messages.innerHTML += `<div class="msg user">${message}</div>`;
       messages.scrollTop = messages.scrollHeight;
-
       input.value = "";
       showTyping();
 
       try {
-
-        const res = await fetch(
-          "https://ai-dental-chatbot.onrender.com/chat",
-          {
-            method: "POST",
-
-            headers: {
-              "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-              message: message,
-              client_key: "demo_clinic_key"
-            })
-          }
-        );
+        const res = await fetch("https://ai-dental-chatbot.onrender.com/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: message, client_key: "demo_clinic_key" })
+        });
 
         const data = await res.json();
-
-        const reply =
-          data.response ||
-          data.reply ||
-          data.answer ||
-          data.message ||
-          data.bot_response ||
-          JSON.stringify(data);
+        const reply = data.response || data.reply || data.answer || data.message || data.bot_response || JSON.stringify(data);
 
         hideTyping();
-        
-        messages.innerHTML += `
-          <div class="msg bot">${reply}</div>
-        `;
-
+        messages.innerHTML += `<div class="msg bot">${reply}</div>`;
         messages.scrollTop = messages.scrollHeight;
-
       } catch (err) {
-
         console.error(err);
-
         hideTyping();
-
-        messages.innerHTML += `
-          <div class="msg bot">
-            Error connecting
-          </div>
-        `;
-
+        messages.innerHTML += `<div class="msg bot">Error connecting</div>`;
         messages.scrollTop = messages.scrollHeight;
       }
     }
 
     function startOver() {
-
-      document.getElementById("messages").innerHTML = `
-        <div class="msg bot">
-          Hi, I’m Mia. How can I help today?
-        </div>
-      `;
-
+      hideNudge();
+      document.getElementById("messages").innerHTML = `<div class="msg bot">Hi, I’m Mia. How can I help today?</div>`;
       document.getElementById("input").value = "";
+      showMainMenu();
     }
 
-    const nudgeEl = document.getElementById("nudge");
-
     window.addEventListener("load", () => {
-
       setTimeout(() => {
-
-        if (!nudgeEl) return;
-
-        // only show if user has not interacted
-        const inputValue =
-          document.getElementById("input").value.trim();
-
-        if (inputValue === "") {
-          nudgeEl.classList.add("visible");
-        }
-
+        const inputValue = document.getElementById("input").value.trim();
+        if (nudgeEl && inputValue === "") nudgeEl.classList.add("visible");
       }, 4500);
-
     });
 
     if (nudgeEl) {
       nudgeEl.addEventListener("click", () => {
-        nudgeEl.classList.remove("visible");
+        hideNudge();
         document.getElementById("input").focus();
       });
     }
 
-    document
-      .getElementById("input")
-      .addEventListener("keydown", function(e) {
-
-        if (e.key === "Enter") {
-          sendMessage();
-        }
-
-      });
-
+    document.getElementById("input").addEventListener("keydown", function(e) {
+      if (e.key === "Enter") sendMessage();
+    });
   </script>
-
 </body>
 </html>
