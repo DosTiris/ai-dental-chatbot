@@ -26,6 +26,22 @@
       #chat { max-width: none; width: 100%; height: 100dvh; }
       .chat-input-row { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
       .nudge { right: 16px; bottom: 72px; }
+      .quick-replies {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .quick-reply {
+        background: #111827;
+        color: #e5e7eb;
+        border: 1px solid #334155;
+        border-radius: 999px;
+        padding: 9px 12px;
+        font-size: 13px;
+        cursor: pointer;
+      }
     }
   </style>
 </head>
@@ -100,6 +116,32 @@
       sendMessage();
     }
 
+
+    function renderQuickReplies(options) {
+      const messages = document.getElementById("messages");
+
+      // remove old quick replies first
+      document.querySelectorAll(".quick-replies").forEach(el => el.remove());
+
+      const html = options.map(opt => `
+        <button class="quick-reply" onclick="selectQuickReply('${opt}')">
+          ${opt}
+        </button>
+      `).join("");
+
+      messages.innerHTML += `
+        <div class="quick-replies">
+          ${html}
+        </div>
+      `;
+    }
+
+
+    function selectQuickReply(text) {
+      document.getElementById("input").value = text;
+      sendMessage();
+    }
+
     const consentModal = document.getElementById("consentModal");
     const agreeBtn = document.getElementById("agreeBtn");
     agreeBtn.addEventListener("click", () => { consentModal.style.display = "none"; });
@@ -120,6 +162,8 @@
       const input = document.getElementById("input");
       const message = input.value.trim();
       if (!message) return;
+
+      document.querySelectorAll(".quick-replies").forEach(el => el.remove());
 
       
       const messages = document.getElementById("messages");
@@ -149,6 +193,21 @@
 
         hideTyping();
         messages.innerHTML += `<div class="msg bot">${reply}</div>`;
+
+        if (
+          reply.toLowerCase().includes("what brings you in")
+        ) {
+          renderQuickReplies([
+            "Cleaning / Checkup",
+            "Tooth Pain",
+            "Broken Tooth / Filling",
+            "Implants / Extraction",
+            "Cosmetic / Whitening",
+            "Braces / Invisalign"
+          ]);
+        }
+
+
         messages.scrollTop = messages.scrollHeight;
       } catch (err) {
         console.error(err);
@@ -161,7 +220,7 @@
     function startOver() {
       conversationId = null;
       localStorage.removeItem("chat_conversation_id");
-      
+
       document.getElementById("messages").innerHTML = `<div class="msg bot">Hi, I’m Mia. How can I help today?</div>`;
       document.getElementById("input").value = "";
       showMainMenu();
