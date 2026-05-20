@@ -104,7 +104,6 @@
       position: sticky;
       bottom: 0;
     }
-
     .nudge {
       background: white;
       color: #111827;
@@ -114,24 +113,15 @@
       max-width: 230px;
       box-shadow: 0 12px 30px rgba(0,0,0,0.25);
       cursor: pointer;
-
       opacity: 0;
       transform: translateY(10px);
-
       pointer-events: none;
-
-      transition:
-        opacity 220ms ease,
-        transform 220ms ease;
-
+      transition: opacity 220ms ease, transform 220ms ease;
       position: absolute;
       top: -52px;
       right: 12px;
-
-      position: relative;
       z-index: 5;
     }
-
     .nudge.visible {
       opacity: 1;
       transform: translateY(0);
@@ -184,27 +174,7 @@
 
 <body>
 
-<div id="chat">
 
-  <div id="nudge" class="nudge">
-    Need help booking? Tap here to chat.
-  </div>
-
-  
-
-  <div class="chat-header">
-
-  <!-- Consent Modal -->
-<div id="consentModal" style="
-  position:fixed;
-  inset:0;
-  background:rgba(0,0,0,0.65);
-  z-index:100000;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  padding:20px;
-">
 
   <div style="
     background:white;
@@ -261,8 +231,23 @@
   </div>
 </div>
 
-  <div id="chat">
+<div id="chat">
 
+  <div id="nudge" class="nudge">
+    Need help booking? Tap here to chat.
+  </div>
+
+  <!-- Consent Modal -->
+  <div id="consentModal" style="
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.65);
+    z-index:100000;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+  ">
     <div class="chat-header">
       <div>
         <h2>Mia</h2>
