@@ -80,6 +80,8 @@
 
   <script>
 
+    let conversationId = localStorage.getItem("chat_conversation_id") || null;
+
 
     function showServiceMenu() {
       document.getElementById("main-menu").classList.add("hidden");
@@ -130,10 +132,19 @@
         const res = await fetch("https://ai-dental-chatbot.onrender.com/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: message, client_key: "demo_clinic_key" })
-        });
+          body: JSON.stringify({
+            message: message,
+            client_key: "demo_clinic_key",
+            conversation_id: conversationId
+          })
+         });
 
         const data = await res.json();
+
+        if (data.conversation_id) {
+          conversationId = data.conversation_id;
+          localStorage.setItem("chat_conversation_id", conversationId);
+        }
         const reply = data.response || data.reply || data.answer || data.message || data.bot_response || JSON.stringify(data);
 
         hideTyping();
@@ -148,6 +159,9 @@
     }
 
     function startOver() {
+      conversationId = null;
+      localStorage.removeItem("chat_conversation_id");
+      
       document.getElementById("messages").innerHTML = `<div class="msg bot">Hi, I’m Mia. How can I help today?</div>`;
       document.getElementById("input").value = "";
       showMainMenu();
