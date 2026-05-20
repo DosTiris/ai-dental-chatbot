@@ -31,9 +31,9 @@
 </head>
 <body>
   <div id="chat">
-    <div id="nudge" class="nudge">Need help booking? Tap here to chat.</div>
+    <!-- <div id="nudge" class="nudge">Need help booking? Tap here to chat.</div> -->
 
-    <div id="consentModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;">
+    <div id="consentModal" style="position:absolute;inset:0;background:rgba(0,0,0,0.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;">
       <div style="background:white;max-width:420px;width:100%;border-radius:16px;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,0.35);font-family:Arial,sans-serif;">
         <h2 style="margin-top:0;font-size:22px;color:#111827;">Before We Begin</h2>
         <p style="font-size:14px;line-height:1.6;color:#374151;">By using this chatbot and submitting your phone number, you agree to receive SMS messages from Dos Tiris LLC regarding your inquiry or appointment request.</p>
@@ -79,9 +79,7 @@
   </div>
 
   <script>
-    const nudgeEl = document.getElementById("nudge");
 
-    function hideNudge() { if (nudgeEl) nudgeEl.classList.remove("visible"); }
 
     function showServiceMenu() {
       document.getElementById("main-menu").classList.add("hidden");
@@ -94,7 +92,6 @@
     }
 
     function sendQuickMessage(message) {
-      hideNudge();
       document.getElementById("service-menu").classList.add("hidden");
       document.getElementById("main-menu").classList.remove("hidden");
       document.getElementById("input").value = message;
@@ -122,7 +119,7 @@
       const message = input.value.trim();
       if (!message) return;
 
-      hideNudge();
+      
       const messages = document.getElementById("messages");
       messages.innerHTML += `<div class="msg user">${message}</div>`;
       messages.scrollTop = messages.scrollHeight;
@@ -151,26 +148,12 @@
     }
 
     function startOver() {
-      hideNudge();
       document.getElementById("messages").innerHTML = `<div class="msg bot">Hi, I’m Mia. How can I help today?</div>`;
       document.getElementById("input").value = "";
       showMainMenu();
     }
 
-    window.addEventListener("load", () => {
-      setTimeout(() => {
-        const inputValue = document.getElementById("input").value.trim();
-        if (nudgeEl && inputValue === "") nudgeEl.classList.add("visible");
-      }, 4500);
-    });
-
-    if (nudgeEl) {
-      nudgeEl.addEventListener("click", () => {
-        hideNudge();
-        document.getElementById("input").focus();
-      });
-    }
-
+   
     document.getElementById("input").addEventListener("keydown", function(e) {
       if (e.key === "Enter") sendMessage();
     });

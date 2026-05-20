@@ -19,6 +19,10 @@ class Client(Base):
     office_hours = Column(JSONB, nullable=True)
     settings = Column(JSONB, nullable=True)
 
+    # NEW notification fields
+    notification_email = Column(String, nullable=True)
+    notification_phone = Column(String, nullable=True)
+
     # Relationships
     conversations = relationship("Conversation", back_populates="client")  # Client -> many conversations
     faqs = relationship("ClientFAQ", back_populates="client")  # Client -> many FAQs
