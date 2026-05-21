@@ -3394,7 +3394,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         and not (conversation.lead_phone or "").strip()
         and last_assistant_asked_for_phone(db, conversation.id)
     ):
-        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number, like 516-668-2269."
+        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number."
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -3408,7 +3408,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     if phone and not is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
-        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number, like 516-668-2269."
+        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number."
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
