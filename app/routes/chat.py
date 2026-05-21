@@ -1603,6 +1603,25 @@ def last_assistant_asked_for_question(db: Session, conversation_id: uuid.UUID) -
     ]
     return any(p in t for p in prompts)
 
+def last_assistant_asked_for_phone(db: Session, conversation_id: uuid.UUID) -> bool:
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    return any(p in t for p in [
+        "best phone number",
+        "what s your phone number",
+        "whats your phone number",
+        "what is your phone number",
+        "phone number to reach you",
+    ])
+
 
 def last_assistant_asked_for_name(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
@@ -3366,6 +3385,41 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         conversation.lead_email = email
         updated = True
         lead_captured_now = True
+
+    raw_phone_digits = re.sub(r"\D", "", user_text or "")
+
+    if (
+        raw_phone_digits
+        and not phone
+        and not (conversation.lead_phone or "").strip()
+        and last_assistant_asked_for_phone(db, conversation.id)
+    ):
+        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number, like 516-668-2269."
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "invalid_phone",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    if phone and not is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
+        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number, like 516-668-2269."
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "invalid_phone",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
 
     if phone and is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
         conversation.lead_phone = phone
