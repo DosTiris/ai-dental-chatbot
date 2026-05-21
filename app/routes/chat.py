@@ -618,11 +618,13 @@ def extract_email(text_in: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
-def extract_phone(text: str) -> Optional[str]:
-    match = PHONE_RE.search(text or "")
-    if not match:
-        return None
-    return normalize_phone(match.group(0))
+def extract_phone(text_in: str) -> Optional[str]:
+    digits = re.sub(r"\D", "", text_in or "")
+    if len(digits) == 10:
+        return digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[1:]
+    return None
 
 
 def is_valid_phone(phone: str) -> bool:
