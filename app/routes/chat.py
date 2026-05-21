@@ -618,13 +618,26 @@ def extract_email(text_in: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
-def extract_phone(text_in: str) -> Optional[str]:
-    digits = re.sub(r"\D", "", text_in or "")
-    if len(digits) == 10:
-        return digits
-    if len(digits) == 11 and digits.startswith("1"):
-        return digits[1:]
-    return None
+def extract_phone(text: str) -> Optional[str]:
+    match = PHONE_RE.search(text or "")
+    if not match:
+        return None
+    return normalize_phone(match.group(0))
+
+
+def is_valid_phone(phone: str) -> bool:
+    digits = re.sub(r"\D", "", phone or "")
+
+    if len(digits) != 10:
+        return False
+
+    if digits[0] in {"0", "1"}:
+        return False
+
+    if len(set(digits)) <= 2:
+        return False
+
+    return True
 
 def extract_name_from_name_phone_reply(text_in: str) -> Optional[str]:
     raw = (text_in or "").strip()
@@ -773,6 +786,23 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
 # =========================================================
 def detect_service_selection(user_text: str) -> Optional[str]:
     t = (user_text or "").strip().lower()
+    if "tooth pain" in t or "tooth hurts" in t or "toothache" in t:
+        return "tooth pain"
+
+    if "cleaning" in t or "checkup" in t or "check-up" in t:
+        return "cleaning/checkup"
+
+    if "broken tooth" in t or "broke a tooth" in t or "filling" in t:
+        return "broken tooth/filling"
+
+    if "implant" in t or "extraction" in t:
+        return "extraction/implant"
+
+    if "whitening" in t or "cosmetic" in t:
+        return "cosmetic/whitening"
+
+    if "braces" in t or "invisalign" in t:
+        return "orthodontics"
     service_map = {
         "cleaning": "cleaning/checkup",
         "checkup": "cleaning/checkup",
@@ -2865,7 +2895,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation.lead_name_source_text = (user_text or "")[:120]
             updated = True
 
-        if phone and not (conversation.lead_phone or "").strip():
+        if phone and is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
             conversation.lead_phone = phone
             updated = True
 
@@ -3307,7 +3337,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         updated = True
         lead_captured_now = True
 
-    if phone and not (conversation.lead_phone or "").strip():
+    if phone and is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
         conversation.lead_phone = phone
         updated = True
         lead_captured_now = True
@@ -3874,7 +3904,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             db.add(Message(conversation_id=conversation.id, role="assistant", content=bypass_text))
             db.commit()
 
-        meta = {"faq_match": False, "mode": "bypass", "show_start_over": show_start_over}
+        meta = {
+            "faq_match": False,
+            "mode": "bypass",
+            "show_start_over": show_start_over,
+            "show_service_menu": bypass_stage == "reason",
+        }
 
         if bypass_stage == "time_window":
             hours_text = (
