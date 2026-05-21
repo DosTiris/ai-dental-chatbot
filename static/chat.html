@@ -194,9 +194,7 @@
         hideTyping();
         messages.innerHTML += `<div class="msg bot">${reply}</div>`;
 
-        if (
-          reply.toLowerCase().includes("what brings you in")
-        ) {
+        if (data.meta && data.meta.show_service_menu) {
           renderQuickReplies([
             "Cleaning / Checkup",
             "Tooth Pain",
