@@ -659,6 +659,19 @@ def extract_name_from_name_phone_reply(text_in: str) -> Optional[str]:
 
 def extract_name(text_in: str) -> Optional[str]:
     t = (text_in or "").strip()
+    tl = t.lower()
+
+    if any(p in tl for p in [
+        "i am interested in",
+        "i'm interested in",
+        "im interested in",
+        "i am looking for",
+        "i'm looking for",
+        "i need",
+        "i want",
+    ]):
+        return None
+    
     patterns = [
         r"\bmy name is\s+([A-Za-z][A-Za-z'-]{1,30})(?:\s+([A-Za-z][A-Za-z'-]{1,30}))?\b",
         r"\bi am\s+([A-Za-z][A-Za-z'-]{1,30})(?:\s+([A-Za-z][A-Za-z'-]{1,30}))?\b",
@@ -2897,9 +2910,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation.lead_name_source_text = (user_text or "")[:120]
             updated = True
 
+        if phone and not is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
+            reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number, like 516-668-2269."
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "invalid_phone",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
         if phone and is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
             conversation.lead_phone = phone
             updated = True
+            lead_captured_now = True
 
         if reason and not (conversation.lead_reason or "").strip():
             conversation.lead_reason = reason
