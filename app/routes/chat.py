@@ -617,6 +617,22 @@ def extract_email(text_in: str) -> Optional[str]:
     match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text_in or "")
     return match.group(0) if match else None
 
+def is_valid_email(email: str) -> bool:
+    e = (email or "").strip().lower()
+
+    if not re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", e):
+        return False
+
+    domain = e.split("@", 1)[1]
+
+    if ".." in domain:
+        return False
+
+    if domain.endswith((".om", ".cmo", ".con", ".comm")):
+        return False
+
+    return True
+
 
 def extract_phone(text_in: str) -> Optional[str]:
     digits = re.sub(r"\D", "", text_in or "")
@@ -3381,31 +3397,45 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         in_intake_mode = True
         question_mode = False
 
-    if email and not (conversation.lead_email or "").strip():
-        conversation.lead_email = email
-        updated = True
-        lead_captured_now = True
-
-    raw_phone_digits = re.sub(r"\D", "", user_text or "")
-
-    if (
-        raw_phone_digits
-        and not phone
-        and not (conversation.lead_phone or "").strip()
-        and last_assistant_asked_for_phone(db, conversation.id)
-    ):
-        reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number."
+    if email and not is_valid_email(email) and not (conversation.lead_email or "").strip():
+        reply_text = "That email address doesn’t look quite right. Please enter it again, or type ‘skip’ to continue without email."
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={
-                "mode": "invalid_phone",
+                "mode": "invalid_email",
                 "faq_match": False,
                 "show_start_over": show_start_over,
             },
         )
+
+    if email and is_valid_email(email) and not (conversation.lead_email or "").strip():
+        conversation.lead_email = email
+        updated = True
+        lead_captured_now = True
+
+        raw_phone_digits = re.sub(r"\D", "", user_text or "")
+
+        if (
+            raw_phone_digits
+            and not phone
+            and not (conversation.lead_phone or "").strip()
+            and last_assistant_asked_for_phone(db, conversation.id)
+        ):
+            reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number."
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "invalid_phone",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
 
     if phone and not is_valid_phone(phone) and not (conversation.lead_phone or "").strip():
         reply_text = "That phone number doesn’t look valid. Please enter a 10-digit phone number."
