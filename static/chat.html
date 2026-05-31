@@ -22,6 +22,45 @@
     input { flex: 1; padding: 12px 14px; border-radius: 999px; border: 1px solid #334155; background: #020617; color: white; outline: none; }
     input::placeholder { color: #64748b; }
     button { padding: 12px 14px; border-radius: 999px; border: none; cursor: pointer; }
+
+    .sms-consent-card {
+      margin: 10px 0;
+      padding: 14px;
+      border: 1px solid #334155;
+      border-radius: 14px;
+      background: #111827;
+      color: #e5e7eb;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .sms-consent-card h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      color: #ffffff;
+    }
+    .sms-consent-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 12px;
+      color: #e5e7eb;
+    }
+    .sms-consent-check input {
+      flex: 0 0 auto;
+      margin-top: 3px;
+    }
+    .sms-consent-card button {
+      margin-top: 12px;
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 12px;
+      color: white;
+      background: linear-gradient(90deg,#ec4899,#8b5cf6);
+      opacity: 0.55;
+    }
+    .sms-consent-card button.enabled {
+      opacity: 1;
+    }
     @media (max-width: 640px) {
       #chat { max-width: none; width: 100%; height: 100dvh; }
       .chat-input-row { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
@@ -90,13 +129,16 @@
 
     <div class="chat-input-row">
       <input id="input" placeholder="Ask something..." />
-      <button onclick="sendMessage()">Send</button>
+      <button id="sendBtn" onclick="sendMessage()">Send</button>
     </div>
   </div>
 
   <script>
 
     let conversationId = localStorage.getItem("chat_conversation_id") || null;
+
+    let smsPhoneConsentRequired = false;
+    let smsPhoneConsentAccepted = false;
 
 
     function showServiceMenu() {
@@ -142,6 +184,71 @@
       sendMessage();
     }
 
+
+    function setPhoneInputBlocked(blocked) {
+      const input = document.getElementById("input");
+      const sendBtn = document.getElementById("sendBtn");
+      input.disabled = blocked;
+      sendBtn.disabled = blocked;
+      input.placeholder = blocked ? "Please accept SMS consent first..." : "Ask something...";
+    }
+
+    function removeSmsPhoneConsent() {
+      const card = document.getElementById("smsPhoneConsentCard");
+      if (card) card.remove();
+    }
+
+    function renderSmsPhoneConsent() {
+      const messages = document.getElementById("messages");
+
+      removeSmsPhoneConsent();
+
+      smsPhoneConsentRequired = true;
+      smsPhoneConsentAccepted = false;
+      setPhoneInputBlocked(true);
+
+      messages.innerHTML += `
+        <div id="smsPhoneConsentCard" class="sms-consent-card">
+          <h3>SMS Consent</h3>
+          <div>
+            By providing your phone number, you agree to receive SMS messages from Dos Tiris LLC regarding appointment requests, appointment confirmations, reminders, follow-ups, and customer support communications. Message frequency may vary. Message & data rates may apply. Reply STOP to opt out and HELP for assistance. Consent is not a condition of purchase.
+          </div>
+
+          <label class="sms-consent-check">
+            <input id="smsPhoneConsentCheckbox" type="checkbox" onchange="toggleSmsConsentContinue()" />
+            <span>I agree to receive SMS messages.</span>
+          </label>
+
+          <button id="smsPhoneConsentContinue" type="button" onclick="acceptSmsPhoneConsent()" disabled>
+            Continue
+          </button>
+        </div>
+      `;
+
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function toggleSmsConsentContinue() {
+      const checkbox = document.getElementById("smsPhoneConsentCheckbox");
+      const btn = document.getElementById("smsPhoneConsentContinue");
+      if (!checkbox || !btn) return;
+
+      btn.disabled = !checkbox.checked;
+      btn.classList.toggle("enabled", checkbox.checked);
+    }
+
+    function acceptSmsPhoneConsent() {
+      const checkbox = document.getElementById("smsPhoneConsentCheckbox");
+      if (!checkbox || !checkbox.checked) return;
+
+      smsPhoneConsentAccepted = true;
+      smsPhoneConsentRequired = false;
+      removeSmsPhoneConsent();
+      setPhoneInputBlocked(false);
+      document.getElementById("input").focus();
+    }
+
+
     const consentModal = document.getElementById("consentModal");
     const agreeBtn = document.getElementById("agreeBtn");
     agreeBtn.addEventListener("click", () => { consentModal.style.display = "none"; });
@@ -162,6 +269,11 @@
       const input = document.getElementById("input");
       const message = input.value.trim();
       if (!message) return;
+
+
+      if (smsPhoneConsentRequired && !smsPhoneConsentAccepted) {
+        return;
+      }
 
       document.querySelectorAll(".quick-replies").forEach(el => el.remove());
 
@@ -194,6 +306,14 @@
         hideTyping();
         messages.innerHTML += `<div class="msg bot">${reply}</div>`;
 
+        const replyText = String(reply || "").toLowerCase();
+        if (
+          (data.meta && data.meta.show_sms_phone_consent) ||
+          (!smsPhoneConsentAccepted && replyText.includes("best phone number"))
+        ) {
+          renderSmsPhoneConsent();
+        }
+
         if (data.meta && data.meta.show_service_menu) {
           renderQuickReplies([
             "Cleaning / Checkup",
@@ -218,6 +338,11 @@
     function startOver() {
       conversationId = null;
       localStorage.removeItem("chat_conversation_id");
+
+      smsPhoneConsentRequired = false;
+      smsPhoneConsentAccepted = false;
+      removeSmsPhoneConsent();
+      setPhoneInputBlocked(false);
 
       document.getElementById("messages").innerHTML = `<div class="msg bot">Hi, I’m Mia. How can I help today?</div>`;
       document.getElementById("input").value = "";

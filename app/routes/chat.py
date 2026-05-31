@@ -3993,6 +3993,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             "mode": "bypass",
             "show_start_over": show_start_over,
             "show_service_menu": bypass_stage == "reason",
+            "show_sms_phone_consent": bypass_stage == "phone",
         }
 
         if bypass_stage == "time_window":
