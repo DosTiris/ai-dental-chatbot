@@ -735,3 +735,26 @@ bottom: calc(70vh + 96px);
         height: 55px;
     }
 }
+@media (max-width: 768px) {
+    .nav-links {
+        display: none;
+    }
+
+    .nav-container {
+        flex-direction: row;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 0;
+    }
+
+    .logo img {
+        height: 55px;
+    }
+
+    .nav-container > .btn-primary {
+        width: auto;
+        padding: 12px 18px;
+        white-space: nowrap;
+    }
+}
