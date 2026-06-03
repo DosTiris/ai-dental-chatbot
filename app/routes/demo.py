@@ -1,3 +1,5 @@
+import os
+import resend
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.database import SessionLocal
@@ -14,6 +16,35 @@ class DemoRequest(BaseModel):
     website: str | None = None
     interest: str
     message: str | None = None
+
+def send_demo_request_email(payload: DemoRequest):
+    resend.api_key = os.environ["RESEND_API_KEY"]
+
+    to_email = os.getenv("LEAD_NOTIFY_EMAIL", "appointments@dostiris.com")
+    from_email = os.environ["RESEND_FROM_EMAIL"]
+
+    subject = f"New Demo Request - {payload.practice_name.strip()}"
+
+    body = f"""
+New demo request received.
+
+Name: {payload.name}
+Practice: {payload.practice_name}
+Email: {payload.email}
+Phone: {payload.phone}
+Website: {payload.website or "Not provided"}
+Interest: {payload.interest}
+
+Message:
+{payload.message or "No message provided"}
+"""
+
+    resend.Emails.send({
+        "from": from_email,
+        "to": [to_email],
+        "subject": subject,
+        "html": "<pre style='font-family:Arial,sans-serif;white-space:pre-wrap'>" + body + "</pre>",
+    })
 
 
 @router.post("/demo-request")
@@ -42,6 +73,9 @@ def create_demo_request(payload: DemoRequest):
         )
 
         db.commit()
+
+        send_demo_request_email(payload)
+
         return {"ok": True, "message": "Demo request submitted successfully."}
 
     except Exception as e:
