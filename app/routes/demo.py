@@ -47,6 +47,35 @@ Message:
     })
 
 
+def send_demo_confirmation_email(payload: DemoRequest):
+    resend.api_key = os.environ["RESEND_API_KEY"]
+
+    from_email = os.environ["RESEND_FROM_EMAIL"]
+
+    subject = "We received your demo request"
+
+    body = f"""
+Hi {payload.name},
+
+Thank you for requesting a demo of Mia.
+
+We received your request and will contact you shortly to learn more about your practice and show you how Mia can help answer patient questions, capture leads, and handle appointment requests.
+
+Practice: {payload.practice_name}
+Interest: {payload.interest}
+
+Talk soon,
+Dos Tiris LLC
+"""
+
+    resend.Emails.send({
+        "from": from_email,
+        "to": [payload.email],
+        "subject": subject,
+        "html": "<pre style='font-family:Arial,sans-serif;white-space:pre-wrap'>" + body + "</pre>",
+    })
+
+
 @router.post("/demo-request")
 def create_demo_request(payload: DemoRequest):
     db = SessionLocal()
@@ -75,6 +104,7 @@ def create_demo_request(payload: DemoRequest):
         db.commit()
 
         send_demo_request_email(payload)
+        send_demo_confirmation_email(payload)
 
         return {"ok": True, "message": "Demo request submitted successfully."}
 
