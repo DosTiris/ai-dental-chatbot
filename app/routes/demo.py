@@ -1,5 +1,6 @@
 import os
 import resend
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.database import SessionLocal
@@ -80,6 +81,16 @@ Dos Tiris LLC
 def create_demo_request(payload: DemoRequest):
     db = SessionLocal()
 
+    phone_digits = re.sub(r"\D", "", payload.phone or "")
+
+    if len(phone_digits) != 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Please enter a valid 10-digit phone number."
+        )
+    
+    payload.phone = phone_digits
+
     try:
         db.execute(
             text("""
@@ -92,7 +103,7 @@ def create_demo_request(payload: DemoRequest):
                 "name": payload.name.strip()[:100],
                 "practice_name": payload.practice_name.strip()[:150],
                 "email": payload.email.strip()[:150],
-                "phone": payload.phone.strip()[:30],
+                "phone": phone_digits,
                 "website": payload.website.strip()[:250] if payload.website else None,
                 "interest": payload.interest.strip()[:50],
                 "message": payload.message.strip()[:1000] if payload.message else None,

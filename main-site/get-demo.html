@@ -39,7 +39,15 @@
 
                 <label>
                     Phone Number
-                    <input type="tel" name="phone" required>
+                    <input
+                        type="tel"
+                        name="phone"
+                        required
+                        minlength="10"
+                        maxlength="14"
+                        pattern="[\d\s\-\(\)]{10,14}"
+                        placeholder="516-555-1234"
+                    />
                 </label>
 
                 <label for="website">Current Website (optional)</label>
