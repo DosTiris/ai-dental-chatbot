@@ -721,3 +721,17 @@ bottom: calc(70vh + 96px);
     }
 
 }
+@media (max-width: 768px) {
+    .nav-links {
+        display: none;
+    }
+
+    .nav-container {
+        gap: 12px;
+        padding: 16px 0;
+    }
+
+    .logo img {
+        height: 55px;
+    }
+}
