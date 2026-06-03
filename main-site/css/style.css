@@ -610,3 +610,114 @@ bottom: calc(70vh + 96px);
     border:none;
     cursor:pointer;
 }
+
+/* =========================================
+   MOBILE
+========================================= */
+
+@media (max-width: 768px) {
+
+    .container{
+        width:95%;
+    }
+
+    /* Header */
+
+    .nav-container{
+        flex-direction:column;
+        gap:15px;
+    }
+
+    .logo img{
+        height:60px;
+    }
+
+    .nav-links{
+        gap:15px;
+        flex-wrap:wrap;
+        justify-content:center;
+    }
+
+    .btn-primary{
+        width:100%;
+        text-align:center;
+    }
+
+    /* Hero */
+
+    .hero{
+        padding:30px 0 50px;
+    }
+
+    .hero-container{
+        flex-direction:column;
+        text-align:center;
+    }
+
+    .hero-logo{
+        width:220px;
+    }
+
+    .hero-text h1{
+        font-size:48px;
+        line-height:1.1;
+    }
+
+    .hero-text p{
+        font-size:18px;
+    }
+
+    .hero-buttons{
+        flex-direction:column;
+    }
+
+    .hero-image img{
+        max-width:100%;
+    }
+
+    /* Problems */
+
+    .problem-grid{
+        grid-template-columns:1fr;
+    }
+
+    /* Meet Mia */
+
+    .meet-mia-grid{
+        grid-template-columns:1fr;
+        text-align:center;
+    }
+
+    .meet-mia h2{
+        font-size:42px;
+    }
+
+    .meet-mia-image img{
+        max-width:280px;
+        margin:auto;
+        display:block;
+    }
+
+    /* Features */
+
+    .feature-grid{
+        grid-template-columns:1fr;
+    }
+
+    /* Pricing */
+
+    .pricing-card{
+        padding:25px;
+    }
+
+    .price{
+        font-size:60px;
+    }
+
+    /* FAQ */
+
+    .faq-grid{
+        grid-template-columns:1fr;
+    }
+
+}
