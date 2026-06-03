@@ -652,7 +652,7 @@ bottom: calc(70vh + 96px);
     }
 
     .hero-logo{
-        width:220px;
+        width:180px;
     }
 
     .hero-text h1{
@@ -733,7 +733,7 @@ bottom: calc(70vh + 96px);
     }
 
     .logo img {
-        height: 75px;
+        height: 85px;
     }
 
     .nav-container > .btn-primary {
