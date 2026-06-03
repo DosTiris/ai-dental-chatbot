@@ -50,13 +50,14 @@ if (demoForm) {
             });
 
             if (!response.ok) {
-                throw new Error("Request failed");
+                const errorData = await response.json().catch(() => null);
+                throw new Error(errorData?.detail || "Request failed");
             }
 
             window.location.href = "thank-you.html";
 
         } catch (error) {
-            alert("Sorry, something went wrong. Please try again.");
+            alert(error.message || "Sorry, something went wrong. Please try again.");
         }
     });
 }
