@@ -628,9 +628,6 @@ bottom: calc(70vh + 96px);
         gap:15px;
     }
 
-    .logo img{
-        height:60px;
-    }
 
     .nav-links{
         gap:15px;
@@ -721,20 +718,7 @@ bottom: calc(70vh + 96px);
     }
 
 }
-@media (max-width: 768px) {
-    .nav-links {
-        display: none;
-    }
 
-    .nav-container {
-        gap: 12px;
-        padding: 16px 0;
-    }
-
-    .logo img {
-        height: 55px;
-    }
-}
 @media (max-width: 768px) {
     .nav-links {
         display: none;
@@ -749,7 +733,7 @@ bottom: calc(70vh + 96px);
     }
 
     .logo img {
-        height: 55px;
+        height: 75px;
     }
 
     .nav-container > .btn-primary {
