@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from app.database import SessionLocal
 from sqlalchemy import text
 
@@ -9,7 +9,7 @@ router = APIRouter()
 class DemoRequest(BaseModel):
     name: str
     practice_name: str
-    email: EmailStr
+    email: str
     phone: str
     website: str | None = None
     interest: str
