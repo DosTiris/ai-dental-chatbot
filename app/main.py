@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from app.database import Base, engine  # Import SQLAlchemy Base and engine so we can create tables
 from app.routes.chat import router as chat_router  # Import the chat router (the /chat endpoint)
 from app.routes.admin import router as admin_router  # Import the admin router (the /admin/* endpoints)
+from app.routes.demo import router as demo_router
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -33,6 +34,7 @@ app.add_middleware(
 # Routers
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(demo_router)
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)
