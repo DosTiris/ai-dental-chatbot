@@ -18,13 +18,18 @@ app.mount("/static", StaticFiles(directory="static"), name="static")  # ✅ Now 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost",
-        "http://localhost:3000",
-        "http://127.0.0.1",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5500",  # VSCode Live Server common port
-        "http://localhost:5500",
-    ],
+    "http://localhost",
+    "http://localhost:3000",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5500",
+    "http://localhost:5500",
+
+    "https://dostiris.com",
+    "https://www.dostiris.com",
+    "https://beta.dostiris.com",
+    "https://dostiris-beta.onrender.com",
+],
     allow_origin_regex=r"^null$",  # ✅ IMPORTANT: allows file:// opened pages (origin "null")
     allow_credentials=True,
     allow_methods=["*"],
