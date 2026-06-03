@@ -332,7 +332,40 @@ def edit_faq(
 
     return {"ok": True, "id": str(row.id)}
 
+@router.get("/demo-requests")
+def list_demo_requests(
+    limit: int = 50,
+    offset: int = 0,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
 
+    rows = db.execute(
+        sql_text("""
+            select
+                id,
+                created_at,
+                name,
+                practice_name,
+                email,
+                phone,
+                website,
+                interest,
+                message,
+                source,
+                status
+            from demo_requests
+            order by created_at desc
+            limit :limit offset :offset
+        """),
+        {"limit": limit, "offset": offset},
+    ).mappings().all()
+
+    return [dict(r) for r in rows]
 # -----------------------------
 # Leads
 # -----------------------------
