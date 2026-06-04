@@ -549,6 +549,9 @@
         }
 
         allRequests = data || [];
+
+        console.log("DEMO REQUESTS LOADED:", allRequests);
+
         renderRequests();
         setStatus(`Loaded ${allRequests.length} demo requests.`);
       } catch (error) {
