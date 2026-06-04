@@ -388,6 +388,43 @@
       gap: 12px;
       margin-top: 14px;
     }
+    .demo-count-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .demo-count-card {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+
+  .demo-count-number {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+
+  .demo-count-label {
+    font-size: 13px;
+    color: #6b7280;
+  }
+
+  @media (max-width: 900px) {
+    .demo-count-grid {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+
+  @media (max-width: 560px) {
+    .demo-count-grid {
+      grid-template-columns: 1fr;
+    }
+  }
 
     .snapshot-box {
       border: 1px solid #e5e7eb;
@@ -512,6 +549,38 @@
         <div id="status" class="muted" style="margin-top:12px;"></div>
       </section>
 
+      <section class="demo-count-grid">
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountTotal">0</div>
+          <div class="demo-count-label">Total Demo Requests</div>
+        </div>
+
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountNew">0</div>
+          <div class="demo-count-label">New</div>
+        </div>
+
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountContacted">0</div>
+          <div class="demo-count-label">Contacted</div>
+        </div>
+
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountScheduled">0</div>
+          <div class="demo-count-label">Demo Scheduled</div>
+        </div>
+
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountClosed">0</div>
+          <div class="demo-count-label">Closed</div>
+        </div>
+
+        <div class="demo-count-card">
+          <div class="demo-count-number" id="demoCountNotInterested">0</div>
+          <div class="demo-count-label">Not Interested</div>
+        </div>
+      </section>
+
       <section class="stats-row">
         <div class="stat-card active" data-filter="all">
           <div class="stat-number" id="statTotalLeads">0</div>
@@ -593,7 +662,7 @@
   <script>
      //const API_BASE = ""; 
 
-     const API_BASE = "http://127.0.0.1:8000";
+     const API_BASE = "";
 
     let allLeads = [];
     let currentFilter = "all";
