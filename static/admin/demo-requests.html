@@ -375,8 +375,10 @@
         item.website,
         item.interest,
         item.message,
-        item.status
-      ].join(" ").toLowerCase();
+        item.status,
+        item.notes_text,
+        item.notes
+        ].join(" ").toLowerCase();
 
       return haystack.includes(query.toLowerCase());
     }
@@ -421,7 +423,7 @@
               <div class="detail"><b>Notes:</b></div>
 
               <div class="detail" style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin-bottom:8px;">
-                <b>Saved Note:</b> ${escapeHtml(item.notes_text || "No note saved yet")}
+               <b>Saved Note:</b> ${escapeHtml(item.notes_text || item.notes || "No note saved yet")}
               </div>
 
             <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
@@ -437,11 +439,11 @@
       document.querySelectorAll(".notes-box").forEach(box => {
         const item = allRequests.find(r => String(r.id) === String(box.dataset.id));
 
-        if (item) {
-            box.value = item.notes_text || "";
+       if (item) {
+        item.notes_text = saved.notes || "";
+        item.notes = saved.notes || "";
         }
         });
-
       document.querySelectorAll(".status-select").forEach(select => {
         select.addEventListener("change", async () => {
             try {
@@ -466,9 +468,9 @@
             const saved = await updateNotes(requestId, notesBox.value);
 
             const item = allRequests.find(r => String(r.id) === String(requestId));
-           if (item) {
+           
             item.notes_text = saved.notes || "";
-            }
+            }if (item) {
 
             setStatus("Notes saved.");
             } catch (error) {
