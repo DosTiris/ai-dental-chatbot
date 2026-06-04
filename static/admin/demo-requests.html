@@ -460,24 +460,26 @@
 
       document.querySelectorAll(".save-notes-btn").forEach(button => {
         button.addEventListener("click", async () => {
-            const card = button.closest(".request-card");
-            const notesBox = card.querySelector(".notes-box");
-            const requestId = notesBox.dataset.id;
+          const card = button.closest(".request-card");
+          const notesBox = card.querySelector(".notes-box");
+          const requestId = notesBox.dataset.id;
 
-            try {
+          try {
             const saved = await updateNotes(requestId, notesBox.value);
 
             const item = allRequests.find(r => String(r.id) === String(requestId));
-           
-            item.notes_text = saved.notes || "";
-            }if (item) {
+
+            if (item) {
+              item.notes_text = saved.notes || "";
+              item.notes = saved.notes || "";
+            }
 
             setStatus("Notes saved.");
             } catch (error) {
-            setStatus("Notes save failed: " + error.message, true);
+              setStatus("Notes save failed: " + error.message, true);
             }
         });
-        });
+      });
     }
 
     async function updateNotes(requestId, notes) {
@@ -547,21 +549,23 @@
         setStatus("Loading demo requests...");
 
         const response = await fetch(API_BASE + "/admin/demo-requests?t=" + Date.now(), {
-            method: "GET",
-            cache: "no-store",
-            headers: {
-                "accept": "application/json",
-                "Cache-Control": "no-cache",
-                "x-admin-key": adminKey
-            }
-            });
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            "accept": "application/json",
+            "Cache-Control": "no-cache",
+            "x-admin-key": adminKey
+          }
+        });
 
         const text = await response.text();
         let data = null;
 
         try {
           data = text ? JSON.parse(text) : null;
-        } catch (e) {}
+        } catch (e) {
+          data = null;
+        }
 
         if (!response.ok) {
           throw new Error(data?.detail || text || "Failed to load demo requests.");
