@@ -368,6 +368,41 @@ def list_demo_requests(
     ).mappings().all()
 
     return [dict(r) for r in rows]
+
+@router.get("/demo-requests/counts")
+def demo_request_counts(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    rows = db.execute(
+        sql_text("""
+            select
+                coalesce(status, 'new') as status,
+                count(*) as count
+            from demo_requests
+            group by coalesce(status, 'new')
+        """)
+    ).mappings().all()
+
+    counts = {
+        "new": 0,
+        "contacted": 0,
+        "demo_scheduled": 0,
+        "closed": 0,
+        "not_interested": 0,
+        "total": 0,
+    }
+
+    for row in rows:
+        status = row["status"]
+        count = int(row["count"] or 0)
+
+        if status in counts:
+            counts[status] = count
+
+        counts["total"] += count
+
+    return counts
 # -----------------------------
 # Leads
 # -----------------------------
