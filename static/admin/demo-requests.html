@@ -77,7 +77,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: 1fr 1fr auto;
+      grid-template-columns: 1fr 1fr 220px auto;
       gap: 12px;
       align-items: end;
     }
@@ -96,6 +96,15 @@
       border-radius: 10px;
       font-size: 14px;
       box-sizing: border-box;
+    }
+
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+      background: #fff;
     }
 
     button {
@@ -293,6 +302,18 @@
           </div>
 
           <div>
+            <label><b>Status Filter</b></label>
+            <select id="statusFilter">
+              <option value="all">All</option>
+              <option value="new">New</option>
+              <option value="contacted">Contacted</option>
+              <option value="demo_scheduled">Demo Scheduled</option>
+              <option value="closed">Closed</option>
+              <option value="not_interested">Not Interested</option>
+            </select>
+          </div>
+
+          <div>
             <button id="loadBtn">Load Requests</button>
           </div>
         </div>
@@ -386,9 +407,16 @@
     function renderRequests() {
       const list = $("requestList");
       const query = ($("searchInput").value || "").trim();
+      const selectedStatus = $("statusFilter") ? $("statusFilter").value : "all";
 
-      const rows = allRequests.filter(item => matchesSearch(item, query));
+      const rows = allRequests.filter(item => {
+        const itemStatus = item.status || "new";
 
+        const matchesStatus =
+          selectedStatus === "all" || itemStatus === selectedStatus;
+
+        return matchesStatus && matchesSearch(item, query);
+      });
       if (!rows.length) {
         list.innerHTML = `<div class="empty">No demo requests match this search.</div>`;
         return;
@@ -448,9 +476,16 @@
             try {
             await updateStatus(select.dataset.id, select.value);
 
+            const item = allRequests.find(r => String(r.id) === String(select.dataset.id));
+            if (item) {
+              item.status = select.value;
+            }
+
             select.className = `status-select status-${select.value}`;
 
             setStatus("Status updated.");
+
+            renderRequests();
             } catch (error) {
             setStatus("Status update failed: " + error.message, true);
             }
@@ -582,7 +617,18 @@
     $("loadBtn").addEventListener("click", loadRequests);
     $("searchInput").addEventListener("input", renderRequests);
 
+    $("statusFilter")?.addEventListener("change", () => {
+      renderRequests();
+    });
+
     loadAdminKey();
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const statusFromUrl = urlParams.get("status");
+
+    if (statusFromUrl && $("statusFilter")) {
+      $("statusFilter").value = statusFromUrl;
+    }
   </script>
 </body>
 </html>

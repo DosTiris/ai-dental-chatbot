@@ -395,12 +395,19 @@
     margin-bottom: 24px;
   }
 
-  .demo-count-card {
+    .demo-count-card {
     background: #ffffff;
     border: 1px solid #e5e7eb;
     border-radius: 16px;
     padding: 16px;
     box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+
+  .demo-count-card:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.06);
   }
 
   .demo-count-number {
@@ -550,32 +557,32 @@
       </section>
 
       <section class="demo-count-grid">
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('all')">
           <div class="demo-count-number" id="demoCountTotal">0</div>
           <div class="demo-count-label">Total Demo Requests</div>
         </div>
 
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('new')">
           <div class="demo-count-number" id="demoCountNew">0</div>
           <div class="demo-count-label">New</div>
         </div>
 
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('contacted')">
           <div class="demo-count-number" id="demoCountContacted">0</div>
           <div class="demo-count-label">Contacted</div>
         </div>
 
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('demo_scheduled')">
           <div class="demo-count-number" id="demoCountScheduled">0</div>
           <div class="demo-count-label">Demo Scheduled</div>
         </div>
 
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('closed')">
           <div class="demo-count-number" id="demoCountClosed">0</div>
           <div class="demo-count-label">Closed</div>
         </div>
 
-        <div class="demo-count-card">
+        <div class="demo-count-card" onclick="goToDemoRequests('not_interested')">
           <div class="demo-count-number" id="demoCountNotInterested">0</div>
           <div class="demo-count-label">Not Interested</div>
         </div>
@@ -668,6 +675,15 @@
     let currentFilter = "all";
 
     function $(id){ return document.getElementById(id); }
+
+    function goToDemoRequests(status) {
+      if (status === "all") {
+        window.location.href = "/static/admin/demo-requests.html";
+        return;
+      }
+
+      window.location.href = "/static/admin/demo-requests.html?status=" + encodeURIComponent(status);
+    }
 
     function handleCall(phone) {
       if (phone) {
