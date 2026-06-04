@@ -449,7 +449,13 @@
             const notesBox = document.querySelector(`.notes-box[data-id="${requestId}"]`);
 
             try {
-            await updateNotes(requestId, notesBox.value);
+            const saved = await updateNotes(requestId, notesBox.value);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
+            if (item) {
+            item.notes = saved.notes || "";
+            }
+
             setStatus("Notes saved.");
             } catch (error) {
             setStatus("Notes save failed: " + error.message, true);

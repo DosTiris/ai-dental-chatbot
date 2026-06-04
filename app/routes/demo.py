@@ -207,11 +207,12 @@ def update_demo_request_notes(request_id: str, payload: dict):
     notes = payload.get("notes", "")
 
     try:
-        db.execute(
+        result = db.execute(
             text("""
                 UPDATE demo_requests
                 SET notes = :notes
                 WHERE id = :id
+                RETURNING id, notes
             """),
             {
                 "notes": notes,
@@ -219,9 +220,22 @@ def update_demo_request_notes(request_id: str, payload: dict):
             },
         )
 
+        updated = result.mappings().first()
+
+        if not updated:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Demo request not found.")
+
         db.commit()
 
-        return {"ok": True, "notes": notes}
+        return {
+            "ok": True,
+            "id": str(updated["id"]),
+            "notes": updated["notes"]
+        }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         db.rollback()
