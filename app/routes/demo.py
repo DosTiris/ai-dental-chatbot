@@ -144,6 +144,7 @@ def get_demo_requests():
                     interest,
                     message,
                     status,
+                    notes,
                     created_at
                 FROM demo_requests
                 ORDER BY created_at DESC
