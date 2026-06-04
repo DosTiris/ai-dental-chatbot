@@ -200,8 +200,7 @@ def update_demo_request_status(request_id: str, payload: dict):
         db.close()
 
 @router.post("/admin/demo-requests/{request_id}/notes")
-def update_demo_request_notes(request_id: str, payload: dict, x_admin_key: str = Header(None)):
-    require_admin_key(x_admin_key)
+def update_demo_request_notes(request_id: str, payload: dict):
 
     notes = payload.get("notes", "")
 
