@@ -156,3 +156,45 @@ def get_demo_requests():
 
     finally:
         db.close()
+
+@router.post("/admin/demo-requests/{request_id}/status")
+def update_demo_request_status(request_id: str, payload: dict):
+    db = SessionLocal()
+
+    allowed_statuses = [
+        "new",
+        "contacted",
+        "demo_scheduled",
+        "closed",
+        "not_interested"
+    ]
+
+    new_status = payload.get("status")
+
+    if new_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Invalid status.")
+
+    try:
+        db.execute(
+            text("""
+                UPDATE demo_requests
+                SET status = :status
+                WHERE id = :id
+            """),
+            {
+                "status": new_status,
+                "id": request_id,
+            },
+        )
+
+        db.commit()
+
+        return {"ok": True, "status": new_status}
+
+    except Exception as e:
+        db.rollback()
+        print("[DEMO_STATUS_UPDATE_ERROR]", repr(e))
+        raise HTTPException(status_code=500, detail="Unable to update status.")
+
+    finally:
+        db.close()

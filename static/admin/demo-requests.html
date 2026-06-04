@@ -174,6 +174,17 @@
       margin-bottom: 10px;
     }
 
+.status-select {
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  background: #dcfce7;
+  color: #166534;
+  margin-bottom: 10px;
+}
+
     .empty {
       color: #6b7280;
       text-align: center;
@@ -337,6 +348,7 @@
       }
 
       list.innerHTML = rows.map(item => `
+      
         <div class="request-card">
           <div class="request-grid">
             <div>
@@ -352,14 +364,57 @@
             </div>
 
             <div>
-              <div class="badge">${escapeHtml((item.status || "new").toUpperCase())}</div>
+             <select class="status-select" data-id="${escapeHtml(item.id)}">
+                <option value="new" ${(item.status || "new") === "new" ? "selected" : ""}>New</option>
+                <option value="contacted" ${item.status === "contacted" ? "selected" : ""}>Contacted</option>
+                <option value="demo_scheduled" ${item.status === "demo_scheduled" ? "selected" : ""}>Demo Scheduled</option>
+                <option value="closed" ${item.status === "closed" ? "selected" : ""}>Closed</option>
+                <option value="not_interested" ${item.status === "not_interested" ? "selected" : ""}>Not Interested</option>
+            </select>
               <div class="detail"><b>Interest:</b> ${escapeHtml(formatInterest(item.interest))}</div>
               <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
             </div>
           </div>
         </div>
       `).join("");
+      document.querySelectorAll(".status-select").forEach(select => {
+        select.addEventListener("change", async () => {
+            try {
+            await updateStatus(select.dataset.id, select.value);
+            setStatus("Status updated.");
+            } catch (error) {
+            setStatus("Status update failed: " + error.message, true);
+            }
+        });
+        });
     }
+
+    async function updateStatus(requestId, status) {
+        const adminKey = getAdminKey();
+
+        const response = await fetch(`/admin/demo-requests/${requestId}/status`, {
+            method: "POST",
+            headers: {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey
+            },
+            body: JSON.stringify({ status })
+        });
+
+        const text = await response.text();
+        let data = null;
+
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch (e) {}
+
+        if (!response.ok) {
+            throw new Error(data?.detail || text || "Unable to update status.");
+        }
+
+        return data;
+        }
 
     async function loadRequests() {
       const adminKey = getAdminKey();
