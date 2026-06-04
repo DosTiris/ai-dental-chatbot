@@ -180,9 +180,33 @@
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 700;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+.status-new {
   background: #dcfce7;
   color: #166534;
-  margin-bottom: 10px;
+}
+
+.status-contacted {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.status-demo_scheduled {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.status-closed {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.status-not_interested {
+  background: #fee2e2;
+  color: #b91c1c;
 }
 
     .empty {
@@ -364,7 +388,7 @@
             </div>
 
             <div>
-             <select class="status-select" data-id="${escapeHtml(item.id)}">
+             <select class="status-select status-${escapeHtml(item.status || "new")}" data-id="${escapeHtml(item.id)}">
                 <option value="new" ${(item.status || "new") === "new" ? "selected" : ""}>New</option>
                 <option value="contacted" ${item.status === "contacted" ? "selected" : ""}>Contacted</option>
                 <option value="demo_scheduled" ${item.status === "demo_scheduled" ? "selected" : ""}>Demo Scheduled</option>
@@ -381,6 +405,9 @@
         select.addEventListener("change", async () => {
             try {
             await updateStatus(select.dataset.id, select.value);
+
+            select.className = `status-select status-${select.value}`;
+
             setStatus("Status updated.");
             } catch (error) {
             setStatus("Status update failed: " + error.message, true);
