@@ -1,121 +1,408 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Demo Requests</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin - Demo Requests</title>
 
-<style>
-body{
-    font-family:Arial,sans-serif;
-    background:#f5f7fb;
-    margin:0;
-    padding:20px;
-}
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f6f8fb;
+      color: #111827;
+    }
 
-h1{
-    margin-bottom:20px;
-}
+    .layout {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 100vh;
+    }
 
-table{
-    width:100%;
-    border-collapse:collapse;
-    background:white;
-}
+    .sidebar {
+      background: #fff;
+      border-right: 1px solid #e5e7eb;
+      padding: 24px 18px;
+    }
 
-th,td{
-    padding:12px;
-    border:1px solid #ddd;
-    text-align:left;
-}
+    .brand {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 28px;
+    }
 
-th{
-    background:#1e40af;
-    color:white;
-}
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
 
-.loading{
-    padding:20px;
-}
-</style>
+    .nav a {
+      text-decoration: none;
+      color: #374151;
+      padding: 10px 12px;
+      border-radius: 10px;
+      display: block;
+    }
+
+    .nav a.active {
+      background: #eef2ff;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+
+    .main {
+      padding: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+
+    .subtitle {
+      color: #6b7280;
+      margin-top: 6px;
+      margin-bottom: 22px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      margin-bottom: 20px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      font-weight: 700;
+      font-size: 14px;
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: #111827;
+      color: white;
+    }
+
+    .muted {
+      color: #6b7280;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    .danger {
+      color: #b00020;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    .request-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .request-card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .request-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+    }
+
+    .request-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .request-sub {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 5px;
+      word-break: break-word;
+    }
+
+    .detail {
+      font-size: 14px;
+      margin-bottom: 7px;
+      line-height: 1.45;
+    }
+
+    .detail b {
+      color: #111827;
+    }
+
+    .badge {
+      display: inline-block;
+      background: #dcfce7;
+      color: #166534;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .empty {
+      color: #6b7280;
+      text-align: center;
+      padding: 30px;
+      border: 1px dashed #d1d5db;
+      border-radius: 14px;
+      background: #fafafa;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .request-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
 </head>
+
 <body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">DentalBot Admin</div>
 
-<h1>Demo Requests</h1>
+      <nav class="nav">
+        <a href="/static/admin/dashboard.html">Dashboard</a>
+        <a href="/static/admin/demo-requests.html" class="active">Demo Requests</a>
+        <a href="/static/admin/faqs.html">FAQs</a>
+      </nav>
 
-<div id="loading" class="loading">
-    Loading...
-</div>
+      <div class="muted" style="margin-top:32px;">
+        Internal dashboard for managing demo requests.
+      </div>
+    </aside>
 
-<table id="requestsTable" style="display:none;">
-    <thead>
-        <tr>
-            <th>Date</th>
-            <th>Name</th>
-            <th>Practice</th>
-            <th>Email</th>
-            <th>Phone</th>
-            <th>Interest</th>
-        </tr>
-    </thead>
-    <tbody id="tableBody"></tbody>
-</table>
+    <main class="main">
+      <h1>Demo Requests</h1>
+      <p class="subtitle">View new demo requests from the Dos Tiris website.</p>
 
-<script>
+      <section class="card">
+        <div class="controls">
+          <div>
+            <label>Admin Key</label>
+            <input id="adminKey" type="text" placeholder="x-admin-key value" />
+          </div>
 
-const ADMIN_KEY = prompt("Enter Admin Key");
+          <div>
+            <label>Search</label>
+            <input id="searchInput" type="text" placeholder="Search name, practice, phone, email..." />
+          </div>
 
-async function loadRequests() {
+          <div>
+            <button id="loadBtn">Load Requests</button>
+          </div>
+        </div>
 
-    try {
+        <div id="status" class="muted">Enter admin key, then click Load Requests.</div>
+      </section>
 
-        const response = await fetch("/admin/demo-requests", {
-            headers: {
-                "x-admin-key": ADMIN_KEY
-            }
+      <section id="requestList" class="request-list">
+        <div class="empty">No demo requests loaded yet.</div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const API_BASE = "";
+    let allRequests = [];
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function escapeHtml(str) {
+      return String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function formatDate(value) {
+      if (!value) return "—";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return value;
+
+      return d.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    }
+
+    function formatInterest(value) {
+      const map = {
+        mia: "Mia Only",
+        website_mia: "Website + Mia",
+        not_sure: "Not Sure Yet"
+      };
+
+      return map[value] || value || "—";
+    }
+
+    function setStatus(message, isError = false) {
+      $("status").textContent = message;
+      $("status").className = isError ? "danger" : "muted";
+    }
+
+    function getAdminKey() {
+      return ($("adminKey").value || "").trim();
+    }
+
+    function saveAdminKey() {
+      localStorage.setItem("adminKey", getAdminKey());
+    }
+
+    function loadAdminKey() {
+      $("adminKey").value = localStorage.getItem("adminKey") || "";
+    }
+
+    function matchesSearch(item, query) {
+      if (!query) return true;
+
+      const haystack = [
+        item.name,
+        item.practice_name,
+        item.email,
+        item.phone,
+        item.website,
+        item.interest,
+        item.message,
+        item.status
+      ].join(" ").toLowerCase();
+
+      return haystack.includes(query.toLowerCase());
+    }
+
+    function renderRequests() {
+      const list = $("requestList");
+      const query = ($("searchInput").value || "").trim();
+
+      const rows = allRequests.filter(item => matchesSearch(item, query));
+
+      if (!rows.length) {
+        list.innerHTML = `<div class="empty">No demo requests match this search.</div>`;
+        return;
+      }
+
+      list.innerHTML = rows.map(item => `
+        <div class="request-card">
+          <div class="request-grid">
+            <div>
+              <div class="request-title">${escapeHtml(item.practice_name || "Unnamed Practice")}</div>
+              <div class="request-sub">${escapeHtml(item.name || "No name provided")}</div>
+              <div class="request-sub">Received: ${escapeHtml(formatDate(item.created_at))}</div>
+            </div>
+
+            <div>
+              <div class="detail"><b>Phone:</b> ${escapeHtml(item.phone || "—")}</div>
+              <div class="detail"><b>Email:</b> ${escapeHtml(item.email || "—")}</div>
+              <div class="detail"><b>Website:</b> ${escapeHtml(item.website || "Not provided")}</div>
+            </div>
+
+            <div>
+              <div class="badge">${escapeHtml((item.status || "new").toUpperCase())}</div>
+              <div class="detail"><b>Interest:</b> ${escapeHtml(formatInterest(item.interest))}</div>
+              <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
+            </div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    async function loadRequests() {
+      const adminKey = getAdminKey();
+
+      if (!adminKey) {
+        setStatus("Enter admin key first.", true);
+        return;
+      }
+
+      try {
+        saveAdminKey();
+        setStatus("Loading demo requests...");
+
+        const response = await fetch(API_BASE + "/admin/demo-requests", {
+          headers: {
+            "accept": "application/json",
+            "x-admin-key": adminKey
+          }
         });
+
+        const text = await response.text();
+        let data = null;
+
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch (e) {}
 
         if (!response.ok) {
-            throw new Error("Unauthorized");
+          throw new Error(data?.detail || text || "Failed to load demo requests.");
         }
 
-        const data = await response.json();
-
-        document.getElementById("loading").style.display = "none";
-        document.getElementById("requestsTable").style.display = "table";
-
-        const tbody = document.getElementById("tableBody");
-
-        data.forEach(item => {
-
-            const row = document.createElement("tr");
-
-            row.innerHTML = `
-                <td>${item.created_at || ""}</td>
-                <td>${item.name || ""}</td>
-                <td>${item.practice_name || ""}</td>
-                <td>${item.email || ""}</td>
-                <td>${item.phone || ""}</td>
-                <td>${item.interest || ""}</td>
-            `;
-
-            tbody.appendChild(row);
-
-        });
-
-    } catch (err) {
-
-        document.getElementById("loading").innerHTML =
-            "Failed to load demo requests.";
-
-        console.error(err);
-
+        allRequests = data || [];
+        renderRequests();
+        setStatus(`Loaded ${allRequests.length} demo requests.`);
+      } catch (error) {
+        setStatus("Load failed: " + error.message, true);
+      }
     }
-}
 
-loadRequests();
+    $("loadBtn").addEventListener("click", loadRequests);
+    $("searchInput").addEventListener("input", renderRequests);
 
-</script>
-
+    loadAdminKey();
+  </script>
 </body>
 </html>
