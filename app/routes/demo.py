@@ -126,3 +126,33 @@ def create_demo_request(payload: DemoRequest):
 
     finally:
         db.close()
+
+@router.get("/admin/demo-requests")
+def get_demo_requests():
+    db = SessionLocal()
+
+    try:
+        result = db.execute(
+            text("""
+                SELECT
+                    id,
+                    name,
+                    practice_name,
+                    email,
+                    phone,
+                    website,
+                    interest,
+                    message,
+                    status,
+                    created_at
+                FROM demo_requests
+                ORDER BY created_at DESC
+            """)
+        )
+
+        rows = result.mappings().all()
+
+        return [dict(row) for row in rows]
+
+    finally:
+        db.close()
