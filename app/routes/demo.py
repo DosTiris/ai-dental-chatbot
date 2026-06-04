@@ -198,3 +198,23 @@ def update_demo_request_status(request_id: str, payload: dict):
 
     finally:
         db.close()
+
+@router.post("/admin/demo-requests/{request_id}/notes")
+def update_demo_request_notes(request_id: str, payload: dict, x_admin_key: str = Header(None)):
+    require_admin_key(x_admin_key)
+
+    notes = payload.get("notes", "")
+
+    result = (
+        supabase
+        .table("demo_requests")
+        .update({"notes": notes})
+        .eq("id", request_id)
+        .execute()
+    )
+
+    return {
+        "success": True,
+        "request_id": request_id,
+        "notes": notes
+    }
