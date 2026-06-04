@@ -143,6 +143,7 @@ def get_demo_requests():
                     website,
                     interest,
                     message,
+                    source,
                     status,
                     notes,
                     created_at
@@ -153,7 +154,25 @@ def get_demo_requests():
 
         rows = result.mappings().all()
 
-        return [dict(row) for row in rows]
+        demo_requests = []
+
+        for row in rows:
+            demo_requests.append({
+                "id": str(row["id"]),
+                "name": row["name"],
+                "practice_name": row["practice_name"],
+                "email": row["email"],
+                "phone": row["phone"],
+                "website": row["website"],
+                "interest": row["interest"],
+                "message": row["message"],
+                "source": row["source"],
+                "status": row["status"],
+                "notes": row["notes"],
+                "created_at": row["created_at"],
+            })
+
+        return demo_requests
 
     finally:
         db.close()
