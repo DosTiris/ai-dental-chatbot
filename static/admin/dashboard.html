@@ -823,6 +823,17 @@
       return haystack.includes(query.toLowerCase());
     }
 
+    async function loadDemoRequestCounts() {
+      const counts = await apiGet("/admin/demo-requests/counts");
+
+      $("demoCountTotal").textContent = String(counts.total || 0);
+      $("demoCountNew").textContent = String(counts.new || 0);
+      $("demoCountContacted").textContent = String(counts.contacted || 0);
+      $("demoCountScheduled").textContent = String(counts.demo_scheduled || 0);
+      $("demoCountClosed").textContent = String(counts.closed || 0);
+      $("demoCountNotInterested").textContent = String(counts.not_interested || 0);
+    }
+
     function renderStats(leads, overview){
       const priorityCount = leads.filter(l => l.lead_is_priority).length;
       const emergencyCount = leads.filter(l => l.lead_is_emergency).length;
@@ -956,9 +967,13 @@
       try {
         setStatus("Loading...");
 
+        await loadDemoRequestCounts();
+
+       
+
         const overview = await apiGet(`/admin/dashboard/overview?client_key=${encodeURIComponent(clientKey)}&days=30`);
         const leads = await apiGet(`/admin/leads?client_key=${encodeURIComponent(clientKey)}&days=30&limit=25&offset=0`);
-
+        
         allLeads = leads || [];
 
         renderStats(allLeads, overview);
