@@ -357,7 +357,9 @@ def list_demo_requests(
                 interest,
                 message,
                 source,
-                status
+                status,
+                notes,
+                coalesce(notes, '') as notes_text
             from demo_requests
             order by created_at desc
             limit :limit offset :offset
