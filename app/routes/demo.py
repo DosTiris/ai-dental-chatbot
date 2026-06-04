@@ -213,6 +213,9 @@ def update_demo_request_notes(request_id: str, payload: dict, x_admin_key: str =
         .execute()
     )
 
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Demo request not found or notes not updated.")
+
     return {
         "success": True,
         "request_id": request_id,
