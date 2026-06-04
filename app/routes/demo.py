@@ -201,22 +201,31 @@ def update_demo_request_status(request_id: str, payload: dict):
 
 @router.post("/admin/demo-requests/{request_id}/notes")
 def update_demo_request_notes(request_id: str, payload: dict):
+    db = SessionLocal()
 
     notes = payload.get("notes", "")
 
-    result = (
-        supabase
-        .table("demo_requests")
-        .update({"notes": notes})
-        .eq("id", request_id)
-        .execute()
-    )
+    try:
+        db.execute(
+            text("""
+                UPDATE demo_requests
+                SET notes = :notes
+                WHERE id = :id
+            """),
+            {
+                "notes": notes,
+                "id": request_id,
+            },
+        )
 
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Demo request not found or notes not updated.")
+        db.commit()
 
-    return {
-        "success": True,
-        "request_id": request_id,
-        "notes": notes
-    }
+        return {"ok": True, "notes": notes}
+
+    except Exception as e:
+        db.rollback()
+        print("[DEMO_NOTES_UPDATE_ERROR]", repr(e))
+        raise HTTPException(status_code=500, detail="Unable to update notes.")
+
+    finally:
+        db.close()
