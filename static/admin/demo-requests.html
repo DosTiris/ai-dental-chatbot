@@ -531,12 +531,15 @@
         saveAdminKey();
         setStatus("Loading demo requests...");
 
-        const response = await fetch(API_BASE + "/admin/demo-requests", {
-          headers: {
-            "accept": "application/json",
-            "x-admin-key": adminKey
-          }
-        });
+        const response = await fetch(API_BASE + "/admin/demo-requests?t=" + Date.now(), {
+            method: "GET",
+            cache: "no-store",
+            headers: {
+                "accept": "application/json",
+                "Cache-Control": "no-cache",
+                "x-admin-key": adminKey
+            }
+            });
 
         const text = await response.text();
         let data = null;
