@@ -420,8 +420,7 @@
               <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
               <div class="detail"><b>Notes:</b></div>
 
-              <textarea class="notes-box" data-id="${escapeHtml(item.id)}">${escapeHtml(item.notes || "")}</textarea>
-
+              <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
               <button class="save-notes-btn" type="button" data-id="${escapeHtml(item.id)}">
               Save Notes
               </button>
@@ -429,6 +428,15 @@
           </div>
         </div>
       `).join("");
+
+      document.querySelectorAll(".notes-box").forEach(box => {
+        const item = allRequests.find(r => String(r.id) === String(box.dataset.id));
+
+        if (item) {
+            box.value = item.notes || "";
+        }
+        });
+
       document.querySelectorAll(".status-select").forEach(select => {
         select.addEventListener("change", async () => {
             try {
