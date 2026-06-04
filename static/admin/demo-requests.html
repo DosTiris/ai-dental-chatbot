@@ -421,7 +421,7 @@
               <div class="detail"><b>Notes:</b></div>
 
               <div class="detail" style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin-bottom:8px;">
-                <b>Saved Note:</b> ${escapeHtml(item.notes || "No note saved yet")}
+                <b>Saved Note:</b> ${escapeHtml(item.notes_text || "No note saved yet")}
               </div>
 
             <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
@@ -438,10 +438,7 @@
         const item = allRequests.find(r => String(r.id) === String(box.dataset.id));
 
         if (item) {
-            console.log("FILLING NOTE BOX:", box.dataset.id, item.notes);
-
-            box.value = item.notes || "";
-            box.textContent = item.notes || "";
+            box.value = item.notes_text || "";
         }
         });
 
@@ -469,8 +466,8 @@
             const saved = await updateNotes(requestId, notesBox.value);
 
             const item = allRequests.find(r => String(r.id) === String(requestId));
-            if (item) {
-                item.notes = saved.notes || "";
+           if (item) {
+            item.notes_text = saved.notes || "";
             }
 
             setStatus("Notes saved.");
@@ -569,8 +566,6 @@
         }
 
         allRequests = data || [];
-
-        console.log("DEMO REQUESTS LOADED:", allRequests);
 
         renderRequests();
         setStatus(`Loaded ${allRequests.length} demo requests.`);

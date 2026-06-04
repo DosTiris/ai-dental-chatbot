@@ -145,7 +145,7 @@ def get_demo_requests():
                     message,
                     source,
                     status,
-                    notes,
+                    COALESCE(notes, '') AS notes_text,
                     created_at
                 FROM demo_requests
                 ORDER BY created_at DESC
@@ -168,7 +168,7 @@ def get_demo_requests():
                 "message": row["message"],
                 "source": row["source"],
                 "status": row["status"],
-                "notes": row["notes"],
+                "notes_text": row["notes_text"],
                 "created_at": row["created_at"],
             })
 
