@@ -445,15 +445,16 @@
 
       document.querySelectorAll(".save-notes-btn").forEach(button => {
         button.addEventListener("click", async () => {
-            const requestId = button.dataset.id;
-            const notesBox = document.querySelector(`.notes-box[data-id="${requestId}"]`);
+            const card = button.closest(".request-card");
+            const notesBox = card.querySelector(".notes-box");
+            const requestId = notesBox.dataset.id;
 
             try {
             const saved = await updateNotes(requestId, notesBox.value);
 
             const item = allRequests.find(r => String(r.id) === String(requestId));
             if (item) {
-            item.notes = saved.notes || "";
+                item.notes = saved.notes || "";
             }
 
             setStatus("Notes saved.");
