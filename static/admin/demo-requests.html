@@ -439,11 +439,10 @@
       document.querySelectorAll(".notes-box").forEach(box => {
         const item = allRequests.find(r => String(r.id) === String(box.dataset.id));
 
-      if (item) {
-        item.notes_text = saved.notes || "";
-        item.notes = saved.notes || "";
+        if (item) {
+          box.value = item.notes_text || item.notes || "";
         }
-        });
+      });
       document.querySelectorAll(".status-select").forEach(select => {
         select.addEventListener("change", async () => {
             try {
