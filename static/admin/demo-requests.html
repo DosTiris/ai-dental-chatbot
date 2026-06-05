@@ -202,6 +202,16 @@
       font-size: 13px;
     }
 
+    .archive-request-btn {
+      margin-top: 10px;
+      margin-left: 8px;
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
     .details-panel {
       display: none;
       margin-top: 12px;
@@ -562,6 +572,10 @@
                 View Details
               </button>
 
+              <button class="archive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
+                Archive
+              </button>
+
               <div class="details-panel" data-id="${escapeHtml(item.id)}">
                 <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
                 <div class="detail"><b>Notes:</b></div>
@@ -601,6 +615,28 @@
           button.textContent = panel.classList.contains("open")
             ? "Hide Details"
             : "View Details";
+        });
+      });
+
+      document.querySelectorAll(".archive-request-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+          const requestId = button.dataset.id;
+
+          const confirmed = confirm("Archive this demo request? It will be hidden from the active list.");
+
+          if (!confirmed) return;
+
+          try {
+            await archiveRequest(requestId);
+
+            allRequests = allRequests.filter(r => String(r.id) !== String(requestId));
+
+            renderRequests();
+
+            setStatus("Demo request archived.");
+          } catch (error) {
+            setStatus("Archive failed: " + error.message, true);
+          }
         });
       });
 
@@ -675,6 +711,32 @@
 
         return data;
         }
+
+    async function archiveRequest(requestId) {
+      const adminKey = getAdminKey();
+
+      const response = await fetch(`/admin/demo-requests/${requestId}/archive`, {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey
+        }
+      });
+
+      const text = await response.text();
+      let data = null;
+
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {}
+
+      if (!response.ok) {
+        throw new Error(data?.detail || text || "Unable to archive request.");
+      }
+
+      return data;
+    }
 
     async function updateStatus(requestId, status) {
         const adminKey = getAdminKey();

@@ -361,6 +361,7 @@ def list_demo_requests(
                 notes,
                 coalesce(notes, '') as notes_text
             from demo_requests
+            where coalesce(archived, false) = false
             order by created_at desc
             limit :limit offset :offset
         """),
@@ -380,6 +381,7 @@ def demo_request_counts(
                 coalesce(status, 'new') as status,
                 count(*) as count
             from demo_requests
+            where coalesce(archived, false) = false
             group by coalesce(status, 'new')
         """)
     ).mappings().all()
@@ -403,6 +405,33 @@ def demo_request_counts(
         counts["total"] += count
 
     return counts
+
+@router.post("/demo-requests/{request_id}/archive")
+def archive_demo_request(
+    request_id: str,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    result = db.execute(
+        sql_text("""
+            update demo_requests
+            set archived = true
+            where id = :id
+            returning id
+        """),
+        {"id": request_id},
+    ).mappings().first()
+
+    db.commit()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Demo request not found.")
+
+    return {
+        "ok": True,
+        "id": str(result["id"]),
+        "archived": True,
+    }
 # -----------------------------
 # Leads
 # -----------------------------
