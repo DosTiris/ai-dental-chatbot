@@ -388,6 +388,33 @@
       gap: 12px;
       margin-top: 14px;
     }
+
+    .demo-count-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin: 22px 0 12px;
+    }
+
+    .demo-count-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    #refreshDemoCountsBtn {
+      background: #111827;
+      color: #ffffff;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    #refreshDemoCountsBtn:hover {
+      opacity: 0.92;
+    }
+
     .demo-count-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -555,6 +582,11 @@
         </div>
         <div id="status" class="muted" style="margin-top:12px;"></div>
       </section>
+
+      <div class="demo-count-header">
+        <h2>Demo Request Pipeline</h2>
+        <button id="refreshDemoCountsBtn" type="button">Refresh Counts</button>
+      </div>
 
       <section class="demo-count-grid">
         <div class="demo-count-card" onclick="goToDemoRequests('all')">
@@ -1004,6 +1036,14 @@
 
     $("saveBtn").addEventListener("click", saveLocal);
     $("loadBtn").addEventListener("click", loadAll);
+    $("refreshDemoCountsBtn")?.addEventListener("click", async () => {
+      try {
+        await loadDemoRequestCounts();
+        setStatus("Demo request counts refreshed.");
+      } catch (error) {
+        setStatus("Demo count refresh failed: " + error.message, true);
+      }
+    });
     $("searchInput").addEventListener("input", () => renderLeads(allLeads));
 
     document.querySelectorAll(".filter-btn").forEach(btn => {
@@ -1015,6 +1055,11 @@
     });
 
     loadLocal();
+
+    if (getAdminKey()) {
+      loadDemoRequestCounts().catch(() => {});
+    }
+
     setStatus("Enter admin key + client key, then click Load.");
   </script>
 </body>
