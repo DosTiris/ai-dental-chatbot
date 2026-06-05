@@ -193,6 +193,26 @@
     font-size: 13px;
     }
 
+    .toggle-details-btn {
+      margin-top: 10px;
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .details-panel {
+      display: none;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed #e5e7eb;
+    }
+
+    .details-panel.open {
+      display: block;
+    }
+
     .badge {
       display: inline-block;
       background: #dcfce7;
@@ -502,26 +522,34 @@
             </div>
 
             <div>
-             <select class="status-select status-${escapeHtml(item.status || "new")}" data-id="${escapeHtml(item.id)}">
+              <select class="status-select status-${escapeHtml(item.status || "new")}" data-id="${escapeHtml(item.id)}">
                 <option value="new" ${(item.status || "new") === "new" ? "selected" : ""}>New</option>
                 <option value="contacted" ${item.status === "contacted" ? "selected" : ""}>Contacted</option>
                 <option value="demo_scheduled" ${item.status === "demo_scheduled" ? "selected" : ""}>Demo Scheduled</option>
                 <option value="closed" ${item.status === "closed" ? "selected" : ""}>Closed</option>
                 <option value="not_interested" ${item.status === "not_interested" ? "selected" : ""}>Not Interested</option>
-            </select>
+              </select>
+
               <div class="detail"><b>Interest:</b> ${escapeHtml(formatInterest(item.interest))}</div>
-              <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
-              <div class="detail"><b>Notes:</b></div>
 
-              <div class="detail" style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin-bottom:8px;">
-               <b>Saved Note:</b> ${escapeHtml(item.notes_text || item.notes || "No note saved yet")}
+              <button class="toggle-details-btn" type="button" data-id="${escapeHtml(item.id)}">
+                View Details
+              </button>
+
+              <div class="details-panel" data-id="${escapeHtml(item.id)}">
+                <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
+                <div class="detail"><b>Notes:</b></div>
+
+                <div class="detail" style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin-bottom:8px;">
+                  <b>Saved Note:</b> ${escapeHtml(item.notes_text || item.notes || "No note saved yet")}
+                </div>
+
+                <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
+
+                <button class="save-notes-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Save Notes
+                </button>
               </div>
-
-            <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
-
-            <button class="save-notes-btn" type="button" data-id="${escapeHtml(item.id)}">
-             Save Notes
-            </button>
             </div>
           </div>
         </div>
@@ -534,6 +562,22 @@
           box.value = item.notes_text || item.notes || "";
         }
       });
+
+      document.querySelectorAll(".toggle-details-btn").forEach(button => {
+        button.addEventListener("click", () => {
+          const requestId = button.dataset.id;
+          const panel = document.querySelector(`.details-panel[data-id="${requestId}"]`);
+
+          if (!panel) return;
+
+          panel.classList.toggle("open");
+
+          button.textContent = panel.classList.contains("open")
+            ? "Hide Details"
+            : "View Details";
+        });
+      });
+
       document.querySelectorAll(".status-select").forEach(select => {
         select.addEventListener("change", async () => {
             try {
