@@ -446,6 +446,32 @@
       return `="${digits}"`;
     }
 
+    function getExportFilename() {
+      const status = $("statusFilter") ? $("statusFilter").value : "all";
+      const date = $("dateFilter") ? $("dateFilter").value : "all";
+
+      const statusLabelMap = {
+        all: "all",
+        new: "new",
+        contacted: "contacted",
+        demo_scheduled: "demo-scheduled",
+        closed: "closed",
+        not_interested: "not-interested"
+      };
+
+      const dateLabelMap = {
+        all: "all",
+        today: "today",
+        "7": "last-7-days",
+        "30": "last-30-days"
+      };
+
+      const statusLabel = statusLabelMap[status] || "all";
+      const dateLabel = dateLabelMap[date] || "all";
+
+      return `demo-requests-${statusLabel}-${dateLabel}.csv`;
+    }
+
     function matchesDateFilter(item, dateFilter) {
       if (dateFilter === "all") return true;
 
@@ -721,7 +747,7 @@
 
       const link = document.createElement("a");
       link.href = url;
-      link.download = "demo-requests.csv";
+      link.download = getExportFilename();
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
