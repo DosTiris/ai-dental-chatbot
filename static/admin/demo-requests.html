@@ -313,8 +313,9 @@
             </select>
           </div>
 
-          <div>
+          <div style="display:flex; gap:10px;">
             <button id="loadBtn">Load Requests</button>
+            <button id="exportCsvBtn" type="button">Export CSV</button>
           </div>
         </div>
 
@@ -385,6 +386,25 @@
       $("adminKey").value = localStorage.getItem("adminKey") || "";
     }
 
+    function getFilteredRequests() {
+      const query = ($("searchInput").value || "").trim();
+      const selectedStatus = $("statusFilter") ? $("statusFilter").value : "all";
+
+      return allRequests.filter(item => {
+        const itemStatus = item.status || "new";
+
+        const matchesStatus =
+          selectedStatus === "all" || itemStatus === selectedStatus;
+
+        return matchesStatus && matchesSearch(item, query);
+      });
+    }
+
+    function csvEscape(value) {
+      const str = String(value || "");
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+
     function matchesSearch(item, query) {
       if (!query) return true;
 
@@ -406,17 +426,8 @@
 
     function renderRequests() {
       const list = $("requestList");
-      const query = ($("searchInput").value || "").trim();
-      const selectedStatus = $("statusFilter") ? $("statusFilter").value : "all";
+      const rows = getFilteredRequests();
 
-      const rows = allRequests.filter(item => {
-        const itemStatus = item.status || "new";
-
-        const matchesStatus =
-          selectedStatus === "all" || itemStatus === selectedStatus;
-
-        return matchesStatus && matchesSearch(item, query);
-      });
       if (!rows.length) {
         list.innerHTML = `<div class="empty">No demo requests match this search.</div>`;
         return;
@@ -570,6 +581,60 @@
         return data;
         }
 
+    function exportCsv() {
+      const rows = getFilteredRequests();
+
+      if (!rows.length) {
+        setStatus("No demo requests to export.", true);
+        return;
+      }
+
+      const headers = [
+        "Practice Name",
+        "Contact Name",
+        "Phone",
+        "Email",
+        "Website",
+        "Interest",
+        "Status",
+        "Message",
+        "Notes",
+        "Received"
+      ];
+
+      const csvRows = rows.map(item => [
+        item.practice_name || "",
+        item.name || "",
+        item.phone || "",
+        item.email || "",
+        item.website || "",
+        formatInterest(item.interest),
+        item.status || "new",
+        item.message || "",
+        item.notes_text || item.notes || "",
+        formatDate(item.created_at)
+      ]);
+
+      const csvContent = [
+        headers.map(csvEscape).join(","),
+        ...csvRows.map(row => row.map(csvEscape).join(","))
+      ].join("\n");
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "demo-requests.csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      URL.revokeObjectURL(url);
+
+      setStatus(`Exported ${rows.length} demo requests.`);
+    }
+
     async function loadRequests() {
       const adminKey = getAdminKey();
 
@@ -615,6 +680,7 @@
     }
 
     $("loadBtn").addEventListener("click", loadRequests);
+    $("exportCsvBtn").addEventListener("click", exportCsv);
     $("searchInput").addEventListener("input", renderRequests);
 
     $("statusFilter")?.addEventListener("change", () => {
