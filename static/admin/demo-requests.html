@@ -834,25 +834,50 @@
       });
 
       document.querySelectorAll(".status-select").forEach(select => {
-        select.addEventListener("change", async () => {
-            try {
-            await updateStatus(select.dataset.id, select.value);
+        select.addEventListener("focus", () => {
+          select.dataset.previousValue = select.value;
+        });
 
-            const item = allRequests.find(r => String(r.id) === String(select.dataset.id));
+        select.addEventListener("change", async () => {
+          const requestId = select.dataset.id;
+          const newStatus = select.value;
+          const previousStatus = select.dataset.previousValue || "new";
+
+          if (newStatus === "closed" || newStatus === "not_interested") {
+            const label = newStatus === "closed" ? "Closed" : "Not Interested";
+
+            const confirmed = confirm(
+              `Are you sure you want to mark this demo request as ${label}?`
+            );
+
+            if (!confirmed) {
+              select.value = previousStatus;
+              select.className = `status-select status-${previousStatus}`;
+              return;
+            }
+          }
+
+          try {
+            await updateStatus(requestId, newStatus);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
             if (item) {
-              item.status = select.value;
+              item.status = newStatus;
             }
 
-            select.className = `status-select status-${select.value}`;
+            select.dataset.previousValue = newStatus;
+            select.className = `status-select status-${newStatus}`;
 
             setStatus("Status updated.");
 
             renderRequests();
-            } catch (error) {
+          } catch (error) {
+            select.value = previousStatus;
+            select.className = `status-select status-${previousStatus}`;
             setStatus("Status update failed: " + error.message, true);
-            }
+          }
         });
-        });
+      });
 
       document.querySelectorAll(".save-notes-btn").forEach(button => {
         button.addEventListener("click", async () => {
