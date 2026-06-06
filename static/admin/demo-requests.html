@@ -129,6 +129,44 @@
       margin-top: 10px;
     }
 
+    .summary-row {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
+      margin: 18px 0;
+    }
+
+    .summary-card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .summary-number {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .summary-label {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    @media (max-width: 1100px) {
+      .summary-row {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .summary-row {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
     .request-list {
       display: flex;
       flex-direction: column;
@@ -381,6 +419,38 @@
         <div id="status" class="muted">Enter admin key, then click Load Requests.</div>
       </section>
 
+      <div class="summary-row" id="summaryRow">
+        <div class="summary-card">
+          <div class="summary-number" id="summaryShowing">0</div>
+          <div class="summary-label">Showing</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryNew">0</div>
+          <div class="summary-label">New</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryContacted">0</div>
+          <div class="summary-label">Contacted</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryDemoScheduled">0</div>
+          <div class="summary-label">Demo Scheduled</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryClosed">0</div>
+          <div class="summary-label">Closed</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryNotInterested">0</div>
+          <div class="summary-label">Not Interested</div>
+        </div>
+      </div>
+
       <section id="requestList" class="request-list">
         <div class="empty">No demo requests loaded yet.</div>
       </section>
@@ -551,9 +621,37 @@
       return haystack.includes(query.toLowerCase());
     }
 
+    function updateSummary(rows) {
+        const counts = {
+          showing: rows.length,
+          new: 0,
+          contacted: 0,
+          demo_scheduled: 0,
+          closed: 0,
+          not_interested: 0
+        };
+
+        rows.forEach(item => {
+          const status = item.status || "new";
+
+          if (counts[status] !== undefined) {
+            counts[status] += 1;
+          }
+        });
+
+        $("summaryShowing").textContent = String(counts.showing);
+        $("summaryNew").textContent = String(counts.new);
+        $("summaryContacted").textContent = String(counts.contacted);
+        $("summaryDemoScheduled").textContent = String(counts.demo_scheduled);
+        $("summaryClosed").textContent = String(counts.closed);
+        $("summaryNotInterested").textContent = String(counts.not_interested);
+      }
+
     function renderRequests() {
       const list = $("requestList");
       const rows = getFilteredRequests();
+
+      updateSummary(rows);
 
       if (!rows.length) {
         list.innerHTML = `<div class="empty">No demo requests match this search.</div>`;
