@@ -424,6 +424,7 @@
         </div>
 
         <div id="status" class="muted">Enter admin key, then click Load Requests.</div>
+        <div id="lastUpdated" class="muted">Last updated: Never</div>
       </section>
 
       <div class="summary-row" id="summaryRow">
@@ -508,6 +509,18 @@
     function setStatus(message, isError = false) {
       $("status").textContent = message;
       $("status").className = isError ? "danger" : "muted";
+    }
+
+    function setLastUpdated() {
+      const now = new Date();
+
+      $("lastUpdated").textContent = "Last updated: " + now.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
     }
 
     function getAdminKey() {
@@ -1068,6 +1081,7 @@
         allRequests = data || [];
 
         renderRequests();
+        setLastUpdated();
         setStatus(`Loaded ${allRequests.length} demo requests.`);
       } catch (error) {
         setStatus("Load failed: " + error.message, true);
