@@ -685,6 +685,16 @@
           </section>
 
           <section class="side-card">
+            <h3>Recent Demo Requests</h3>
+            <div id="recentDemoRequestsMini" class="mini-list">
+              <div class="mini-item">
+                <div class="mini-item-title">No demo requests loaded</div>
+                <div class="mini-item-sub">Recent website demo requests will appear here.</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-card">
             <h3>Recent Lead Activity</h3>
             <div id="recentLeadsMini" class="mini-list">
               <div class="mini-item">
@@ -811,6 +821,28 @@
         .replace(/'/g, "&#039;");
     }
 
+    function formatDemoStatus(status) {
+      const map = {
+        new: "New",
+        contacted: "Contacted",
+        demo_scheduled: "Demo Scheduled",
+        closed: "Closed",
+        not_interested: "Not Interested"
+      };
+
+      return map[status] || status || "New";
+    }
+
+    function formatDemoInterest(value) {
+      const map = {
+        mia: "Mia Only",
+        website_mia: "Website + Mia",
+        not_sure: "Not Sure Yet"
+      };
+
+      return map[value] || value || "—";
+    }
+
     function formatWhen(value){
       if (!value) return "—";
       const d = new Date(value);
@@ -880,6 +912,35 @@
       $("demoCountScheduled").textContent = String(counts.demo_scheduled || 0);
       $("demoCountClosed").textContent = String(counts.closed || 0);
       $("demoCountNotInterested").textContent = String(counts.not_interested || 0);
+    }
+
+    async function loadRecentDemoRequests() {
+      const rows = await apiGet("/admin/demo-requests?archive=active&limit=5&offset=0");
+
+      const wrap = $("recentDemoRequestsMini");
+
+      if (!rows || !rows.length) {
+        wrap.innerHTML = `
+          <div class="mini-item">
+            <div class="mini-item-title">No recent demo requests</div>
+            <div class="mini-item-sub">New demo requests from the website will appear here.</div>
+          </div>
+        `;
+        return;
+      }
+
+      wrap.innerHTML = rows.map(item => `
+        <div class="mini-item" onclick="window.location.href='/static/admin/demo-requests.html?archive=active&status=${encodeURIComponent(item.status || "new")}'" style="cursor:pointer;">
+          <div class="mini-item-title">
+            ${escapeHtml(item.practice_name || "Unnamed Practice")}
+          </div>
+          <div class="mini-item-sub">
+            ${escapeHtml(item.name || "No name provided")}<br>
+            ${escapeHtml(formatDemoInterest(item.interest))} · ${escapeHtml(formatDemoStatus(item.status || "new"))}<br>
+            ${escapeHtml(formatWhen(item.created_at))}
+          </div>
+        </div>
+      `).join("");
     }
 
     function renderStats(leads, overview){
@@ -1016,6 +1077,7 @@
         setStatus("Loading...");
 
         await loadDemoRequestCounts();
+        await loadRecentDemoRequests();
 
        
 
@@ -1039,6 +1101,7 @@
     $("refreshDemoCountsBtn")?.addEventListener("click", async () => {
       try {
         await loadDemoRequestCounts();
+        await loadRecentDemoRequests();
         setStatus("Demo request counts refreshed.");
       } catch (error) {
         setStatus("Demo count refresh failed: " + error.message, true);
@@ -1058,6 +1121,7 @@
 
     if (getAdminKey()) {
       loadDemoRequestCounts().catch(() => {});
+      loadRecentDemoRequests().catch(() => {});
     }
 
     setStatus("Enter admin key + client key, then click Load.");
