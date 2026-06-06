@@ -96,6 +96,77 @@
       margin-bottom: 24px;
     }
 
+    .lead-center {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      margin-bottom: 22px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .lead-center-header {
+      margin-bottom: 14px;
+    }
+
+    .lead-center-header h2 {
+      margin: 0 0 4px;
+      font-size: 22px;
+    }
+
+    .lead-center-header p {
+      margin: 0;
+      color: #6b7280;
+      font-size: 14px;
+    }
+
+    .lead-center-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .lead-center-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 16px;
+      background: #f9fafb;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .lead-center-title {
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+
+    .lead-center-text {
+      color: #6b7280;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .lead-center-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .secondary-btn {
+      background: #f3f4f6 !important;
+      color: #111827 !important;
+      border: 1px solid #e5e7eb !important;
+    }
+
+    @media (max-width: 900px) {
+      .lead-center-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
     .config-grid {
       display: grid;
       grid-template-columns: 1fr 1fr auto;
@@ -567,6 +638,42 @@
         <div class="page-title">
           <h1>Dashboard</h1>
           <p>Prioritize leads fast, review urgency, and keep your front desk organized.</p>
+
+          <section class="lead-center">
+            <div class="lead-center-header">
+              <h2>Lead Center</h2>
+              <p>Manage website demo requests and Mia-captured patient leads from one place.</p>
+            </div>
+
+            <div class="lead-center-grid">
+              <div class="lead-center-card">
+                <div>
+                  <div class="lead-center-title">Website Demo Requests</div>
+                  <div class="lead-center-text">
+                    Manage Dos Tiris website demo inquiries, follow-up status, notes, and archived requests.
+                  </div>
+                </div>
+
+                <div class="lead-center-actions">
+                  <button type="button" id="openDemoRequestsBtn">Open Demo Requests</button>
+                  <button type="button" id="openArchivedDemoRequestsBtn" class="secondary-btn">View Archived</button>
+                </div>
+              </div>
+
+              <div class="lead-center-card">
+                <div>
+                  <div class="lead-center-title">Chatbot Patient Leads</div>
+                  <div class="lead-center-text">
+                    Review Mia-captured patient leads, urgency, preferred time, and appointment intent.
+                  </div>
+                </div>
+
+                <div class="lead-center-actions">
+                  <button type="button" id="scrollLeadBoardBtn">View Lead Board</button>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
 
@@ -1119,6 +1226,25 @@
         setStatus("Demo count refresh failed: " + error.message, true);
       }
     });
+
+    $("openDemoRequestsBtn")?.addEventListener("click", () => {
+      window.location.href = "/static/admin/demo-requests.html?archive=active";
+    });
+
+    $("openArchivedDemoRequestsBtn")?.addEventListener("click", () => {
+      window.location.href = "/static/admin/demo-requests.html?archive=archived";
+    });
+
+    $("scrollLeadBoardBtn")?.addEventListener("click", () => {
+      const board = document.querySelector(".lead-board, #leadBoard, .lead-triage-board");
+
+      if (board) {
+        board.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+      }
+    });
+
     $("viewArchivedDemoRequestsBtn")?.addEventListener("click", () => {
       window.location.href = "/static/admin/demo-requests.html?archive=archived";
     });
