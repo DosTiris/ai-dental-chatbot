@@ -77,7 +77,7 @@
 
     .controls {
       display: grid;
-      grid-template-columns: 1fr 1fr 220px 180px auto;
+      grid-template-columns: 1fr 1fr 200px 170px 170px auto;
       gap: 12px;
       align-items: end;
     }
@@ -208,6 +208,16 @@
       background: #fee2e2;
       color: #991b1b;
       border: 1px solid #fecaca;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .unarchive-request-btn {
+      margin-top: 10px;
+      margin-left: 8px;
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #bbf7d0;
       padding: 8px 10px;
       font-size: 13px;
     }
@@ -350,6 +360,15 @@
               <option value="today">Today</option>
               <option value="7">Last 7 Days</option>
               <option value="30">Last 30 Days</option>
+            </select>
+          </div>
+
+          <div>
+            <label><b>Archive Filter</b></label>
+            <select id="archiveFilter">
+              <option value="active">Active</option>
+              <option value="archived">Archived</option>
+              <option value="all">All</option>
             </select>
           </div>
 
@@ -571,10 +590,15 @@
               <button class="toggle-details-btn" type="button" data-id="${escapeHtml(item.id)}">
                 View Details
               </button>
-
-              <button class="archive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
-                Archive
-              </button>
+              ${item.archived ? `
+                <button class="unarchive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Unarchive
+                </button>
+              ` : `
+                <button class="archive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Archive
+                </button>
+              `}
 
               <div class="details-panel" data-id="${escapeHtml(item.id)}">
                 <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
@@ -636,6 +660,37 @@
             setStatus("Demo request archived.");
           } catch (error) {
             setStatus("Archive failed: " + error.message, true);
+          }
+        });
+      });
+
+      document.querySelectorAll(".unarchive-request-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+          const requestId = button.dataset.id;
+
+          const confirmed = confirm("Unarchive this demo request? It will return to the active list.");
+
+          if (!confirmed) return;
+
+          try {
+            await unarchiveRequest(requestId);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
+            if (item) {
+              item.archived = false;
+            }
+
+            const archiveFilter = $("archiveFilter") ? $("archiveFilter").value : "active";
+
+            if (archiveFilter === "archived") {
+              allRequests = allRequests.filter(r => String(r.id) !== String(requestId));
+            }
+
+            renderRequests();
+
+            setStatus("Demo request unarchived.");
+          } catch (error) {
+            setStatus("Unarchive failed: " + error.message, true);
           }
         });
       });
@@ -738,6 +793,32 @@
       return data;
     }
 
+    async function unarchiveRequest(requestId) {
+      const adminKey = getAdminKey();
+
+      const response = await fetch(`/admin/demo-requests/${requestId}/unarchive`, {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey
+        }
+      });
+
+      const text = await response.text();
+      let data = null;
+
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {}
+
+      if (!response.ok) {
+        throw new Error(data?.detail || text || "Unable to unarchive request.");
+      }
+
+      return data;
+    }
+
     async function updateStatus(requestId, status) {
         const adminKey = getAdminKey();
 
@@ -831,15 +912,20 @@
         saveAdminKey();
         setStatus("Loading demo requests...");
 
-        const response = await fetch(API_BASE + "/admin/demo-requests?t=" + Date.now(), {
-          method: "GET",
-          cache: "no-store",
-          headers: {
-            "accept": "application/json",
-            "Cache-Control": "no-cache",
-            "x-admin-key": adminKey
+        const archiveFilter = $("archiveFilter") ? $("archiveFilter").value : "active";
+
+        const response = await fetch(
+          API_BASE + "/admin/demo-requests?archive=" + encodeURIComponent(archiveFilter) + "&t=" + Date.now(),
+          {
+            method: "GET",
+            cache: "no-store",
+            headers: {
+              "accept": "application/json",
+              "Cache-Control": "no-cache",
+              "x-admin-key": adminKey
+            }
           }
-        });
+        );
 
         const text = await response.text();
         let data = null;
@@ -875,11 +961,16 @@
       renderRequests();
     });
 
+    $("archiveFilter")?.addEventListener("change", () => {
+      loadRequests();
+    });
+
     loadAdminKey();
 
     const urlParams = new URLSearchParams(window.location.search);
     const statusFromUrl = urlParams.get("status");
     const dateFromUrl = urlParams.get("date");
+    const archiveFromUrl = urlParams.get("archive");
 
     if (statusFromUrl && $("statusFilter")) {
       $("statusFilter").value = statusFromUrl;
@@ -888,6 +979,10 @@
     if (dateFromUrl && $("dateFilter")) {
       $("dateFilter").value = dateFromUrl;
 }
+
+    if (archiveFromUrl && $("archiveFilter")) {
+      $("archiveFilter").value = archiveFromUrl;
+    }
   </script>
 </body>
 </html>

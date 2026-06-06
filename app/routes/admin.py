@@ -336,6 +336,7 @@ def edit_faq(
 def list_demo_requests(
     limit: int = 50,
     offset: int = 0,
+    archive: str = "active",
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -344,8 +345,17 @@ def list_demo_requests(
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
 
+    if archive not in {"active", "archived", "all"}:
+        raise HTTPException(status_code=400, detail="archive must be active, archived, or all")
+
+    archive_filter_sql = ""
+    if archive == "active":
+        archive_filter_sql = "where coalesce(archived, false) = false"
+    elif archive == "archived":
+        archive_filter_sql = "where coalesce(archived, false) = true"
+
     rows = db.execute(
-        sql_text("""
+        sql_text(f"""
             select
                 id,
                 created_at,
@@ -359,9 +369,10 @@ def list_demo_requests(
                 source,
                 status,
                 notes,
-                coalesce(notes, '') as notes_text
+                coalesce(notes, '') as notes_text,
+                coalesce(archived, false) as archived
             from demo_requests
-            where coalesce(archived, false) = false
+            {archive_filter_sql}
             order by created_at desc
             limit :limit offset :offset
         """),
@@ -431,6 +442,33 @@ def archive_demo_request(
         "ok": True,
         "id": str(result["id"]),
         "archived": True,
+    }
+
+@router.post("/demo-requests/{request_id}/unarchive")
+def unarchive_demo_request(
+    request_id: str,
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    result = db.execute(
+        sql_text("""
+            update demo_requests
+            set archived = false
+            where id = :id
+            returning id
+        """),
+        {"id": request_id},
+    ).mappings().first()
+
+    db.commit()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Demo request not found.")
+
+    return {
+        "ok": True,
+        "id": str(result["id"]),
+        "archived": False,
     }
 # -----------------------------
 # Leads
