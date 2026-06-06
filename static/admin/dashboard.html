@@ -401,7 +401,8 @@
       font-size: 20px;
     }
 
-    #refreshDemoCountsBtn {
+    #refreshDemoCountsBtn,
+    #viewArchivedDemoRequestsBtn {
       background: #111827;
       color: #ffffff;
       border: 0;
@@ -411,7 +412,14 @@
       font-weight: 700;
     }
 
-    #refreshDemoCountsBtn:hover {
+    #viewArchivedDemoRequestsBtn {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+    }
+
+    #refreshDemoCountsBtn:hover,
+    #viewArchivedDemoRequestsBtn:hover {
       opacity: 0.92;
     }
 
@@ -585,7 +593,11 @@
 
       <div class="demo-count-header">
         <h2>Demo Request Pipeline</h2>
-        <button id="refreshDemoCountsBtn" type="button">Refresh Counts</button>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button id="refreshDemoCountsBtn" type="button">Refresh Counts</button>
+          <button id="viewArchivedDemoRequestsBtn" type="button">View Archived</button>
+        </div>
       </div>
 
       <section class="demo-count-grid">
@@ -930,7 +942,7 @@
       }
 
       wrap.innerHTML = rows.map(item => `
-        <div class="mini-item" onclick="window.location.href='/static/admin/demo-requests.html?archive=active&status=${encodeURIComponent(item.status || "new")}'" style="cursor:pointer;">
+        <div class="mini-item" onclick="window.location.href='/static/admin/demo-requests.html?archive=active&search=${encodeURIComponent(item.practice_name || item.name || item.email || item.phone || "")}'" style="cursor:pointer;">
           <div class="mini-item-title">
             ${escapeHtml(item.practice_name || "Unnamed Practice")}
           </div>
@@ -1106,6 +1118,9 @@
       } catch (error) {
         setStatus("Demo count refresh failed: " + error.message, true);
       }
+    });
+    $("viewArchivedDemoRequestsBtn")?.addEventListener("click", () => {
+      window.location.href = "/static/admin/demo-requests.html?archive=archived";
     });
     $("searchInput").addEventListener("input", () => renderLeads(allLeads));
 

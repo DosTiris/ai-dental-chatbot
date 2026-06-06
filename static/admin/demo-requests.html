@@ -971,6 +971,11 @@
     const statusFromUrl = urlParams.get("status");
     const dateFromUrl = urlParams.get("date");
     const archiveFromUrl = urlParams.get("archive");
+    const searchFromUrl = urlParams.get("search");
+
+   if (searchFromUrl && $("searchInput")) {
+      $("searchInput").value = searchFromUrl;
+    }
 
     if (statusFromUrl && $("statusFilter")) {
       $("statusFilter").value = statusFromUrl;
