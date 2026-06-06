@@ -117,6 +117,12 @@
       color: white;
     }
 
+    #clearFiltersBtn {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+    }
+
     .muted {
       color: #6b7280;
       font-size: 13px;
@@ -410,9 +416,10 @@
             </select>
           </div>
 
-          <div style="display:flex; gap:10px;">
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
             <button id="loadBtn">Load Requests</button>
             <button id="exportCsvBtn" type="button">Export CSV</button>
+            <button id="clearFiltersBtn" type="button">Clear Filters</button>
           </div>
         </div>
 
@@ -646,6 +653,26 @@
         $("summaryClosed").textContent = String(counts.closed);
         $("summaryNotInterested").textContent = String(counts.not_interested);
       }
+
+    function clearFilters() {
+      if ($("searchInput")) {
+        $("searchInput").value = "";
+      }
+
+      if ($("statusFilter")) {
+        $("statusFilter").value = "all";
+      }
+
+      if ($("dateFilter")) {
+        $("dateFilter").value = "all";
+      }
+
+      if ($("archiveFilter")) {
+        $("archiveFilter").value = "active";
+      }
+
+      loadRequests();
+    }
 
     function renderRequests() {
       const list = $("requestList");
@@ -1049,6 +1076,7 @@
 
     $("loadBtn").addEventListener("click", loadRequests);
     $("exportCsvBtn").addEventListener("click", exportCsv);
+    $("clearFiltersBtn").addEventListener("click", clearFilters);
     $("searchInput").addEventListener("input", renderRequests);
 
     $("statusFilter")?.addEventListener("change", () => {
