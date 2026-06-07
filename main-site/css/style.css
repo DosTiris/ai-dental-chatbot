@@ -33,7 +33,9 @@ html {
 }
 
 .logo img{
-    height:85px;
+    height:105px;
+    width:auto;
+    display:block;
 }
 
 #dostiris-chat-button {
@@ -761,6 +763,8 @@ background: white;
 
     .logo img {
         height: 85px;
+        width: auto;
+        display: block;
     }
 
     .nav-container > .btn-primary {
