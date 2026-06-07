@@ -560,6 +560,16 @@ background: white;
 
 
 @media (max-width: 600px) {
+    #dostiris-chat-widget {
+        width: calc(100vw - 32px);
+        max-width: 380px;
+        height: 70vh;
+        right: 16px;
+        left: 16px;
+        margin: 0 auto;
+        bottom: 90px;
+    }
+
     #dostiris-chat-button {
         right: 18px;
         bottom: 18px;
