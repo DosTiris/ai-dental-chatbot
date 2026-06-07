@@ -220,6 +220,15 @@ html {
     color:#2563eb;
 }
 
+.feature-subtext {
+    display: block;
+    padding-left: 18px;
+    margin-top: 4px;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    color: #475569;
+}
+
 .meet-mia{
     padding:100px 0;
     background:#f8fafc;
