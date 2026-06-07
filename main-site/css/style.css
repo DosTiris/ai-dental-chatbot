@@ -40,8 +40,8 @@ html {
     position: fixed;
     right: 28px;
     bottom: 28px;
-    width: 76px;
-    height: 76px;
+    width: 86px;
+    height: 86px;
     border: none;
     background: transparent;
     padding: 0;
@@ -52,12 +52,14 @@ html {
 }
 
 #dostiris-chat-button .mia-chat-icon {
-    width: 76px;
-    height: 76px;
+    width: 86px;
+    height: 86px;
     object-fit: contain;
     display: block;
     border-radius: 50%;
-    filter: drop-shadow(0 14px 24px rgba(37, 99, 235, 0.35));
+    filter:
+        drop-shadow(0 14px 28px rgba(37, 99, 235, 0.45))
+        drop-shadow(0 0 12px rgba(6, 182, 212, 0.25));
     transition: transform 0.2s ease;
 }
 
@@ -549,23 +551,16 @@ background: white;
 
 
 @media (max-width: 600px) {
-    #dostiris-chat-widget {
-        width: calc(100vw - 24px);
-        height: 70vh;
-        right: 12px;
-        bottom: 90px;
-    }
-
     #dostiris-chat-button {
         right: 18px;
         bottom: 18px;
-        width: 70px;
-        height: 70px;
+        width: 78px;
+        height: 78px;
     }
 
     #dostiris-chat-button .mia-chat-icon {
-        width: 70px;
-        height: 70px;
+        width: 78px;
+        height: 78px;
     }
 
     #dostiris-chat-close {
