@@ -1,8 +1,272 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Premier Dental Studio | Dental Website Demo</title><meta name="description" content="Cosmetic, implant, and smile transformation dentistry."><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"><link rel="stylesheet" href="styles.css"/></head><body><header class="site-header"><a class="brand" href="#top" aria-label="Premier Dental Studio home"><span class="brand-mark">+</span><span><strong>Premier Dental Studio</strong><small>Cosmetic, implant, and smile transformation dentistry.</small></span></a><button class="nav-toggle" aria-label="Open navigation" aria-expanded="false"><span></span><span></span><span></span></button><nav class="nav-menu" aria-label="Main navigation"><a href="#treatments">Treatments</a><a href="#process">Process</a><a href="#results">Results</a><a href="#financing">Financing</a><a class="nav-cta" href="#request">Book a Consultation</a></nav></header>
-<main id="top"><section class="premier-hero"><div class="premier-copy"><p class="eyebrow">Cosmetic & Implant Dentistry</p><h1>Designing confident smiles with a premium experience.</h1><p>A premium homepage for cosmetic, implant, veneer, and comprehensive dental offices that want to attract higher-value consultation cases.</p><div class="hero-actions"><a class="btn btn-primary" href="#request">Book a Consultation</a><a class="btn btn-secondary" href="#treatments">View Smile Options</a></div></div><div class="lux-panel"><span>Premium Smile Visual</span></div></section>
-<section class="lux-stats"><article><span>01</span><strong>Consultation-first</strong></article><article><span>02</span><strong>Cosmetic-focused</strong></article><article><span>03</span><strong>Financing-ready</strong></article></section>
-<section class="section treatments" id="treatments"><div class="section-heading"><p class="eyebrow">Featured Treatments</p><h2>Built for high-value cosmetic and implant cases.</h2></div><div class="treatment-grid"><article class="service-card card"><div class="service-icon">1</div><h3>Dental Implants</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article><article class="service-card card"><div class="service-icon">2</div><h3>Veneers</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article><article class="service-card card"><div class="service-icon">3</div><h3>Smile Makeovers</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article><article class="service-card card"><div class="service-icon">4</div><h3>Whitening</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article><article class="service-card card"><div class="service-icon">5</div><h3>Cosmetic Bonding</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article><article class="service-card card"><div class="service-icon">6</div><h3>Full-Mouth Rehab</h3><p>Patient-friendly description goes here. Keep this short, clear, and focused on benefits.</p></article></div></section>
-<section class="process" id="process"><div><p class="eyebrow">The Experience</p><h2>A refined consultation journey.</h2><p>This structure works well for implant and cosmetic offices because the website sells confidence, clarity, and transformation.</p></div><div class="process-steps"><article><strong>Discover</strong><span>Patient shares goals and concerns.</span></article><article><strong>Design</strong><span>Office reviews treatment options.</span></article><article><strong>Transform</strong><span>Care plan begins after confirmation.</span></article></div></section>
-<section class="section results" id="results"><div class="section-heading centered"><p class="eyebrow">Smile Results</p><h2>Premium visual blocks for before-and-after storytelling.</h2></div><div class="result-grid"><div class="result-card"><span>Before</span></div><div class="result-card after"><span>After</span></div></div></section>
-<section class="financing" id="financing"><div><p class="eyebrow">Payment Options</p><h2>Help patients say yes to bigger treatment plans.</h2><p>Use this area for financing, membership plans, consultation fees, or insurance language.</p></div><div class="finance-card"><strong>Consultation Requests</strong><span>The office follows up to discuss goals, timing, and next steps.</span></div></section>
-<section class="section premier-request" id="request"><div><p class="eyebrow">Private Consultation Request</p><h2>Start with a conversation.</h2><p>No live booking is promised. The patient submits interest and the office confirms availability.</p></div><form class="lead-form dark-form" data-demo-form><label>Full Name <input type="text" placeholder="Jane Smith"></label><label>Phone Number <input type="tel" placeholder="(555) 123-4567"></label><label>Interested In<select><option>Dental implants</option><option>Veneers</option><option>Smile makeover</option><option>Whitening</option><option>Not sure yet</option></select></label><button class="btn btn-primary" type="submit">Request Consultation</button><p class="form-note" data-form-note>Demo only. This form is not connected yet.</p></form></section></main><footer class="site-footer"><p>© <span id="year"></span> Premier Dental Studio. Demo website template by Dos Tiris.</p><a href="#top">Back to top ↑</a></footer><script src="script.js"></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <title>Premier Dental Studio | Dental Website Demo</title>
+  <meta
+    name="description"
+    content="Cosmetic, implant, and smile transformation dentistry."
+  />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+    rel="stylesheet"
+  />
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="Premier Dental Studio home">
+      <span class="brand-mark">+</span>
+
+      <span>
+        <strong>Premier Dental Studio</strong>
+        <small>Cosmetic, implant, and smile transformation dentistry.</small>
+      </span>
+    </a>
+
+    <button class="nav-toggle" aria-label="Open navigation" aria-expanded="false">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+
+    <nav class="nav-menu" aria-label="Main navigation">
+      <a href="#treatments">Treatments</a>
+      <a href="#process">Process</a>
+      <a href="#results">Results</a>
+      <a href="#financing">Financing</a>
+      <a class="nav-cta" href="#request">Book a Consultation</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="premier-hero">
+      <div class="premier-copy">
+        <p class="eyebrow">Cosmetic &amp; Implant Dentistry</p>
+
+        <h1>Designing confident smiles with a premium experience.</h1>
+
+        <p>
+          A premium homepage for cosmetic, implant, veneer, and comprehensive
+          dental offices that want to attract higher-value consultation cases.
+        </p>
+
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#request">Book a Consultation</a>
+          <a class="btn btn-secondary" href="#treatments">View Smile Options</a>
+        </div>
+      </div>
+
+      <div class="lux-panel">
+        <span>Premium Smile Visual</span>
+      </div>
+    </section>
+
+    <section class="lux-stats">
+      <article>
+        <span>01</span>
+        <strong>Consultation-first</strong>
+      </article>
+
+      <article>
+        <span>02</span>
+        <strong>Cosmetic-focused</strong>
+      </article>
+
+      <article>
+        <span>03</span>
+        <strong>Financing-ready</strong>
+      </article>
+    </section>
+
+    <section class="section treatments" id="treatments">
+      <div class="section-heading">
+        <p class="eyebrow">Featured Treatments</p>
+        <h2>Built for high-value cosmetic and implant cases.</h2>
+      </div>
+
+      <div class="treatment-grid">
+        <article class="service-card card">
+          <div class="service-icon">1</div>
+          <h3>Dental Implants</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+
+        <article class="service-card card">
+          <div class="service-icon">2</div>
+          <h3>Veneers</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+
+        <article class="service-card card">
+          <div class="service-icon">3</div>
+          <h3>Smile Makeovers</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+
+        <article class="service-card card">
+          <div class="service-icon">4</div>
+          <h3>Whitening</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+
+        <article class="service-card card">
+          <div class="service-icon">5</div>
+          <h3>Cosmetic Bonding</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+
+        <article class="service-card card">
+          <div class="service-icon">6</div>
+          <h3>Full-Mouth Rehab</h3>
+          <p>
+            Patient-friendly description goes here. Keep this short, clear, and
+            focused on benefits.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="process" id="process">
+      <div>
+        <p class="eyebrow">The Experience</p>
+        <h2>A refined consultation journey.</h2>
+
+        <p>
+          This structure works well for implant and cosmetic offices because the
+          website sells confidence, clarity, and transformation.
+        </p>
+      </div>
+
+      <div class="process-steps">
+        <article>
+          <strong>Discover</strong>
+          <span>Patient shares goals and concerns.</span>
+        </article>
+
+        <article>
+          <strong>Design</strong>
+          <span>Office reviews treatment options.</span>
+        </article>
+
+        <article>
+          <strong>Transform</strong>
+          <span>Care plan begins after confirmation.</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section results" id="results">
+      <div class="section-heading centered">
+        <p class="eyebrow">Smile Results</p>
+        <h2>Premium visual blocks for before-and-after storytelling.</h2>
+      </div>
+
+      <div class="result-grid">
+        <div class="result-card">
+          <span>Before</span>
+        </div>
+
+        <div class="result-card after">
+          <span>After</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="financing" id="financing">
+      <div>
+        <p class="eyebrow">Payment Options</p>
+        <h2>Help patients say yes to bigger treatment plans.</h2>
+
+        <p>
+          Use this area for financing, membership plans, consultation fees, or
+          insurance language.
+        </p>
+      </div>
+
+      <div class="finance-card">
+        <strong>Consultation Requests</strong>
+        <span>
+          The office follows up to discuss goals, timing, and next steps.
+        </span>
+      </div>
+    </section>
+
+    <section class="section premier-request" id="request">
+      <div>
+        <p class="eyebrow">Private Consultation Request</p>
+        <h2>Start with a conversation.</h2>
+
+        <p>
+          Share your smile goals and our team will follow up with consultation
+          options.
+        </p>
+      </div>
+
+      <form class="lead-form dark-form" data-demo-form>
+        <label>
+          Full Name
+          <input type="text" placeholder="Jane Smith" />
+        </label>
+
+        <label>
+          Phone Number
+          <input type="tel" placeholder="(555) 123-4567" />
+        </label>
+
+        <label>
+          Interested In
+          <select>
+            <option>Dental implants</option>
+            <option>Veneers</option>
+            <option>Smile makeover</option>
+            <option>Whitening</option>
+            <option>Not sure yet</option>
+          </select>
+        </label>
+
+        <button class="btn btn-primary" type="submit">
+          Request Consultation
+        </button>
+
+        <p class="form-note" data-form-note>
+          Sample consultation form. Mia can be added for interactive 24/7 patient intake.
+        </p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      © <span id="year"></span> Premier Dental Studio. Demo website template by
+      Dos Tiris.
+    </p>
+
+    <a href="#top">Back to top ↑</a>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
