@@ -14,6 +14,10 @@ app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app insta
 # Example URL: http://127.0.0.1:8000/static/admin/faqs.html
 app.mount("/static", StaticFiles(directory="static"), name="static")  # ✅ Now app exists, so this is safe
 
+# --- Demo dental website templates ---
+# Example URL: https://beta.dostiris.com/demo-sites/bright-smile/index.html
+app.mount("/demo-sites", StaticFiles(directory="demo-sites", html=True), name="demo-sites")
+
 # --- CORS (safe dev defaults; tighten later when deployed) ---
 app.add_middleware(
     CORSMiddleware,
