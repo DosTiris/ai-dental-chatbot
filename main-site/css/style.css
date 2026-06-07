@@ -63,6 +63,13 @@ html {
     transition: transform 0.2s ease;
 }
 
+#dostiris-chat-button {
+    right: 34px;
+    bottom: 34px;
+    width: 86px;
+    height: 86px;
+}
+
 #dostiris-chat-button:hover .mia-chat-icon {
     transform: scale(1.05);
 }
