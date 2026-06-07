@@ -1,4 +1,5 @@
 from fastapi import FastAPI  # Import FastAPI to create the web application
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware  # Import CORS middleware to control which frontends can call this API
 from fastapi.staticfiles import StaticFiles  # Import StaticFiles so we can serve /static/*
 from fastapi.responses import FileResponse
@@ -9,15 +10,20 @@ from app.routes.demo import router as demo_router
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 # --- Static files (serves backend/static/* at /static/*) ---
 # Example file path: backend/static/admin/faqs.html
 # Example URL: http://127.0.0.1:8000/static/admin/faqs.html
-app.mount("/static", StaticFiles(directory="static"), name="static")  # ✅ Now app exists, so this is safe
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")# ✅ Now app exists, so this is safe
 
 # --- Demo dental website templates ---
 # Example URL: https://beta.dostiris.com/demo-sites/bright-smile/index.html
-app.mount("/demo-sites", StaticFiles(directory="demo-sites", html=True), name="demo-sites")
-
+app.mount(
+    "/demo-sites",
+    StaticFiles(directory=BASE_DIR / "demo-sites", html=True),
+    name="demo-sites"
+)
 # --- CORS (safe dev defaults; tighten later when deployed) ---
 app.add_middleware(
     CORSMiddleware,
