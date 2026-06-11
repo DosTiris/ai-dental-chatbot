@@ -17,7 +17,13 @@
     rel="stylesheet"
   />
 
+
+  <link rel="icon" type="image/png" sizes="32x32" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon-32.png?v=5" />
+  <link rel="icon" type="image/png" sizes="192x192" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon-192.png?v=5" />
+  <link rel="shortcut icon" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon.ico?v=5" />
+
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://ai-dental-chatbot.onrender.com/static/assets/css/dostiris-widget.css" />
 </head>
 
 <body>
@@ -96,7 +102,7 @@
           <div class="service-icon">1</div>
           <h3>Dental Implants</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            Replace missing teeth with implant options designed for long-term function.
           </p>
         </article>
 
@@ -104,7 +110,7 @@
           <div class="service-icon">2</div>
           <h3>Veneers</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            Veneers can improve shape, shade, and symmetry for a confident smile.
           </p>
         </article>
 
@@ -112,7 +118,7 @@
           <div class="service-icon">3</div>
           <h3>Smile Makeovers</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            A personalized plan can combine treatments for a complete smile upgrade.
           </p>
         </article>
 
@@ -120,7 +126,7 @@
           <div class="service-icon">4</div>
           <h3>Whitening</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            Professional whitening can help patients brighten their smile safely.
           </p>
         </article>
 
@@ -128,7 +134,7 @@
           <div class="service-icon">5</div>
           <h3>Cosmetic Bonding</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            Bonding can repair small chips, gaps, or cosmetic imperfections.
           </p>
         </article>
 
@@ -136,7 +142,7 @@
           <div class="service-icon">6</div>
           <h3>Full-Mouth Rehab</h3>
           <p>
-            Explore treatment options and request a consultation with our team.
+            Comprehensive treatment planning can restore comfort, function, and appearance.
           </p>
         </article>
       </div>
@@ -243,7 +249,7 @@
         </button>
 
         <p class="form-note" data-form-note>
-          Sample consultation form. Mia can be added for interactive 24/7 patient intake.
+          Demo form. Mia can capture consultation requests 24/7 on a live website.
         </p>
       </form>
     </section>
@@ -251,12 +257,31 @@
 
   <footer class="site-footer">
     <p>
-      © <span id="year"></span> Premier Dental Studio. Demo website template by
-      Dos Tiris.
+      © <span id="year"></span> Premier Dental Studio. Website preview by Dos Tiris.
     </p>
 
     <a href="#top">Back to top ↑</a>
   </footer>
+
+
+  <button
+    id="dostiris-chat-button"
+    type="button"
+    aria-label="Open Mia chat"
+    style="--dt-widget-primary:#7c3aed; --dt-widget-secondary:#d946ef;"
+  >
+    <img src="https://ai-dental-chatbot.onrender.com/static/assets/mia/mia-chat-icon.png?v=7" alt="Chat with Mia" />
+  </button>
+
+  <button id="dostiris-chat-close" type="button" aria-label="Close Mia chat">×</button>
+
+  <iframe
+    id="dostiris-chat-widget"
+    title="Mia AI Dental Receptionist"
+    src="https://ai-dental-chatbot.onrender.com/demo?client_key=premier_dental_demo_key">
+  </iframe>
+
+  <script src="https://ai-dental-chatbot.onrender.com/static/assets/js/dostiris-widget.js"></script>
 
   <script src="script.js"></script>
 </body>

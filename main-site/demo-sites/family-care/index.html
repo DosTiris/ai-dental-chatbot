@@ -17,7 +17,13 @@
     rel="stylesheet"
   />
 
+
+  <link rel="icon" type="image/png" sizes="32x32" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon-32.png?v=5" />
+  <link rel="icon" type="image/png" sizes="192x192" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon-192.png?v=5" />
+  <link rel="shortcut icon" href="https://ai-dental-chatbot.onrender.com/static/assets/logos/favicon.ico?v=5" />
+
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://ai-dental-chatbot.onrender.com/static/assets/css/dostiris-widget.css" />
 </head>
 
 <body>
@@ -117,7 +123,7 @@
           <div class="service-icon">1</div>
           <h3>Children’s Dentistry</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Gentle care helps children feel comfortable from their first visit onward.
           </p>
         </article>
 
@@ -125,7 +131,7 @@
           <div class="service-icon">2</div>
           <h3>Family Cleanings</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Convenient cleanings for parents, kids, and grandparents in one office.
           </p>
         </article>
 
@@ -133,7 +139,7 @@
           <div class="service-icon">3</div>
           <h3>Fluoride Treatments</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Preventive treatments can help protect younger smiles between visits.
           </p>
         </article>
 
@@ -141,7 +147,7 @@
           <div class="service-icon">4</div>
           <h3>Night Guards</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Custom night guards can help protect teeth from grinding and clenching.
           </p>
         </article>
 
@@ -149,7 +155,7 @@
           <div class="service-icon">5</div>
           <h3>Fillings</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Tooth-colored fillings restore comfort while keeping the smile natural.
           </p>
         </article>
 
@@ -157,7 +163,7 @@
           <div class="service-icon">6</div>
           <h3>Same-Day Concerns</h3>
           <p>
-            Learn more about this service and request guidance from our team.
+            Same-day concerns can be reviewed so the office can guide next steps.
           </p>
         </article>
       </div>
@@ -230,7 +236,7 @@
         </button>
 
         <p class="form-note" data-form-note>
-          Sample request form. Mia can be added for interactive 24/7 patient intake.
+          Demo form. Mia can capture these requests 24/7 on a live website.
         </p>
       </form>
     </section>
@@ -238,12 +244,31 @@
 
   <footer class="site-footer">
     <p>
-      © <span id="year"></span> Family Care Dental. Demo website template by
-      Dos Tiris.
+      © <span id="year"></span> Family Care Dental. Website preview by Dos Tiris.
     </p>
 
     <a href="#top">Back to top ↑</a>
   </footer>
+
+
+  <button
+    id="dostiris-chat-button"
+    type="button"
+    aria-label="Open Mia chat"
+    style="--dt-widget-primary:#10b981; --dt-widget-secondary:#84cc16;"
+  >
+    <img src="https://ai-dental-chatbot.onrender.com/static/assets/mia/mia-chat-icon.png?v=7" alt="Chat with Mia" />
+  </button>
+
+  <button id="dostiris-chat-close" type="button" aria-label="Close Mia chat">×</button>
+
+  <iframe
+    id="dostiris-chat-widget"
+    title="Mia AI Dental Receptionist"
+    src="https://ai-dental-chatbot.onrender.com/demo?client_key=family_care_demo_key">
+  </iframe>
+
+  <script src="https://ai-dental-chatbot.onrender.com/static/assets/js/dostiris-widget.js"></script>
 
   <script src="script.js"></script>
 </body>

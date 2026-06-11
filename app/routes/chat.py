@@ -497,8 +497,8 @@ def build_office_hours_answer(client) -> Optional[str]:
     if not hours:
         return None
 
-    parts = []
-    closed_days = []
+    lines = ["Office hours:"]
+    has_any_day = False
 
     for day in DAY_ORDER:
         row = hours.get(day, {}) or {}
@@ -507,25 +507,17 @@ def build_office_hours_answer(client) -> Optional[str]:
         end = row.get("end")
 
         if is_open and start and end:
-            parts.append(
-                f"{DAY_LABELS_FULL[day]} from {_format_time_label(start)} to {_format_time_label(end)}"
-            )
+            label = f"{_format_time_label(start)} – {_format_time_label(end)}"
+            has_any_day = True
         else:
-            closed_days.append(DAY_LABELS_FULL[day])
+            label = "Closed"
 
-    if not parts:
+        lines.append(f"{DAY_LABELS_FULL[day]}: {label}")
+
+    if not has_any_day:
         return None
 
-    open_text = "We’re open " + ", ".join(parts) + "."
-    if closed_days:
-        if len(closed_days) == 1:
-            closed_text = f" We’re closed on {closed_days[0]}."
-        else:
-            closed_text = " We’re closed on " + ", ".join(closed_days[:-1]) + f", and {closed_days[-1]}."
-    else:
-        closed_text = ""
-
-    return open_text + closed_text
+    return "\n".join(lines)
 
 
 def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
@@ -3326,11 +3318,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 meta = {"faq_match": False, "mode": "faq_operational_no_match"}
 
         elif is_insurance_intent:
+            default_insurance_reply = (
+                "We accept most major PPO dental insurance plans. Coverage may vary, "
+                "so please provide your insurance details when the office reaches out "
+                "and the team can help verify your benefits."
+            )
             if faq:
-                op_reply = (faq.answer or "").strip() or "Please call the office and our team can confirm insurance details."
+                faq_answer = (faq.answer or "").strip()
+                old_generic_demo_answer = (
+                    "We accept most major PPO dental insurance plans. Coverage can vary, "
+                    "so please provide your insurance details and we’ll verify your benefits."
+                )
+                op_reply = default_insurance_reply if faq_answer == old_generic_demo_answer else (faq_answer or default_insurance_reply)
                 meta = {"faq_match": True, "faq_id": str(faq.id), "mode": "faq_operational"}
             else:
-                op_reply = "Please call the office and our team can confirm insurance details."
+                op_reply = default_insurance_reply
                 meta = {"faq_match": False, "mode": "faq_operational_no_match"}
 
         else:
