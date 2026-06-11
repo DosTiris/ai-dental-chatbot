@@ -70,8 +70,14 @@ MAX_CONTEXT_MESSAGES = 12
 # }
 # ---------------------------------------------------------
 DEFAULT_MIA_OPENING_MESSAGE = (
-    "Hi, I’m Mia, the AI dental receptionist. I can help with appointments, "
-    "services, insurance, hours, or location. What can I help you with today?"
+    "Hi, I’m Mia — the AI dental receptionist for this office. I can help request "
+    "an appointment, answer common questions, or check services, insurance, hours, "
+    "and location. How can I help today?"
+)
+
+DEFAULT_MIA_MOBILE_OPENING_MESSAGE = (
+    "Hi, I’m Mia — the office’s AI dental receptionist. I can help with "
+    "appointments, services, insurance, hours, or location. How can I help today?"
 )
 
 DEFAULT_MIA_THEME = {
@@ -140,6 +146,11 @@ def build_public_widget_config(client: Client) -> dict:
         DEFAULT_MIA_OPENING_MESSAGE,
     )
 
+    mobile_opening_message = _clean_short_text(
+        settings.get("mia_mobile_opening_message") or settings.get("mobile_opening_message"),
+        DEFAULT_MIA_MOBILE_OPENING_MESSAGE,
+    )
+
     header_subtitle = _clean_short_text(
         settings.get("mia_header_subtitle") or settings.get("header_subtitle"),
         "AI Dental Receptionist",
@@ -151,6 +162,7 @@ def build_public_widget_config(client: Client) -> dict:
         "header_title": "Mia",
         "header_subtitle": header_subtitle,
         "opening_message": opening_message,
+        "mobile_opening_message": mobile_opening_message,
         "theme": theme,
     }
 
