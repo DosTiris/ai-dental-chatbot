@@ -1,8 +1,94 @@
 /* Dos Tiris Mia preview widget */
-#dostiris-chat-button{position:fixed;right:26px;bottom:26px;width:82px;height:82px;border:0;background:transparent;padding:0;cursor:pointer;z-index:9999;filter:drop-shadow(0 14px 28px rgba(15,23,42,.22));}
-#dostiris-chat-button::after{content:"";position:absolute;inset:9px;border-radius:999px;background:linear-gradient(135deg,var(--dt-widget-primary,#2563eb),var(--dt-widget-secondary,#06b6d4));opacity:.18;z-index:-1;transform:scale(1.08);}
-#dostiris-chat-button img{width:82px;height:82px;display:block;object-fit:contain;border-radius:999px;transition:transform .18s ease,filter .18s ease;}
-#dostiris-chat-button:hover img{transform:translateY(-2px) scale(1.04);}
-#dostiris-chat-close{position:fixed;right:24px;bottom:650px;width:34px;height:34px;border:0;border-radius:999px;background:#0f172a;color:#fff;font-size:22px;line-height:1;cursor:pointer;z-index:1000001;display:none;box-shadow:0 12px 28px rgba(15,23,42,.22);}
-#dostiris-chat-widget{position:fixed;right:24px;bottom:24px;width:390px;height:610px;border:0;border-radius:22px;background:#0f172a;box-shadow:0 24px 70px rgba(15,23,42,.32);z-index:1000000;display:none;overflow:hidden;}
-@media (max-width:640px){#dostiris-chat-widget{width:calc(100vw - 28px);height:72dvh;right:14px;left:14px;bottom:92px;border-radius:20px;}#dostiris-chat-button{right:18px;bottom:18px;width:76px;height:76px;}#dostiris-chat-button img{width:76px;height:76px;}#dostiris-chat-close{right:18px;bottom:calc(72dvh + 102px);}}
+#dostiris-chat-button {
+  position: fixed;
+  right: 34px;
+  bottom: 34px;
+  width: 86px;
+  height: 86px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  z-index: 9999;
+  overflow: visible;
+  filter:
+    drop-shadow(0 14px 28px rgba(15, 23, 42, 0.22))
+    drop-shadow(0 0 12px color-mix(in srgb, var(--dt-widget-primary, #2563eb) 18%, transparent));
+}
+
+#dostiris-chat-button img,
+#dostiris-chat-button .mia-chat-icon {
+  width: 86px;
+  height: 86px;
+  display: block;
+  object-fit: contain;
+  border-radius: 50%;
+  transition: transform 0.18s ease, filter 0.18s ease;
+}
+
+#dostiris-chat-button:hover img,
+#dostiris-chat-button:hover .mia-chat-icon {
+  transform: translateY(-2px) scale(1.04);
+}
+
+#dostiris-chat-close {
+  position: fixed;
+  right: 24px;
+  bottom: 650px;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 999px;
+  background: #0f172a;
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 1000001;
+  display: none;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22);
+}
+
+#dostiris-chat-widget {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 390px;
+  height: 610px;
+  border: 0;
+  border-radius: 22px;
+  background: #0f172a;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.32);
+  z-index: 1000000;
+  display: none;
+  overflow: hidden;
+}
+
+@media (max-width: 640px) {
+  #dostiris-chat-widget {
+    width: calc(100vw - 28px);
+    height: 72dvh;
+    right: 14px;
+    left: 14px;
+    bottom: 92px;
+    border-radius: 20px;
+  }
+
+  #dostiris-chat-button {
+    right: 18px;
+    bottom: 18px;
+    width: 78px;
+    height: 78px;
+  }
+
+  #dostiris-chat-button img,
+  #dostiris-chat-button .mia-chat-icon {
+    width: 78px;
+    height: 78px;
+  }
+
+  #dostiris-chat-close {
+    right: 18px;
+    bottom: calc(72dvh + 102px);
+  }
+}

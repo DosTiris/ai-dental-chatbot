@@ -571,22 +571,19 @@
       .chat-header button { padding: 7px 10px; font-size: 12px; }
 
       .quick-actions {
-        flex-wrap: nowrap;
-        overflow-x: auto;
+        flex-wrap: wrap;
+        overflow: visible;
         gap: 7px;
         padding: 10px 12px 11px;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
       }
-
-      .quick-actions::-webkit-scrollbar { display: none; }
 
       .quick-actions button,
       .quick-reply,
       .booking-link-button {
-        flex: 0 0 auto;
-        padding: 9px 11px;
+        flex: 0 1 auto;
+        padding: 8px 10px;
         font-size: 12.5px;
+        white-space: nowrap;
       }
 
       #messages {
