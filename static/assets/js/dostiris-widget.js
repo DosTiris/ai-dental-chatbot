@@ -4,6 +4,83 @@
   const widget = document.getElementById("dostiris-chat-widget");
   if (!openButton || !closeButton || !widget) return;
 
+  const launcherSvg = `
+    <svg class="dt-mia-launcher-svg" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false">
+      <path
+        d="M75.5 28.8C68.5 21.6 58.7 17.4 48.2 17.4C26.9 17.4 9.6 34.1 9.6 54.6c0 7.6 2.4 14.7 6.5 20.5L12.2 91l16.7-5.2c5.8 3.8 12.9 6 20.5 6c21.3 0 38.6-16.7 38.6-37.2c0-5.1-1.1-9.9-3.1-14.3"
+        fill="none"
+        stroke="var(--dt-widget-ring)"
+        stroke-width="8.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+      <path
+        d="M41.6 35.2c3.4 0 5.4 2.1 8.4 2.1s5-2.1 8.4-2.1c7.1 0 12.1 5.9 11 14.1c-.9 6.3-3.1 11.1-4.2 18.4c-.8 5.4-2.8 11.3-7.1 11.3c-3.6 0-4.6-4.7-5.4-9.3c-.5-3.3-1.3-6.2-2.7-6.2s-2.2 2.9-2.7 6.2c-.8 4.6-1.8 9.3-5.4 9.3c-4.3 0-6.3-5.9-7.1-11.3c-1.1-7.3-3.3-12.1-4.2-18.4c-1.1-8.2 3.9-14.1 11-14.1Z"
+        fill="var(--dt-widget-tooth)"
+      />
+      <path
+        d="M42.4 39.6c3.2 1.9 6.1 2.8 9.1 2.8c2.8 0 5.8-.8 9.4-2.8"
+        fill="none"
+        stroke="rgba(6, 182, 212, 0.55)"
+        stroke-width="2.2"
+        stroke-linecap="round"
+      />
+      <path
+        d="M76.8 20.9l2.7 7.1l7.2 2.7l-7.2 2.7l-2.7 7.2l-2.7-7.2l-7.2-2.7l7.2-2.7l2.7-7.1Z"
+        fill="var(--dt-widget-sparkle)"
+        opacity="0.96"
+      />
+      <path
+        d="M64.4 48.2l1.7 4.3l4.3 1.7l-4.3 1.7l-1.7 4.3l-1.7-4.3l-4.3-1.7l4.3-1.7l1.7-4.3Z"
+        fill="var(--dt-widget-sparkle)"
+        opacity="0.86"
+      />
+    </svg>`;
+
+  function installLauncherIcon() {
+    openButton.innerHTML = launcherSvg;
+  }
+
+  function getWidgetConfigUrl() {
+    try {
+      const frameUrl = new URL(widget.getAttribute("src"), window.location.href);
+      const clientKey = frameUrl.searchParams.get("client_key") || "demo_clinic_key";
+      const configUrl = new URL("/chat/config", frameUrl.origin);
+      configUrl.searchParams.set("client_key", clientKey);
+      return configUrl.toString();
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function setCssVar(name, value) {
+    if (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value.trim())) {
+      openButton.style.setProperty(name, value.trim());
+    }
+  }
+
+  async function applyLauncherTheme() {
+    const configUrl = getWidgetConfigUrl();
+    if (!configUrl || !window.fetch) return;
+
+    try {
+      const response = await fetch(configUrl, { mode: "cors", credentials: "omit" });
+      if (!response.ok) return;
+
+      const config = await response.json();
+      const theme = config.launcher_theme || config.mia_launcher_theme || config.theme || {};
+
+      setCssVar("--dt-widget-primary", theme.primary);
+      setCssVar("--dt-widget-secondary", theme.secondary);
+      setCssVar("--dt-widget-accent", theme.accent);
+      setCssVar("--dt-widget-ring", theme.ring);
+      setCssVar("--dt-widget-tooth", theme.tooth);
+      setCssVar("--dt-widget-sparkle", theme.sparkle);
+    } catch (error) {
+      // Keep the default launcher colors if the public config request is unavailable.
+    }
+  }
+
   function openMia() {
     widget.style.display = "block";
     closeButton.style.display = "block";
@@ -13,8 +90,11 @@
   function closeMia() {
     widget.style.display = "none";
     closeButton.style.display = "none";
-    openButton.style.display = "block";
+    openButton.style.display = "grid";
   }
+
+  installLauncherIcon();
+  applyLauncherTheme();
 
   openButton.addEventListener("click", openMia);
   closeButton.addEventListener("click", closeMia);

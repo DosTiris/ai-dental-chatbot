@@ -94,6 +94,15 @@ DEFAULT_MIA_THEME = {
     "muted_text": "#94a3b8",
 }
 
+DEFAULT_MIA_LAUNCHER_THEME = {
+    "primary": "#2563eb",
+    "secondary": "#06b6d4",
+    "accent": "#22c55e",
+    "ring": "#dff9ff",
+    "tooth": "#ffffff",
+    "sparkle": "#ffffff",
+}
+
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -126,6 +135,29 @@ def build_public_widget_config(client: Client) -> dict:
         key: _clean_hex_color(theme_source.get(key), fallback)
         for key, fallback in DEFAULT_MIA_THEME.items()
     }
+
+    launcher_source = settings.get("mia_launcher_theme") or settings.get("launcher_theme") or {}
+    if not isinstance(launcher_source, dict):
+        launcher_source = {}
+
+    launcher_theme = {
+        key: _clean_hex_color(launcher_source.get(key), fallback)
+        for key, fallback in DEFAULT_MIA_LAUNCHER_THEME.items()
+    }
+
+    # If there is no separate launcher theme, let the launcher follow the main Mia theme.
+    launcher_theme["primary"] = _clean_hex_color(
+        launcher_source.get("primary") or theme_source.get("launcher_primary") or theme.get("primary"),
+        launcher_theme["primary"],
+    )
+    launcher_theme["secondary"] = _clean_hex_color(
+        launcher_source.get("secondary") or theme_source.get("launcher_secondary") or theme.get("secondary"),
+        launcher_theme["secondary"],
+    )
+    launcher_theme["accent"] = _clean_hex_color(
+        launcher_source.get("accent") or launcher_source.get("online_dot") or theme.get("accent"),
+        launcher_theme["accent"],
+    )
 
     # Convenience aliases in case you type simpler names in Supabase.
     theme["primary"] = _clean_hex_color(
@@ -164,6 +196,7 @@ def build_public_widget_config(client: Client) -> dict:
         "opening_message": opening_message,
         "mobile_opening_message": mobile_opening_message,
         "theme": theme,
+        "launcher_theme": launcher_theme,
     }
 
 

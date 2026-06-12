@@ -39,41 +39,98 @@ html {
 }
 
 #dostiris-chat-button {
+    --dt-widget-primary: #2563eb;
+    --dt-widget-secondary: #06b6d4;
+    --dt-widget-accent: #22c55e;
+    --dt-widget-ring: rgba(224, 247, 255, 0.9);
+    --dt-widget-tooth: #ffffff;
+    --dt-widget-tooth-shadow: rgba(15, 23, 42, 0.22);
+    --dt-widget-sparkle: #ffffff;
+
     position: fixed;
-    right: 28px;
-    bottom: 28px;
-    width: 86px;
-    height: 86px;
-    border: none;
-    background: transparent;
-    padding: 0;
-    cursor: pointer;
-    z-index: 9999;
-    box-shadow: none;
-    overflow: visible;
-}
-
-#dostiris-chat-button .mia-chat-icon {
-    width: 86px;
-    height: 86px;
-    object-fit: contain;
-    display: block;
-    border-radius: 50%;
-    filter:
-        drop-shadow(0 14px 28px rgba(37, 99, 235, 0.45))
-        drop-shadow(0 0 12px rgba(6, 182, 212, 0.25));
-    transition: transform 0.2s ease;
-}
-
-#dostiris-chat-button {
     right: 34px;
     bottom: 34px;
     width: 86px;
     height: 86px;
+    border: 0;
+    border-radius: 999px;
+    background:
+        radial-gradient(circle at 72% 20%, color-mix(in srgb, var(--dt-widget-secondary) 82%, white 18%) 0%, transparent 34%),
+        linear-gradient(135deg, color-mix(in srgb, var(--dt-widget-primary) 78%, #020617 22%) 0%, var(--dt-widget-primary) 52%, var(--dt-widget-secondary) 100%);
+    padding: 0;
+    cursor: pointer;
+    z-index: 9999;
+    overflow: visible;
+    display: grid;
+    place-items: center;
+    box-shadow:
+        0 18px 38px rgba(15, 23, 42, 0.30),
+        0 0 18px color-mix(in srgb, var(--dt-widget-secondary) 25%, transparent);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
 }
 
-#dostiris-chat-button:hover .mia-chat-icon {
-    transform: scale(1.05);
+#dostiris-chat-button::after {
+    content: "";
+    position: absolute;
+    right: 4px;
+    bottom: 5px;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: var(--dt-widget-accent);
+    border: 4px solid #ffffff;
+    box-shadow:
+        0 3px 10px rgba(15, 23, 42, 0.22),
+        0 0 0 0 color-mix(in srgb, var(--dt-widget-accent) 45%, transparent);
+    animation: dt-mia-online-pulse 2.4s ease-out infinite;
+}
+
+#dostiris-chat-button .dt-mia-launcher-svg {
+    width: 72%;
+    height: 72%;
+    display: block;
+    overflow: visible;
+    filter: drop-shadow(0 5px 9px var(--dt-widget-tooth-shadow));
+    transition: transform 0.18s ease;
+}
+
+#dostiris-chat-button:hover {
+    transform: translateY(-2px) scale(1.035);
+    box-shadow:
+        0 22px 46px rgba(15, 23, 42, 0.34),
+        0 0 22px color-mix(in srgb, var(--dt-widget-secondary) 34%, transparent);
+}
+
+#dostiris-chat-button:hover .dt-mia-launcher-svg {
+    transform: rotate(-2deg) scale(1.03);
+}
+
+#dostiris-chat-button:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--dt-widget-secondary) 60%, white 40%);
+    outline-offset: 5px;
+}
+
+#dostiris-chat-button img,
+#dostiris-chat-button .mia-chat-icon {
+    display: none !important;
+}
+
+@keyframes dt-mia-online-pulse {
+    0% {
+        box-shadow:
+            0 3px 10px rgba(15, 23, 42, 0.22),
+            0 0 0 0 color-mix(in srgb, var(--dt-widget-accent) 42%, transparent);
+    }
+    70% {
+        box-shadow:
+            0 3px 10px rgba(15, 23, 42, 0.22),
+            0 0 0 9px transparent;
+    }
+    100% {
+        box-shadow:
+            0 3px 10px rgba(15, 23, 42, 0.22),
+            0 0 0 0 transparent;
+    }
 }
 
 #dostiris-chat-close {
@@ -586,9 +643,12 @@ background: white;
         height: 78px;
     }
 
-    #dostiris-chat-button .mia-chat-icon {
-        width: 78px;
-        height: 78px;
+    #dostiris-chat-button::after {
+        right: 3px;
+        bottom: 4px;
+        width: 16px;
+        height: 16px;
+        border-width: 3px;
     }
 
     #dostiris-chat-close {
