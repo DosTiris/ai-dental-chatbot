@@ -18,6 +18,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 from typing import List, Dict, Optional, Any, Tuple
 from difflib import get_close_matches
 import time
@@ -245,6 +249,66 @@ def get_client_setting(client, key: str, default=None):
         return settings.get(key, default)
     return default
 
+def get_client_timezone_name(client) -> str:
+    settings = getattr(client, "settings", None)
+    if isinstance(settings, dict):
+        tz = (settings.get("timezone") or settings.get("time_zone") or "").strip()
+        if tz:
+            return tz
+
+    for attr in ("timezone", "time_zone", "timezone_name"):
+        value = getattr(client, attr, None)
+        if value:
+            return str(value).strip()
+
+    # Demo offices are currently marketed in New York/Long Island.
+    # Falling back to Eastern avoids Render/UTC confusing tomorrow/today.
+    return "America/New_York"
+
+
+def get_client_now(client) -> datetime:
+    tz_name = get_client_timezone_name(client)
+    if ZoneInfo:
+        try:
+            return datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            pass
+    return datetime.now()
+
+
+def get_day_open_hours(client, day_key: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    hours = get_office_hours_struct(client)
+    row = hours.get((day_key or "").lower()[:3], {}) or {}
+    return bool(row.get("open", False)), row.get("start"), row.get("end")
+
+
+def build_open_time_examples(client, max_examples: int = 3) -> str:
+    examples = []
+    for day in DAY_ORDER:
+        row = get_office_hours_struct(client).get(day, {}) or {}
+        if not bool(row.get("open", False)):
+            continue
+
+        end_minutes = _parse_hhmm_to_minutes(row.get("end"))
+
+        if day == "sat":
+            examples.append("Saturday morning")
+        else:
+            examples.append(f"{DAY_LABELS_FULL[day]} morning")
+            if end_minutes is None or end_minutes >= 14 * 60:
+                examples.append(f"{DAY_LABELS_FULL[day]} afternoon")
+
+        if len(examples) >= max_examples:
+            break
+
+    if not examples:
+        return "For example: Tuesday morning."
+
+    if len(examples) == 1:
+        return f"For example: {examples[0]}."
+
+    return "For example: " + ", ".join(examples[:-1]) + f", or {examples[-1]}."
+
 def get_booking_url(client) -> str:
     return (get_client_setting(client, "booking_url", "") or "").strip()
 
@@ -284,7 +348,7 @@ def is_currently_after_hours_for_client(client: Client) -> bool:
     if not hours:
         return False
 
-    now_local = datetime.now()
+    now_local = get_client_now(client)
     day_key = now_local.strftime("%a").lower()[:3]
 
     row = hours.get(day_key, {}) or {}
@@ -390,6 +454,144 @@ def looks_like_scheduling_intent(user_text: str) -> bool:
         k in t
         for k in ["appointment", "book", "schedule", "available", "availability", "come in", "see the doctor"]
     )
+
+def normalize_minor_typos(t: str) -> str:
+    # Normalize a few common patient typos without making broad guesses.
+    replacements = {
+        "checkiup": "checkup",
+        "chekiup": "checkup",
+        "check up": "checkup",
+        "ya ll": "yall",
+    }
+    for bad, good in replacements.items():
+        t = t.replace(bad, good)
+    return t
+
+
+def detect_service_topic(user_text: str) -> Optional[str]:
+    t = normalize_minor_typos(_norm_text(user_text))
+    if not t:
+        return None
+
+    if any(k in t for k in ["cleaning", "checkup", "exam", "xray", "x ray", "prophy"]):
+        return "cleaning/checkup"
+    if any(k in t for k in ["tooth pain", "tooth hurts", "toothache", "sore tooth"]):
+        return "tooth pain"
+    if any(k in t for k in ["filling", "fillings", "cavity", "cavities", "broken tooth", "broke tooth", "chipped tooth", "cracked tooth"]):
+        return "broken tooth/filling"
+    if any(k in t for k in ["crown", "crowns", "cap", "caps"]):
+        return "crown"
+    if any(k in t for k in ["braces", "invisalign", "orthodontic", "orthodontics", "aligner", "aligners"]):
+        return "orthodontics"
+    if any(k in t for k in ["whiten", "whitening", "teeth whitening", "cosmetic", "veneer", "veneers"]):
+        return "cosmetic/whitening"
+    if any(k in t for k in ["implant", "implants", "extraction", "extractions", "wisdom tooth", "wisdom teeth", "root canal"]):
+        return "extraction/implant"
+    return None
+
+
+def looks_like_price_question(user_text: str) -> bool:
+    t = normalize_minor_typos(_norm_text(user_text))
+    price_terms = [
+        "how much", "cost", "price", "pricing", "charge", "charging", "fee", "fees",
+        "out of pocket", "copay", "co pay", "estimate", "quote"
+    ]
+    return any(p in t for p in price_terms)
+
+
+def build_price_reply(user_text: str) -> str:
+    service = detect_service_topic(user_text)
+    service_name = pretty_service_label(service) if service else "treatment"
+
+    if service == "extraction/implant" and any(k in _norm_text(user_text) for k in ["implant", "implants"]):
+        return (
+            "Implant costs can vary depending on the treatment plan, insurance coverage, and whether any additional procedures are needed. "
+            "The office can give you a more accurate estimate after a consultation. Would you like help requesting one?"
+        )
+
+    if service == "orthodontics":
+        return (
+            "Braces and Invisalign pricing can vary depending on the case and treatment length. "
+            "The office can provide a more accurate estimate after an evaluation. Would you like help requesting an appointment?"
+        )
+
+    if service == "cosmetic/whitening":
+        return (
+            "Cosmetic and whitening costs can vary depending on the option that fits you best. "
+            "The office can confirm pricing and availability with you. Would you like help requesting an appointment?"
+        )
+
+    if service == "cleaning/checkup":
+        return (
+            "Cleaning and exam costs can vary depending on insurance coverage and whether x-rays or other services are needed. "
+            "The office can confirm details with you. Would you like help requesting an appointment?"
+        )
+
+    if service:
+        return (
+            f"{service_name} costs can vary depending on the exam, treatment needed, and insurance coverage. "
+            "The office can give you a more accurate estimate after reviewing your situation. Would you like help requesting an appointment?"
+        )
+
+    return (
+        "Costs can vary depending on the exam, treatment needed, and insurance coverage. "
+        "The office can give you a more accurate estimate after reviewing your situation. Would you like me to collect your info so the team can follow up?"
+    )
+
+
+def looks_like_service_availability_question(user_text: str) -> bool:
+    t = normalize_minor_typos(_norm_text(user_text))
+    if not detect_service_topic(t):
+        return False
+    return any(p in t for p in [
+        "do you", "do u", "can you", "can u", "are you able", "do yall", "do y all", "offer", "provide", "have"
+    ])
+
+
+def build_service_availability_reply(user_text: str) -> str:
+    service = detect_service_topic(user_text)
+    if service == "cosmetic/whitening":
+        if "veneer" in _norm_text(user_text):
+            return "Veneers may be available as part of cosmetic treatment. The office can confirm options during a consultation. Would you like help requesting one?"
+        return "Yes, we can help with teeth whitening or cosmetic treatment. Would you like help requesting an appointment?"
+    if service == "crown":
+        return "Yes, we can help with crowns. Would you like to request an appointment?"
+    if service == "orthodontics":
+        return "Yes, we can help with braces or Invisalign. Would you like to request an appointment?"
+    if service == "extraction/implant":
+        if "root canal" in _norm_text(user_text):
+            return "The office can confirm whether root canal treatment is available and what the next step should be. Would you like help requesting an appointment?"
+        return "Yes, we can help with implants, extractions, or related consultations. Would you like to request an appointment?"
+    if service == "broken tooth/filling":
+        return "Yes, we can help with fillings, cavities, broken teeth, or chipped teeth. Would you like to request an appointment?"
+    if service == "cleaning/checkup":
+        return "Yes, we offer cleanings, exams, and checkups. Would you like help requesting an appointment?"
+    if service == "tooth pain":
+        return "We can help with tooth pain. If symptoms are severe or worsening, please call the office directly. Would you like help requesting an appointment?"
+    return "The office can help confirm that service for you. Would you like help requesting an appointment?"
+
+
+def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    dangerous_action = any(p in t for p in [
+        "pull out", "pull his tooth", "pull her tooth", "pull my tooth", "pull a tooth",
+        "take out his tooth", "take out her tooth", "take out my tooth", "extract his tooth",
+        "extract her tooth", "extract my tooth", "walk me through", "pliers", "yank", "rip out"
+    ])
+    dental_context = any(p in t for p in ["tooth", "teeth", "bleeding", "gum", "mouth"])
+    return dangerous_action and dental_context
+
+
+def build_no_medical_instructions_reply(conversation: Conversation, include_next_prompt: bool = True) -> str:
+    reply = (
+        "I can’t provide instructions for pulling, extracting, or treating a tooth in chat. "
+        "If there is bleeding, severe pain, swelling, or risk of injury, please call the office right away or seek urgent care."
+    )
+    if include_next_prompt:
+        next_prompt = _next_emergency_prompt(conversation)
+        if next_prompt:
+            reply += f"\n\n{next_prompt}"
+    return reply
 
 def looks_like_info_intent(user_text: str) -> bool:
     t = _norm_text(user_text)
@@ -981,23 +1183,26 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
 # Service selection detector (UI buttons / short replies)
 # =========================================================
 def detect_service_selection(user_text: str) -> Optional[str]:
-    t = (user_text or "").strip().lower()
+    t = normalize_minor_typos((user_text or "").strip().lower())
     if "tooth pain" in t or "tooth hurts" in t or "toothache" in t:
         return "tooth pain"
 
-    if "cleaning" in t or "checkup" in t or "check-up" in t:
+    if "cleaning" in t or "checkup" in t or "check-up" in t or "exam" in t:
         return "cleaning/checkup"
 
-    if "broken tooth" in t or "broke a tooth" in t or "filling" in t:
+    if "broken tooth" in t or "broke a tooth" in t or "filling" in t or "cavity" in t:
         return "broken tooth/filling"
 
-    if "implant" in t or "extraction" in t:
+    if "crown" in t or "cap" in t:
+        return "crown"
+
+    if "implant" in t or "extraction" in t or "wisdom tooth" in t or "wisdom teeth" in t:
         return "extraction/implant"
 
-    if "whitening" in t or "cosmetic" in t:
+    if "whitening" in t or "whiten" in t or "cosmetic" in t or "veneer" in t:
         return "cosmetic/whitening"
 
-    if "braces" in t or "invisalign" in t:
+    if "braces" in t or "invisalign" in t or "orthodont" in t:
         return "orthodontics"
     service_map = {
         "cleaning": "cleaning/checkup",
@@ -1254,7 +1459,7 @@ def detect_new_patient_flag(user_text: str) -> Optional[bool]:
     return None
 
 
-def detect_time_window(user_text: str) -> Optional[str]:
+def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optional[str]:
     t = (user_text or "").strip()
     if not t:
         return None
@@ -1265,7 +1470,7 @@ def detect_time_window(user_text: str) -> Optional[str]:
 
     # relative day handling
     if re.search(r"\btoday\b", tl) or re.search(r"\btomorrow\b", tl):
-        base = datetime.now()
+        base = get_client_now(client) if client is not None else datetime.now()
         if re.search(r"\btomorrow\b", tl):
             base = base + timedelta(days=1)
 
@@ -1479,11 +1684,11 @@ def handle_time_window_capture(
     last_assistant_text: str
 ) -> Tuple[Optional[str], bool]:
     current_tw = (getattr(conversation, "lead_time_window", None) or "").strip()
-    detected_tw = detect_time_window(user_text)
+    detected_tw = detect_time_window(user_text, client)
     norm_user_text = _norm_text(user_text).strip()
     is_priority_time = looks_like_priority_time_request(user_text)
 
-    now_local = datetime.now()
+    now_local = get_client_now(client)
     is_after_noon = now_local.hour >= 12
     today_tok = now_local.strftime("%a")
 
@@ -1499,7 +1704,7 @@ def handle_time_window_capture(
     last_t = (last_assistant_text or "").lower()
 
     weekday_example = build_time_window_examples(client, prefer_weekdays=True)
-    anyday_example = build_time_window_examples(client, prefer_weekdays=False)
+    anyday_example = build_open_time_examples(client)
 
     # ASAP / earliest availability handling
     if is_priority_time:
@@ -1549,7 +1754,7 @@ def handle_time_window_capture(
         dtl = detected_tw.lower()
         if re.search(r"\b(sun|sunday)\b", dtl) and is_sunday_closed(client):
             return (
-                "Just a heads up—we’re typically closed on Sundays. Do you prefer a weekday morning or afternoon?",
+                f"Just a heads up — we’re typically closed on Sundays. What open day/time works better? {anyday_example}",
                 False,
             )
 
@@ -1575,22 +1780,39 @@ def handle_time_window_capture(
         else:
             saved = False
 
-        # If it's already afternoon, don't offer morning
+        # If the office is already closed or near closing, do not offer today.
+        is_open_today, today_start, today_end = get_day_open_hours(client, today_tok.lower())
+        today_end_minutes = _parse_hhmm_to_minutes(today_end)
+        now_minutes = now_local.hour * 60 + now_local.minute
+
+        if (not is_open_today) or (today_end_minutes is not None and now_minutes >= today_end_minutes):
+            return (
+                f"The office may be closed for today. What open day/time works better? {anyday_example}",
+                saved,
+            )
+
+        # If it's already afternoon, don't offer morning.
         if is_after_noon:
             return (
-                "Got it — what time later today works best? If today is too tight, tomorrow afternoon works too.",
+                "Got it — what time later today works best? If today is too tight, we can also look at the next open day.",
                 saved,
             )
 
         return ("Got it — do you prefer today morning or afternoon?", saved)
 
-    # If we just nudged for weekday morning/afternoon, interpret answer here
-    if "weekday morning or afternoon" in last_t:
+    # If we just nudged for an alternate open day/time, interpret answer here.
+    if "weekday morning or afternoon" in last_t or "what open day" in last_t:
         tl = _norm_text(user_text)
+
+        if "evening" in tl or "night" in tl:
+            return (
+                "We’re usually open until 5 PM on weekdays, so evening appointments may not be available. Would a weekday morning, weekday afternoon, or Saturday morning work?",
+                False,
+            )
 
         if tl in {"no", "nope", "nah", "not really", "not weekday", "not weekdays"}:
             return (
-                f"No problem — what day/time works better for you? {anyday_example}",
+                f"No problem — what open day/time works better for you? {anyday_example}",
                 False,
             )
 
@@ -1609,12 +1831,9 @@ def handle_time_window_capture(
             return ("Thanks — which weekday works best (Mon–Fri)?", False)
 
         if not detected_tw:
-            return ("Got it — do you prefer weekday morning or afternoon?", False)
+            return (f"Got it — what open day/time works better? {anyday_example}", False)
 
         dt = (detected_tw or "").strip()
-
-        if re.search(r"\b(Sat|Sun)\b", dt):
-            return ("Please choose a weekday (Mon–Fri). Do you prefer morning or afternoon?", False)
 
         if dt in {"morning", "afternoon"}:
             weekday_tw = f"Weekday {dt}"
@@ -1629,30 +1848,46 @@ def handle_time_window_capture(
                 return ("Thanks — which weekday works best (Mon–Fri)?", True)
             return ("Thanks — which weekday works best (Mon–Fri)?", False)
 
-        if time_window_has_specific_day(dt) and time_window_has_detail(dt):
+        if dt == "Weekday evening":
+            return (
+                "We’re usually open until 5 PM on weekdays, so evening appointments may not be available. Would a weekday morning, weekday afternoon, or Saturday morning work?",
+                False,
+            )
+
+        if time_window_has_specific_day(dt):
             day_tok = _extract_day_token(dt)
-            if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
+            day_key = (day_tok or "").lower()
+            if not is_day_open(client, day_key):
+                return (f"That day may not be available. What open day/time works better? {anyday_example}", False)
+
+            if time_window_has_detail(dt):
                 conversation.lead_time_window = dt
                 return (None, True)
-            return ("Please choose a weekday (Mon–Fri). Do you prefer morning or afternoon?", False)
 
-        if time_window_has_specific_day(dt) and not time_window_has_detail(dt):
-            day_tok = _extract_day_token(dt)
-            if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
-                conversation.lead_time_window = dt
-                return ("Got it — do you prefer morning or afternoon?", True)
-            return ("Please choose a weekday (Mon–Fri). Do you prefer morning or afternoon?", False)
+            conversation.lead_time_window = dt
+            if day_tok == "Sat":
+                return ("Got it — Saturday is usually a shorter day. What time Saturday morning works best?", True)
+            return ("Got it — do you prefer morning or afternoon?", True)
 
-        return ("Do you prefer weekday morning or afternoon?", False)
+        return (f"What open day/time works better? {anyday_example}", False)
 
-    # If we already have Weekday morning/afternoon and user gives a day, combine
+    # If we already have Weekday morning/afternoon and user gives a day, combine.
     if current_tw in {"Weekday morning", "Weekday afternoon"} and detected_tw:
         if detected_tw in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
             part = "morning" if current_tw == "Weekday morning" else "afternoon"
             conversation.lead_time_window = f"{detected_tw} {part}"
             return (None, True)
-        if detected_tw in {"Sat", "Sun"}:
-            return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
+
+        if detected_tw == "Sat":
+            if not is_saturday_open(client):
+                return (f"Saturday may not be available. What open day/time works better? {anyday_example}", False)
+            if current_tw == "Weekday afternoon":
+                return ("Saturday is usually a shorter day. Would Saturday morning work?", False)
+            conversation.lead_time_window = "Sat morning"
+            return (None, True)
+
+        if detected_tw == "Sun":
+            return (f"We’re typically closed on Sundays. What open day/time works better? {anyday_example}", False)
 
     # If we have day-only and user provides part-of-day or exact time, combine
     if current_tw and time_window_has_specific_day(current_tw) and not time_window_has_detail(current_tw) and detected_tw:
@@ -1686,8 +1921,11 @@ def handle_time_window_capture(
         return ("Please choose another day/time that works.", False)
     # Normal save path: only save if it improves specificity
     if detected_tw:
-        if detected_tw in {"Sat", "Sun"} and not is_saturday_open(client):
-            return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
+        if detected_tw == "Sun" and is_sunday_closed(client):
+            return (f"We’re typically closed on Sundays. What open day/time works better? {anyday_example}", False)
+
+        if detected_tw == "Sat" and not is_saturday_open(client):
+            return (f"Saturday may not be available. What open day/time works better? {anyday_example}", False)
 
         new_score = _time_window_specificity_score(detected_tw)
         old_score = _time_window_specificity_score(current_tw)
@@ -1711,7 +1949,10 @@ def handle_time_window_capture(
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
                 return ("Got it — do you prefer morning or afternoon?", saved)
 
-            return (f"Please choose another day/time that works. {weekday_example}", False)
+            if day_tok == "Sat":
+                return ("Got it — Saturday is usually a shorter day. What time Saturday morning works best?", saved)
+
+            return (f"Please choose another day/time that works. {anyday_example}", False)
 
 
     return (None, False)
@@ -1844,6 +2085,24 @@ def last_assistant_asked_for_name(db: Session, conversation_id: uuid.UUID) -> bo
     ]
     return any(p in t for p in name_prompts)
 
+def last_assistant_asked_for_patient_type(db: Session, conversation_id: uuid.UUID) -> bool:
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+    return (
+        "new or returning patient" in t
+        or "are you a new patient" in t
+        or "new or returning" in t
+    )
+
 def last_assistant_was_emergency_prompt(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
         db.query(Message)
@@ -1892,13 +2151,13 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
         return None
 
     # Keep these aligned with your 3.6 service confirmation text
-    if "offer dental implants" in t or ("implants" in t and "schedule" in t):
+    if "offer dental implants" in t or ("implants" in t and any(x in t for x in ["schedule", "appointment", "request"])):
         return "extraction/implant"
     if "offer braces" in t or "invisalign" in t or "orthodont" in t:
         return "orthodontics"
     if "do crowns" in t or "crown" in t:
         return "crown"
-    if "offer teeth whitening" in t or "whitening" in t:
+    if "offer teeth whitening" in t or "whitening" in t or "veneer" in t or "cosmetic treatment" in t:
         return "cosmetic/whitening"
     if "do fillings" in t or "fillings" in t or "cavity" in t:
         return "broken tooth/filling"
@@ -2766,7 +3025,8 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     if not (getattr(conversation, "lead_time_window", None) or "").strip():
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
     if getattr(conversation, "lead_is_new_patient", None) is None:
-        return "Are you a new patient?"
+        prefix = f"{name}, " if name else ""
+        return f"One quick question — {prefix}are you a new or returning patient?"
     return "Thanks — our team will reach out to confirm your appointment."
 
 def _emergency_meta(label="Call the office now") -> dict:
@@ -2779,6 +3039,46 @@ def _emergency_meta(label="Call the office now") -> dict:
         "booking_cta_label": label,
         
     }
+
+
+def should_append_next_intake_prompt(current_reply: Optional[str], next_prompt: Optional[str]) -> bool:
+    if not next_prompt:
+        return False
+
+    current_norm = _norm_text(current_reply or "")
+    next_norm = _norm_text(next_prompt or "")
+
+    if not next_norm:
+        return False
+
+    if current_norm == next_norm or next_norm in current_norm:
+        return False
+
+    # Prevent double asking new/returning patient wording.
+    current_asks_patient_type = (
+        "new or returning patient" in current_norm
+        or "are you a new patient" in current_norm
+    )
+    next_asks_patient_type = (
+        "new or returning patient" in next_norm
+        or "are you a new patient" in next_norm
+    )
+    if current_asks_patient_type and next_asks_patient_type:
+        return False
+
+    # If the current reply is already asking for a day/time choice, do not append another
+    # intake question. One question at a time feels more like a real receptionist.
+    current_asks_time = any(p in current_norm for p in [
+        "what day time", "what day or time", "what open day", "which day works",
+        "do you prefer", "what time later today", "what time works"
+    ])
+    next_asks_time = any(p in next_norm for p in [
+        "what day time", "what day or time", "which weekday", "do you prefer", "what time works"
+    ])
+    if current_asks_time and (next_asks_time or next_asks_patient_type):
+        return False
+
+    return True
 # =========================================================
 # The /chat endpoint
 # =========================================================
@@ -2975,6 +3275,46 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     )
 
     # =========================================================
+    # Pricing questions should be answered directly, not mistaken for intake.
+    # =========================================================
+    if looks_like_price_question(user_text):
+        reply_text = build_price_reply(user_text)
+
+        lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
+        if has_any_lead_data and not lead_completed:
+            next_prompt = _next_intake_prompt(client, conversation)
+            if should_append_next_intake_prompt(reply_text, next_prompt):
+                reply_text = f"{reply_text}\n\n{next_prompt}"
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "pricing_question", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    # =========================================================
+    # Service availability questions: answer first, then offer scheduling.
+    # =========================================================
+    if looks_like_service_availability_question(user_text) and not is_scheduling_now:
+        reply_text = build_service_availability_reply(user_text)
+
+        lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
+        if has_any_lead_data and not lead_completed:
+            next_prompt = _next_intake_prompt(client, conversation)
+            if should_append_next_intake_prompt(reply_text, next_prompt):
+                reply_text = f"{reply_text}\n\n{next_prompt}"
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "service_availability", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    # =========================================================
     # Early question guard
     # =========================================================
     if looks_like_question_request(user_text) and not in_intake_mode:
@@ -2985,6 +3325,38 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={"mode": "question_guard", "faq_match": False, "show_start_over": show_start_over,},
+        )
+
+    # =========================================================
+    # Dangerous dental self-treatment requests
+    # =========================================================
+    if looks_like_dangerous_dental_instruction(user_text):
+        conversation.is_lead = True
+        conversation.lead_is_priority = True
+        conversation.lead_is_emergency = True
+        if not (conversation.lead_reason or "").strip():
+            conversation.lead_reason = "tooth pain"
+            conversation.lead_reason_source_text = (user_text or "")[:120]
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        reply_text = build_no_medical_instructions_reply(conversation, include_next_prompt=True)
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "dangerous_medical_instruction_guard",
+                "faq_match": False,
+                "emergency_mode": True,
+                "hide_booking_button": True,
+                "show_call_button": True,
+                "call_phone": office_phone,
+                "call_cta_label": "Call Office Now",
+                "show_start_over": show_start_over,
+            },
         )
 
     # =========================================================
@@ -3116,6 +3488,25 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     emergency_followup = last_assistant_was_emergency_prompt(db, conversation.id)
 
     if emergency_followup:
+        if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
+            reply_text = build_no_medical_instructions_reply(conversation, include_next_prompt=True)
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "emergency_medical_advice_guard",
+                    "faq_match": False,
+                    "emergency_mode": True,
+                    "hide_booking_button": True,
+                    "show_call_button": True,
+                    "call_phone": office_phone,
+                    "call_cta_label": "Call Office Now",
+                    "show_start_over": show_start_over,
+                },
+            )
+
         updated = False
 
         phone = extract_phone(user_text)
@@ -3310,7 +3701,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if ("open" in tokens or "close" in tokens) and (tokens & time_words):
         is_hours_intent = True
 
-    if in_intake_mode and detect_time_window(user_text):
+    if in_intake_mode and detect_time_window(user_text, client):
         is_hours_intent = False
 
     insurance_words = {"insurance", "ppo", "hmo", "medicaid", "medicare"}
@@ -3374,7 +3765,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
         if (in_intake_mode or resume_intake_after_answer) and not lead_completed:
-            op_reply = f"{op_reply}\n\n{_next_intake_prompt(client, conversation)}"
+            next_prompt = _next_intake_prompt(client, conversation)
+            if should_append_next_intake_prompt(op_reply, next_prompt):
+                op_reply = f"{op_reply}\n\n{next_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=op_reply))
         db.commit()
@@ -3691,6 +4084,23 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         conversation.lead_is_new_patient = np_flag
         updated = True
 
+    if (
+        np_flag is None
+        and getattr(conversation, "lead_is_new_patient", None) is None
+        and last_assistant_asked_for_patient_type(db, conversation.id)
+        and not looks_like_price_question(user_text)
+        and not looks_like_service_availability_question(user_text)
+        and not looks_like_medical_advice(user_text)
+    ):
+        reply_text = "Sorry, I didn’t catch that. Are you a new or returning patient?"
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "patient_type_clarify", "faq_match": False, "show_start_over": show_start_over},
+        )
+
     last_msg = (
         db.query(Message)
         .filter(Message.conversation_id == conversation.id, Message.role == "assistant")
@@ -3771,18 +4181,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             else:
                 combined_reply = outside_hours_reply
 
-        # Only append the next intake prompt if it is NOT the same question
+        # Only append the next intake prompt when it will not create a double-question.
         next_prompt = _next_intake_prompt(client, conversation)
 
-        if next_prompt:
-            tw_norm = (tw_reply or "").strip().lower()
-            next_norm = (next_prompt or "").strip().lower()
-
-            if next_norm and next_norm != tw_norm:
-                if combined_reply:
-                    combined_reply = f"{combined_reply}\n\n{next_prompt}"
-                else:
-                    combined_reply = next_prompt
+        if should_append_next_intake_prompt(combined_reply, next_prompt):
+            if combined_reply:
+                combined_reply = f"{combined_reply}\n\n{next_prompt}"
+            else:
+                combined_reply = next_prompt
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=combined_reply))
         db.commit()
@@ -4056,7 +4462,27 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         post_text = _norm_text(user_text)
         practice_name = getattr(client, "practice_name", None) or "our office"
 
-        if any(x in post_text for x in ["thanks", "thank you", "thx", "ty"]):
+        if bool(getattr(conversation, "lead_is_emergency", False)):
+            if any(x in post_text for x in ["die", "dying", "worse", "wait", "wait time", "how long", "before you call", "911", "er", "emergency"]):
+                reply_text = (
+                    "If you feel your condition is life-threatening or getting worse, please call 911 or go to the ER now. "
+                    f"For urgent dental guidance, please call the office directly at {office_phone}."
+                )
+                should_close = False
+            elif any(x in post_text for x in ["thanks", "thank you", "thx", "ty", "ok", "okay", "got it", "sounds good"]):
+                reply_text = (
+                    "You’re welcome. We’ve flagged this as urgent for the team. "
+                    "If anything gets worse, please call the office directly or seek urgent care."
+                )
+                should_close = False
+            else:
+                reply_text = (
+                    "We’ve already flagged this as urgent for the team. "
+                    "If symptoms are severe, worsening, or life-threatening, please call 911 or go to the ER now. "
+                    f"You can also call the office directly at {office_phone}."
+                )
+                should_close = False
+        elif any(x in post_text for x in ["thanks", "thank you", "thx", "ty"]):
             reply_text = f"Thank you for choosing {practice_name}. Have a great day!"
             should_close = True
 
@@ -4086,7 +4512,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "faq_match": False,
-                "mode": "post_completion_polite",
+                "mode": "post_completion_emergency" if bool(getattr(conversation, "lead_is_emergency", False)) else "post_completion_polite",
                 "show_start_over": show_start_over,
             },
         )
@@ -4267,7 +4693,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
         reply_text = (response.output_text or "").strip()
         if not reply_text:
-            reply_text = "Sure—what can I help with?"
+            reply_text = "I can help with appointments, services, insurance, hours, location, or pricing questions. What would you like help with?"
 
     except Exception as e:
         print("OPENAI ERROR:", repr(e))  # log the real OpenAI error in Render/local console
