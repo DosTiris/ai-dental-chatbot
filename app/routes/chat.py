@@ -479,6 +479,36 @@ def normalize_minor_typos(t: str) -> str:
     return t
 
 
+def looks_like_broken_tooth_phrase(text: str) -> bool:
+    """Catch messy real-user broken tooth wording like 'my tooth are broken'."""
+    t = normalize_minor_typos(_norm_text(text))
+    if not t:
+        return False
+
+    tooth_word = r"(?:tooth|teeth|molar|filling)"
+    broken_word = r"(?:broken|broke|cracked|chipped|fractured|fell out|fallen out|falling out)"
+
+    return bool(
+        re.search(rf"\b{tooth_word}\b.*\b{broken_word}\b", t)
+        or re.search(rf"\b{broken_word}\b.*\b{tooth_word}\b", t)
+        or "lost filling" in t
+        or "filling fell out" in t
+    )
+
+
+def looks_like_not_urgent_correction(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    return any(p in t for p in [
+        "not urgent",
+        "not an emergency",
+        "isn t urgent",
+        "isnt urgent",
+        "not asap",
+        "regular appointment",
+        "normal appointment",
+    ])
+
+
 def detect_service_topic(user_text: str) -> Optional[str]:
     t = normalize_minor_typos(_norm_text(user_text))
     if not t:
@@ -488,10 +518,10 @@ def detect_service_topic(user_text: str) -> Optional[str]:
         return "cleaning/checkup"
     if any(k in t for k in ["tooth pain", "tooth hurts", "toothache", "sore tooth", "mouth sore", "sore mouth", "mouth hurts", "gum pain", "gums hurt", "sore gums"]):
         return "tooth pain"
-    if any(k in t for k in [
+    if looks_like_broken_tooth_phrase(t) or any(k in t for k in [
         "filling", "fillings", "cavity", "cavities", "broken tooth", "tooth broken",
-        "tooth is broken", "broke tooth", "broke a tooth", "chipped tooth", "cracked tooth",
-        "filling fell out", "lost filling"
+        "tooth is broken", "tooth are broken", "teeth are broken", "broke tooth",
+        "broke a tooth", "chipped tooth", "cracked tooth", "filling fell out", "lost filling"
     ]):
         return "broken tooth/filling"
     if any(k in t for k in ["crown", "crowns", "cap", "caps"]):
@@ -621,11 +651,16 @@ def looks_like_dental_problem_statement(user_text: str) -> bool:
     t = normalize_minor_typos(_norm_text(user_text))
     if looks_like_price_question(t) or looks_like_service_availability_question(t):
         return False
+
+    if looks_like_broken_tooth_phrase(t):
+        return True
+
     service = detect_service_topic(t)
     if service in {"broken tooth/filling", "tooth pain", "extraction/implant"}:
         return any(p in t for p in [
-            "my", "i have", "i need", "tooth is", "tooth broke", "tooth cracked", "tooth hurts",
-            "filling fell out", "need a tooth", "need tooth"
+            "my", "i have", "i need", "tooth is", "tooth are", "teeth are",
+            "tooth broke", "teeth broke", "tooth cracked", "teeth cracked", "tooth hurts",
+            "filling fell out", "need a tooth", "need tooth", "tooth extracted", "tooth pulled"
         ])
     return False
 
@@ -760,13 +795,9 @@ def looks_like_priority_time_request(text: str) -> bool:
         "soonest",
     ]
 
-    if any(p in t for p in strong_phrases):
-        return True
-
-    if "today" in t and looks_like_scheduling_intent(text):
-        return True
-
-    return False
+    # Same-day requests like "today at 4:45" are normal appointment requests,
+    # not urgent by themselves. Only explicit urgency words trigger priority.
+    return any(p in t for p in strong_phrases)
 
 def _format_time_label(hhmm: Optional[str]) -> str:
     if not hhmm:
@@ -1143,7 +1174,7 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
         return "cleaning/checkup"
     if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling", "sore mouth", "mouth is sore", "mouth sore", "mouth hurts", "gum pain", "gums hurt", "sore gums"]):
         return "tooth pain"
-    if any(k in t for k in [
+    if looks_like_broken_tooth_phrase(t) or any(k in t for k in [
     "broken",
     "broke",
     "broke a tooth",
@@ -1151,6 +1182,8 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
     "broken tooth",
     "tooth broken",
     "tooth is broken",
+    "tooth are broken",
+    "teeth are broken",
     "cracked",
     "cracked tooth",
     "chipped",
@@ -1260,7 +1293,7 @@ def detect_service_selection(user_text: str) -> Optional[str]:
     if "cleaning" in t or "checkup" in t or "check-up" in t or "exam" in t:
         return "cleaning/checkup"
 
-    if "broken tooth" in t or "tooth is broken" in t or "tooth broken" in t or "broke a tooth" in t or "filling" in t or "cavity" in t:
+    if looks_like_broken_tooth_phrase(t) or "broken tooth" in t or "tooth is broken" in t or "tooth are broken" in t or "teeth are broken" in t or "tooth broken" in t or "broke a tooth" in t or "filling" in t or "cavity" in t:
         return "broken tooth/filling"
 
     if "crown" in t or "cap" in t:
@@ -1664,7 +1697,7 @@ def time_window_has_specific_day(tw: Optional[str]) -> bool:
 
 
 def looks_like_urgent_but_not_er(text: str) -> bool:
-    t = _norm_text(text)
+    t = normalize_minor_typos(_norm_text(text))
     urgency_words = [
         "asap",
         "as soon as possible",
@@ -1675,31 +1708,26 @@ def looks_like_urgent_but_not_er(text: str) -> bool:
         "soon as possible",
         "immediately",
     ]
+
+    if not any(u in t for u in urgency_words):
+        return False
+
     symptom_words = [
         "tooth hurts",
         "tooth pain",
         "pain",
         "swelling",
-        "broken tooth",
-        "cracked tooth",
-        "chipped tooth",
-        "lost filling",
-        "extraction",
-        "extract",
-        "extracted",
-        "tooth pulled",
-        "pull tooth",
         "infection",
         "abscess",
-        "extraction",
-        "extract",
-        "extracted",
-        "tooth extracted",
-        "tooth pulled",
-        "pull tooth",
-        "pulled tooth",
+        "lost filling",
+        "filling fell out",
+        "knocked out",
+        "bleeding",
     ]
-    return any(u in t for u in urgency_words) and any(s in t for s in symptom_words)
+
+    # Extraction/implant consultation + ASAP can be priority, but should not
+    # automatically become an emergency. This function is priority-only.
+    return any(s in t for s in symptom_words) or looks_like_broken_tooth_phrase(t)
 
 def last_assistant_asked_asap_today_vs_tomorrow(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
@@ -3410,6 +3438,20 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={"mode": "guard_sensitive", "faq_match": False, "show_start_over": show_start_over,},
         )
 
+    # Allow the patient to correct us if a prior message was incorrectly marked urgent.
+    if looks_like_not_urgent_correction(user_text):
+        changed = False
+        if bool(getattr(conversation, "lead_is_priority", False)):
+            conversation.lead_is_priority = False
+            changed = True
+        if bool(getattr(conversation, "lead_is_emergency", False)):
+            conversation.lead_is_emergency = False
+            changed = True
+        if changed:
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
     # =========================================================
     # Intake mode gate
     # =========================================================
@@ -3701,7 +3743,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Emergency follow-up intake
     # =========================================================
-    emergency_followup = last_assistant_was_emergency_prompt(db, conversation.id)
+    emergency_followup = (
+        bool(getattr(conversation, "lead_is_emergency", False))
+        and last_assistant_was_emergency_prompt(db, conversation.id)
+    )
 
     if emergency_followup:
         if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
@@ -3934,8 +3979,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         conversation.lead_reason = service
         conversation.lead_reason_source_text = user_text[:120]
         conversation.is_lead = True
-        if service in {"broken tooth/filling", "tooth pain"}:
-            conversation.lead_is_priority = True
+        # A broken/sore tooth should start intake, but it should not automatically
+        # become an emergency or urgent handoff unless the user says ASAP, severe
+        # pain, swelling, bleeding, trouble breathing/swallowing, etc.
         db.add(conversation)
         db.commit()
         db.refresh(conversation)
@@ -4749,7 +4795,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         post_text = _norm_text(user_text)
         practice_name = getattr(client, "practice_name", None) or "our office"
 
-        if bool(getattr(conversation, "lead_is_emergency", False)) or bool(getattr(conversation, "lead_is_priority", False)):
+        if bool(getattr(conversation, "lead_is_emergency", False)):
             if any(x in post_text for x in ["office is closed", "closed", "after hours"]):
                 reply_text = (
                     f"We’ve already flagged this as urgent for the team. If symptoms are severe, worsening, or life-threatening, "
