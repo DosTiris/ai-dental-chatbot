@@ -849,6 +849,12 @@ def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
     if m24:
         hh = int(m24.group(1))
         mm = int(m24.group(2))
+
+        # Patient shorthand like "today at 4:30" usually means 4:30 PM
+        # for a dental office, not 4:30 AM. Keep 8:00-11:59 as morning.
+        if 1 <= hh <= 7:
+            hh += 12
+
         return hh * 60 + mm
 
     if "morning" in tl:
@@ -1232,6 +1238,9 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
     if any(k in tl for k in ["white", "whiter", "whitening", "bleaching", "cosmetic"]):
         return "cosmetic/whitening"
 
+    if any(k in tl for k in ["bone graft", "bone", "mandible", "jaw", "oral surgery", "surgeon", "talk to the doctor", "consultation", "consult"]):
+        return "extraction/implant"
+
     if any(k in tl for k in ["pull tooth", "remove tooth", "wisdom tooth", "implant", "extraction", "extract", "extracted", "tooth pulled", "tooth extracted"]):
         return "extraction/implant"
 
@@ -1244,7 +1253,7 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
 # Service selection detector (UI buttons / short replies)
 # =========================================================
 def detect_service_selection(user_text: str) -> Optional[str]:
-    t = normalize_minor_typos((user_text or "").strip().lower())
+    t = normalize_minor_typos(_norm_text(user_text))
     if "tooth pain" in t or "tooth hurts" in t or "toothache" in t or "sore mouth" in t or "mouth is sore" in t:
         return "tooth pain"
 
@@ -1682,6 +1691,13 @@ def looks_like_urgent_but_not_er(text: str) -> bool:
         "pull tooth",
         "infection",
         "abscess",
+        "extraction",
+        "extract",
+        "extracted",
+        "tooth extracted",
+        "tooth pulled",
+        "pull tooth",
+        "pulled tooth",
     ]
     return any(u in t for u in urgency_words) and any(s in t for s in symptom_words)
 
@@ -2176,6 +2192,27 @@ def last_assistant_asked_for_patient_type(db: Session, conversation_id: uuid.UUI
         or "new or returning" in t
     )
 
+def last_assistant_asked_for_reason_detail(db: Session, conversation_id: uuid.UUID) -> bool:
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+
+    return any(p in t for p in [
+        "can you briefly tell me what you need help with",
+        "briefly tell me what you need help with",
+        "please briefly describe the issue",
+    ])
+
+
 def last_assistant_was_emergency_prompt(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
         db.query(Message)
@@ -2192,7 +2229,10 @@ def last_assistant_was_emergency_prompt(db: Session, conversation_id: uuid.UUID)
 
     exact_prompts = [
         "to help quickly what s your first name",
+        "what s your first name",
         "thanks what s the best phone number to reach you right now",
+        "what s the best phone number to reach you right now",
+        "best phone number to reach you right now",
         "briefly what s going on",
     ]
     return any(p in t for p in exact_prompts)
@@ -3427,6 +3467,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply_text = "No problem. Have a great day."
         else:
             reply_text = "No problem. Is there anything else I can help with?"
+        if reply_text == "No problem. Have a great day.":
+            conversation.final_closed = True
+            db.add(conversation)
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -3437,6 +3480,8 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     if looks_like_done_or_negative(user_text) and not in_intake_mode and not has_any_lead_data:
         reply_text = "No problem. Have a great day."
+        conversation.final_closed = True
+        db.add(conversation)
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -3491,6 +3536,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
         conversation.is_lead = True
         conversation.lead_is_priority = True
+        conversation.lead_is_emergency = True
         if not (conversation.lead_reason or "").strip():
             conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
             conversation.lead_reason_source_text = (user_text or "")[:120]
@@ -3836,6 +3882,74 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
             },
+        )
+
+    # =========================================================
+    # Free-text "other" reason detail capture
+    # =========================================================
+    if (
+        last_assistant_asked_for_reason_detail(db, conversation.id)
+        and not looks_like_emergency(user_text)
+        and not looks_like_dangerous_dental_instruction(user_text)
+        and not looks_like_medical_advice(user_text)
+    ):
+        mapped_reason = map_reason_detail_to_enum(user_text)
+
+        if mapped_reason:
+            conversation.lead_reason = mapped_reason
+            if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
+                conversation.lead_reason_source_text = user_text[:120]
+            conversation.is_lead = True
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
+            next_prompt = _next_intake_prompt(client, conversation)
+            reply_text = "Got it — I’ll note that for the team."
+            if next_prompt and not reply_already_requests_user_action(reply_text):
+                reply_text = f"{reply_text} {next_prompt}"
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={"mode": "reason_detail_captured", "faq_match": False, "show_start_over": show_start_over},
+            )
+
+        reply_text = "Got it — I’ll note that for the team. What’s your first name?"
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "reason_detail_generic", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    # =========================================================
+    # Dental problem statements should start intake, not fallback.
+    # =========================================================
+    if looks_like_dental_problem_statement(user_text) and not has_any_lead_data:
+        service = detect_service_topic(user_text) or detect_appointment_reason(user_text) or "appointment request"
+        conversation.lead_reason = service
+        conversation.lead_reason_source_text = user_text[:120]
+        conversation.is_lead = True
+        if service in {"broken tooth/filling", "tooth pain"}:
+            conversation.lead_is_priority = True
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        reply_text = (
+            "I’m sorry to hear that. I can’t provide medical advice in chat, "
+            "but I can help send this to the office. What’s your first name?"
+        )
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "dental_problem_intake", "faq_match": False, "show_start_over": show_start_over},
         )
 
     # =========================================================
