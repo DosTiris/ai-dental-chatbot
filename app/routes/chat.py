@@ -50,6 +50,7 @@ ai = OpenAI(api_key=OPENAI_API_KEY)
 SYSTEM_PROMPT = (
     "You are a professional, friendly dental office receptionist. "
     "Respond in under 40 words. "
+    "Ask at most one user-facing question per response. "
     "Do not give medical advice at all. "
     "Help users schedule an appointment or leave contact details. "
     "Be consistent, avoid creativity; use short, direct answers. "
@@ -249,6 +250,7 @@ def get_client_setting(client, key: str, default=None):
         return settings.get(key, default)
     return default
 
+
 def get_client_timezone_name(client) -> str:
     settings = getattr(client, "settings", None)
     if isinstance(settings, dict):
@@ -261,8 +263,8 @@ def get_client_timezone_name(client) -> str:
         if value:
             return str(value).strip()
 
-    # Demo offices are currently marketed in New York/Long Island.
-    # Falling back to Eastern avoids Render/UTC confusing tomorrow/today.
+    # Demo offices are currently marketed around New York/Long Island.
+    # This prevents Render/UTC from confusing today vs tomorrow.
     return "America/New_York"
 
 
@@ -282,7 +284,7 @@ def get_day_open_hours(client, day_key: str) -> Tuple[bool, Optional[str], Optio
     return bool(row.get("open", False)), row.get("start"), row.get("end")
 
 
-def build_open_time_examples(client, max_examples: int = 3) -> str:
+def build_open_time_examples(client, max_examples: int = 4) -> str:
     examples = []
     for day in DAY_ORDER:
         row = get_office_hours_struct(client).get(day, {}) or {}
@@ -290,7 +292,6 @@ def build_open_time_examples(client, max_examples: int = 3) -> str:
             continue
 
         end_minutes = _parse_hhmm_to_minutes(row.get("end"))
-
         if day == "sat":
             examples.append("Saturday morning")
         else:
@@ -303,10 +304,8 @@ def build_open_time_examples(client, max_examples: int = 3) -> str:
 
     if not examples:
         return "For example: Tuesday morning."
-
     if len(examples) == 1:
         return f"For example: {examples[0]}."
-
     return "For example: " + ", ".join(examples[:-1]) + f", or {examples[-1]}."
 
 def get_booking_url(client) -> str:
@@ -449,22 +448,34 @@ def _tokenize(s: str) -> List[str]:
 
 
 def looks_like_scheduling_intent(user_text: str) -> bool:
-    t = _norm_text(user_text)
+    t = normalize_minor_typos(_norm_text(user_text))
     return any(
         k in t
-        for k in ["appointment", "book", "schedule", "available", "availability", "come in", "see the doctor"]
+        for k in [
+            "appointment", "book", "schedule", "available", "availability",
+            "come in", "see the doctor", "consult", "consultation"
+        ]
     )
 
+
 def normalize_minor_typos(t: str) -> str:
-    # Normalize a few common patient typos without making broad guesses.
+    """Normalize common patient typos without making broad guesses."""
+    t = (t or "").lower()
     replacements = {
         "checkiup": "checkup",
         "chekiup": "checkup",
         "check up": "checkup",
+        "tomorow": "tomorrow",
+        "tommorow": "tomorrow",
+        "tmrw": "tomorrow",
+        "tmr": "tomorrow",
         "ya ll": "yall",
+        "y all": "yall",
+        "pullled": "pulled",
+        "exracted": "extracted",
     }
     for bad, good in replacements.items():
-        t = t.replace(bad, good)
+        t = re.sub(rf"\b{re.escape(bad)}\b", good, t)
     return t
 
 
@@ -475,9 +486,13 @@ def detect_service_topic(user_text: str) -> Optional[str]:
 
     if any(k in t for k in ["cleaning", "checkup", "exam", "xray", "x ray", "prophy"]):
         return "cleaning/checkup"
-    if any(k in t for k in ["tooth pain", "tooth hurts", "toothache", "sore tooth"]):
+    if any(k in t for k in ["tooth pain", "tooth hurts", "toothache", "sore tooth", "mouth sore", "sore mouth", "mouth hurts", "gum pain", "gums hurt", "sore gums"]):
         return "tooth pain"
-    if any(k in t for k in ["filling", "fillings", "cavity", "cavities", "broken tooth", "broke tooth", "chipped tooth", "cracked tooth"]):
+    if any(k in t for k in [
+        "filling", "fillings", "cavity", "cavities", "broken tooth", "tooth broken",
+        "tooth is broken", "broke tooth", "broke a tooth", "chipped tooth", "cracked tooth",
+        "filling fell out", "lost filling"
+    ]):
         return "broken tooth/filling"
     if any(k in t for k in ["crown", "crowns", "cap", "caps"]):
         return "crown"
@@ -485,7 +500,11 @@ def detect_service_topic(user_text: str) -> Optional[str]:
         return "orthodontics"
     if any(k in t for k in ["whiten", "whitening", "teeth whitening", "cosmetic", "veneer", "veneers"]):
         return "cosmetic/whitening"
-    if any(k in t for k in ["implant", "implants", "extraction", "extractions", "wisdom tooth", "wisdom teeth", "root canal"]):
+    if any(k in t for k in [
+        "implant", "implants", "extraction", "extractions", "extract", "extracted",
+        "tooth extracted", "tooth pulled", "pull tooth", "pulled tooth", "tooth removed",
+        "wisdom tooth", "wisdom teeth", "root canal"
+    ]):
         return "extraction/implant"
     return None
 
@@ -502,8 +521,9 @@ def looks_like_price_question(user_text: str) -> bool:
 def build_price_reply(user_text: str) -> str:
     service = detect_service_topic(user_text)
     service_name = pretty_service_label(service) if service else "treatment"
+    t = _norm_text(user_text)
 
-    if service == "extraction/implant" and any(k in _norm_text(user_text) for k in ["implant", "implants"]):
+    if service == "extraction/implant" and any(k in t for k in ["implant", "implants"]):
         return (
             "Implant costs can vary depending on the treatment plan, insurance coverage, and whether any additional procedures are needed. "
             "The office can give you a more accurate estimate after a consultation. Would you like help requesting one?"
@@ -544,14 +564,16 @@ def looks_like_service_availability_question(user_text: str) -> bool:
     if not detect_service_topic(t):
         return False
     return any(p in t for p in [
-        "do you", "do u", "can you", "can u", "are you able", "do yall", "do y all", "offer", "provide", "have"
+        "do you", "do u", "can you", "can u", "can i", "can i get", "are you able",
+        "do yall", "do y all", "offer", "provide", "have", "available"
     ])
 
 
 def build_service_availability_reply(user_text: str) -> str:
     service = detect_service_topic(user_text)
+    t = _norm_text(user_text)
     if service == "cosmetic/whitening":
-        if "veneer" in _norm_text(user_text):
+        if "veneer" in t:
             return "Veneers may be available as part of cosmetic treatment. The office can confirm options during a consultation. Would you like help requesting one?"
         return "Yes, we can help with teeth whitening or cosmetic treatment. Would you like help requesting an appointment?"
     if service == "crown":
@@ -559,7 +581,7 @@ def build_service_availability_reply(user_text: str) -> str:
     if service == "orthodontics":
         return "Yes, we can help with braces or Invisalign. Would you like to request an appointment?"
     if service == "extraction/implant":
-        if "root canal" in _norm_text(user_text):
+        if "root canal" in t:
             return "The office can confirm whether root canal treatment is available and what the next step should be. Would you like help requesting an appointment?"
         return "Yes, we can help with implants, extractions, or related consultations. Would you like to request an appointment?"
     if service == "broken tooth/filling":
@@ -567,7 +589,7 @@ def build_service_availability_reply(user_text: str) -> str:
     if service == "cleaning/checkup":
         return "Yes, we offer cleanings, exams, and checkups. Would you like help requesting an appointment?"
     if service == "tooth pain":
-        return "We can help with tooth pain. If symptoms are severe or worsening, please call the office directly. Would you like help requesting an appointment?"
+        return "We can help with tooth pain or soreness. If symptoms are severe or worsening, please call the office directly. Would you like help requesting an appointment?"
     return "The office can help confirm that service for you. Would you like help requesting an appointment?"
 
 
@@ -576,7 +598,8 @@ def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     dangerous_action = any(p in t for p in [
         "pull out", "pull his tooth", "pull her tooth", "pull my tooth", "pull a tooth",
         "take out his tooth", "take out her tooth", "take out my tooth", "extract his tooth",
-        "extract her tooth", "extract my tooth", "walk me through", "pliers", "yank", "rip out"
+        "extract her tooth", "extract my tooth", "walk me through", "pliers", "yank", "rip out",
+        "use glue", "super glue", "glue it", "glue my tooth", "glue his tooth", "glue her tooth"
     ])
     dental_context = any(p in t for p in ["tooth", "teeth", "bleeding", "gum", "mouth"])
     return dangerous_action and dental_context
@@ -584,7 +607,7 @@ def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
 
 def build_no_medical_instructions_reply(conversation: Conversation, include_next_prompt: bool = True) -> str:
     reply = (
-        "I can’t provide instructions for pulling, extracting, or treating a tooth in chat. "
+        "I can’t provide medical advice or instructions for treating, pulling, extracting, or gluing a tooth in chat. "
         "If there is bleeding, severe pain, swelling, or risk of injury, please call the office right away or seek urgent care."
     )
     if include_next_prompt:
@@ -592,6 +615,42 @@ def build_no_medical_instructions_reply(conversation: Conversation, include_next
         if next_prompt:
             reply += f"\n\n{next_prompt}"
     return reply
+
+
+def looks_like_dental_problem_statement(user_text: str) -> bool:
+    t = normalize_minor_typos(_norm_text(user_text))
+    if looks_like_price_question(t) or looks_like_service_availability_question(t):
+        return False
+    service = detect_service_topic(t)
+    if service in {"broken tooth/filling", "tooth pain", "extraction/implant"}:
+        return any(p in t for p in [
+            "my", "i have", "i need", "tooth is", "tooth broke", "tooth cracked", "tooth hurts",
+            "filling fell out", "need a tooth", "need tooth"
+        ])
+    return False
+
+
+def extract_name_from_affirmative_reply(user_text: str) -> Optional[str]:
+    """Capture short mixed replies like 'yes and Kevin' or 'sure, Kevin'."""
+    raw = (user_text or "").strip()
+    if not raw:
+        return None
+    t = _norm_text(raw)
+    if not (t.startswith("yes") or t.startswith("yeah") or t.startswith("yep") or t.startswith("sure") or t.startswith("ok") or t.startswith("okay")):
+        return None
+
+    # Remove leading yes/sure/ok words and small connectors.
+    candidate = re.sub(r"^(yes|yeah|yep|sure|ok|okay)\b", "", raw, flags=re.IGNORECASE).strip()
+    candidate = re.sub(r"^(and|,|\-|—|my name is|i am|i'm)\s+", "", candidate, flags=re.IGNORECASE).strip()
+    if not candidate:
+        return None
+    return safe_name_normalize(candidate)
+
+
+def looks_like_done_or_negative(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    return t in {"no", "nope", "nah", "nothing", "nothing else", "that s all", "thats all", "all set", "all good"}
+
 
 def looks_like_info_intent(user_text: str) -> bool:
     t = _norm_text(user_text)
@@ -1073,10 +1132,10 @@ def extract_name(text_in: str) -> Optional[str]:
 
 
 def detect_appointment_reason(text_in: str) -> Optional[str]:
-    t = (text_in or "").lower()
+    t = normalize_minor_typos((text_in or "").lower())
     if any(k in t for k in ["cleaning", "checkup", "check-up", "routine", "exam"]):
         return "cleaning/checkup"
-    if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling"]):
+    if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling", "sore mouth", "mouth is sore", "mouth sore", "mouth hurts", "gum pain", "gums hurt", "sore gums"]):
         return "tooth pain"
     if any(k in t for k in [
     "broken",
@@ -1084,6 +1143,8 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
     "broke a tooth",
     "broke tooth",
     "broken tooth",
+    "tooth broken",
+    "tooth is broken",
     "cracked",
     "cracked tooth",
     "chipped",
@@ -1101,7 +1162,7 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
         return "orthodontics"
     if any(k in t for k in ["whiten", "whitening", "cosmetic", "veneers"]):
         return "cosmetic/whitening"
-    if any(k in t for k in ["implant", "extraction", "wisdom tooth", "wisdom teeth"]):
+    if any(k in t for k in ["implant", "extraction", "extract", "extracted", "tooth extracted", "tooth pulled", "pull tooth", "pulled tooth", "wisdom tooth", "wisdom teeth"]):
         return "extraction/implant"
     if any(k in t for k in ["appointment", "schedule", "book", "availability", "available"]):
         return "appointment request"
@@ -1162,7 +1223,7 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
     if any(k in tl for k in ["chip", "chipped", "crack", "cracked", "broken tooth", "lost filling", "filling fell out"]):
         return "broken tooth/filling"
 
-    if any(k in tl for k in ["hurt", "hurts", "ache", "toothache", "pain", "sore tooth", "sore gum"]):
+    if any(k in tl for k in ["hurt", "hurts", "ache", "toothache", "pain", "sore tooth", "sore gum", "mouth is sore", "sore mouth", "mouth sore", "mouth hurts", "gum pain", "gums hurt", "sore gums"]):
         return "tooth pain"
 
     if any(k in tl for k in ["retainer", "aligner", "straighten", "crooked", "spacing"]):
@@ -1171,7 +1232,7 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
     if any(k in tl for k in ["white", "whiter", "whitening", "bleaching", "cosmetic"]):
         return "cosmetic/whitening"
 
-    if any(k in tl for k in ["pull tooth", "remove tooth", "wisdom tooth", "implant", "extraction"]):
+    if any(k in tl for k in ["pull tooth", "remove tooth", "wisdom tooth", "implant", "extraction", "extract", "extracted", "tooth pulled", "tooth extracted"]):
         return "extraction/implant"
 
     if any(k in tl for k in ["cap", "crown"]):
@@ -1184,25 +1245,25 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
 # =========================================================
 def detect_service_selection(user_text: str) -> Optional[str]:
     t = normalize_minor_typos((user_text or "").strip().lower())
-    if "tooth pain" in t or "tooth hurts" in t or "toothache" in t:
+    if "tooth pain" in t or "tooth hurts" in t or "toothache" in t or "sore mouth" in t or "mouth is sore" in t:
         return "tooth pain"
 
     if "cleaning" in t or "checkup" in t or "check-up" in t or "exam" in t:
         return "cleaning/checkup"
 
-    if "broken tooth" in t or "broke a tooth" in t or "filling" in t or "cavity" in t:
+    if "broken tooth" in t or "tooth is broken" in t or "tooth broken" in t or "broke a tooth" in t or "filling" in t or "cavity" in t:
         return "broken tooth/filling"
 
     if "crown" in t or "cap" in t:
         return "crown"
 
-    if "implant" in t or "extraction" in t or "wisdom tooth" in t or "wisdom teeth" in t:
+    if "implant" in t or "extraction" in t or "extract" in t or "extracted" in t or "tooth pulled" in t or "pull tooth" in t:
         return "extraction/implant"
 
     if "whitening" in t or "whiten" in t or "cosmetic" in t or "veneer" in t:
         return "cosmetic/whitening"
 
-    if "braces" in t or "invisalign" in t or "orthodont" in t:
+    if "braces" in t or "invisalign" in t:
         return "orthodontics"
     service_map = {
         "cleaning": "cleaning/checkup",
@@ -1213,6 +1274,8 @@ def detect_service_selection(user_text: str) -> Optional[str]:
         "cavity": "broken tooth/filling",
         "cavities": "broken tooth/filling",
         "broken tooth": "broken tooth/filling",
+        "tooth broken": "broken tooth/filling",
+        "tooth is broken": "broken tooth/filling",
         "broke tooth": "broken tooth/filling",
         "broke a tooth": "broken tooth/filling",
         "broken filling": "broken tooth/filling",
@@ -1229,6 +1292,11 @@ def detect_service_selection(user_text: str) -> Optional[str]:
         "implant": "extraction/implant",
         "implants": "extraction/implant",
         "extraction": "extraction/implant",
+        "extract": "extraction/implant",
+        "extracted": "extraction/implant",
+        "tooth extracted": "extraction/implant",
+        "tooth pulled": "extraction/implant",
+        "pull tooth": "extraction/implant",
         "extractions": "extraction/implant",
         "wisdom tooth": "extraction/implant",
         "wisdom teeth": "extraction/implant",
@@ -1236,6 +1304,8 @@ def detect_service_selection(user_text: str) -> Optional[str]:
         "invisalign": "orthodontics",
         "whitening": "cosmetic/whitening",
         "teeth whitening": "cosmetic/whitening",
+        "veneer": "cosmetic/whitening",
+        "veneers": "cosmetic/whitening",
         "appointment request": "appointment request",
         "other": "other",
     }
@@ -1463,7 +1533,7 @@ def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optio
     t = (user_text or "").strip()
     if not t:
         return None
-    tl = t.lower()
+    tl = normalize_minor_typos(t.lower())
 
     # reusable time regex
     time_pattern = r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b"
@@ -1605,6 +1675,11 @@ def looks_like_urgent_but_not_er(text: str) -> bool:
         "cracked tooth",
         "chipped tooth",
         "lost filling",
+        "extraction",
+        "extract",
+        "extracted",
+        "tooth pulled",
+        "pull tooth",
         "infection",
         "abscess",
     ]
@@ -1780,18 +1855,17 @@ def handle_time_window_capture(
         else:
             saved = False
 
-        # If the office is already closed or near closing, do not offer today.
-        is_open_today, today_start, today_end = get_day_open_hours(client, today_tok.lower())
+        # If the office is closed today, do not offer a same-day slot.
+        is_open_today, _today_start, today_end = get_day_open_hours(client, today_tok.lower())
         today_end_minutes = _parse_hhmm_to_minutes(today_end)
         now_minutes = now_local.hour * 60 + now_local.minute
-
         if (not is_open_today) or (today_end_minutes is not None and now_minutes >= today_end_minutes):
             return (
                 f"The office may be closed for today. What open day/time works better? {anyday_example}",
                 saved,
             )
 
-        # If it's already afternoon, don't offer morning.
+        # If it's already afternoon, don't offer morning
         if is_after_noon:
             return (
                 "Got it — what time later today works best? If today is too tight, we can also look at the next open day.",
@@ -1800,7 +1874,7 @@ def handle_time_window_capture(
 
         return ("Got it — do you prefer today morning or afternoon?", saved)
 
-    # If we just nudged for an alternate open day/time, interpret answer here.
+    # If we just nudged for weekday morning/afternoon, interpret answer here
     if "weekday morning or afternoon" in last_t or "what open day" in last_t:
         tl = _norm_text(user_text)
 
@@ -1812,7 +1886,7 @@ def handle_time_window_capture(
 
         if tl in {"no", "nope", "nah", "not really", "not weekday", "not weekdays"}:
             return (
-                f"No problem — what open day/time works better for you? {anyday_example}",
+                f"No problem — what day/time works better for you? {anyday_example}",
                 False,
             )
 
@@ -1831,9 +1905,16 @@ def handle_time_window_capture(
             return ("Thanks — which weekday works best (Mon–Fri)?", False)
 
         if not detected_tw:
-            return (f"Got it — what open day/time works better? {anyday_example}", False)
+            return ("Got it — do you prefer weekday morning or afternoon?", False)
 
         dt = (detected_tw or "").strip()
+
+        if dt == "Weekday evening":
+            return (
+                "We’re usually open until 5 PM on weekdays, so evening appointments may not be available. Would a weekday morning, weekday afternoon, or Saturday morning work?",
+                False,
+            )
+
 
         if dt in {"morning", "afternoon"}:
             weekday_tw = f"Weekday {dt}"
@@ -1847,12 +1928,6 @@ def handle_time_window_capture(
                 conversation.lead_time_window = dt
                 return ("Thanks — which weekday works best (Mon–Fri)?", True)
             return ("Thanks — which weekday works best (Mon–Fri)?", False)
-
-        if dt == "Weekday evening":
-            return (
-                "We’re usually open until 5 PM on weekdays, so evening appointments may not be available. Would a weekday morning, weekday afternoon, or Saturday morning work?",
-                False,
-            )
 
         if time_window_has_specific_day(dt):
             day_tok = _extract_day_token(dt)
@@ -1869,15 +1944,14 @@ def handle_time_window_capture(
                 return ("Got it — Saturday is usually a shorter day. What time Saturday morning works best?", True)
             return ("Got it — do you prefer morning or afternoon?", True)
 
-        return (f"What open day/time works better? {anyday_example}", False)
+        return ("Do you prefer weekday morning or afternoon?", False)
 
-    # If we already have Weekday morning/afternoon and user gives a day, combine.
+    # If we already have Weekday morning/afternoon and user gives a day, combine
     if current_tw in {"Weekday morning", "Weekday afternoon"} and detected_tw:
         if detected_tw in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
             part = "morning" if current_tw == "Weekday morning" else "afternoon"
             conversation.lead_time_window = f"{detected_tw} {part}"
             return (None, True)
-
         if detected_tw == "Sat":
             if not is_saturday_open(client):
                 return (f"Saturday may not be available. What open day/time works better? {anyday_example}", False)
@@ -1885,7 +1959,6 @@ def handle_time_window_capture(
                 return ("Saturday is usually a shorter day. Would Saturday morning work?", False)
             conversation.lead_time_window = "Sat morning"
             return (None, True)
-
         if detected_tw == "Sun":
             return (f"We’re typically closed on Sundays. What open day/time works better? {anyday_example}", False)
 
@@ -2151,9 +2224,9 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
         return None
 
     # Keep these aligned with your 3.6 service confirmation text
-    if "offer dental implants" in t or ("implants" in t and any(x in t for x in ["schedule", "appointment", "request"])):
+    if "offer dental implants" in t or ("implants" in t and any(x in t for x in ["schedule", "appointment", "request"])) or ("implant costs" in t and "would you like" in t):
         return "extraction/implant"
-    if "offer braces" in t or "invisalign" in t or "orthodont" in t:
+    if "offer braces" in t or "invisalign" in t or "orthodont" in t or "braces and invisalign pricing" in t:
         return "orthodontics"
     if "do crowns" in t or "crown" in t:
         return "crown"
@@ -2163,6 +2236,9 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
         return "broken tooth/filling"
     if "do extractions" in t or "wisdom" in t or "extractions" in t:
         return "extraction/implant"
+
+    if "would you like help requesting" in t or "would you like to request" in t:
+        return "appointment request"
 
     return None
 
@@ -2181,7 +2257,9 @@ def last_assistant_was_emergency(db: Session, conversation_id: uuid.UUID) -> boo
 
 def user_accepted_scheduling(user_text: str) -> bool:
     t = _norm_text(user_text)
-    return t in {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "please", "lets do it", "let s do it"}
+    if t in {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "please", "lets do it", "let s do it"}:
+        return True
+    return bool(re.match(r"^(yes|yeah|yep|yup|sure|ok|okay)\b", t))
 
 def build_lead_context(conversation: Conversation) -> Optional[Dict[str, str]]:
     parts: List[str] = []
@@ -2617,7 +2695,7 @@ def _next_emergency_prompt(conversation) -> str:
     if not (conversation.lead_name or "").strip():
         return "To help quickly, what’s your first name?"
     if not (conversation.lead_phone or "").strip():
-        return "Thanks — what’s the best phone number to reach you right now?"
+        return "What’s the best phone number to reach you right now?"
     if not (conversation.lead_reason or "").strip():
         return "Briefly, what’s going on? (e.g., severe pain, swelling, broken tooth)"
     return "Thanks — please call the office now so we can advise you and fit you in."
@@ -2719,6 +2797,15 @@ def looks_like_medical_advice(user_text: str) -> bool:
         "what to do about",
         "should i pull",
         "pull it out",
+        "can i use glue",
+        "use glue",
+        "super glue",
+        "how do i get it to stay",
+        "how do i keep it in",
+        "teeth are falling out",
+        "tooth is falling out",
+        "tooth fell out",
+        "teeth falling out",
     ]
     if any(p in t for p in strong_phrases):
         return True
@@ -2740,6 +2827,9 @@ def looks_like_medical_advice(user_text: str) -> bool:
         "jaw pain",
         "gum pain",
         "sensitive",
+        "teeth falling out",
+        "tooth falling out",
+        "tooth fell out",
     ]
     if any(s in t for s in symptoms) and ("?" in t or "what" in t or "how" in t or "should" in t):
         return True
@@ -3039,6 +3129,48 @@ def _emergency_meta(label="Call the office now") -> dict:
         "booking_cta_label": label,
         
     }
+def reply_already_requests_user_action(reply: Optional[str]) -> bool:
+    """Return True when Mia's current reply already asks the user to do/answer something.
+
+    This is the global one-question-at-a-time guard. It prevents us from
+    appending a second intake prompt like "What’s your first name?" after a
+    reply that already asks "Would you like help requesting one?"
+    """
+    raw = (reply or "").strip()
+    if not raw:
+        return False
+
+    # A literal question mark is the clearest signal. In chat, one question is enough.
+    if "?" in raw:
+        return True
+
+    norm = _norm_text(raw)
+    if not norm:
+        return False
+
+    # Some prompts may be written as instructions without a question mark.
+    action_phrases = [
+        "what s your",
+        "whats your",
+        "what is your",
+        "what brings you in",
+        "what day time",
+        "what day or time",
+        "what open day",
+        "what time",
+        "which day",
+        "which weekday",
+        "do you prefer",
+        "would you like",
+        "are you a new",
+        "new or returning",
+        "please enter",
+        "please choose",
+        "please rephrase",
+        "type skip",
+        "call the office",
+    ]
+    return any(p in norm for p in action_phrases)
 
 
 def should_append_next_intake_prompt(current_reply: Optional[str], next_prompt: Optional[str]) -> bool:
@@ -3050,11 +3182,14 @@ def should_append_next_intake_prompt(current_reply: Optional[str], next_prompt: 
 
     if not next_norm:
         return False
-
     if current_norm == next_norm or next_norm in current_norm:
         return False
 
-    # Prevent double asking new/returning patient wording.
+    # Global rule: one message should never ask the patient for two separate actions.
+    # We may answer/inform + ask ONE question, but we should not ask a second one.
+    if reply_already_requests_user_action(current_reply):
+        return False
+
     current_asks_patient_type = (
         "new or returning patient" in current_norm
         or "are you a new patient" in current_norm
@@ -3066,8 +3201,6 @@ def should_append_next_intake_prompt(current_reply: Optional[str], next_prompt: 
     if current_asks_patient_type and next_asks_patient_type:
         return False
 
-    # If the current reply is already asking for a day/time choice, do not append another
-    # intake question. One question at a time feels more like a real receptionist.
     current_asks_time = any(p in current_norm for p in [
         "what day time", "what day or time", "what open day", "which day works",
         "do you prefer", "what time later today", "what time works"
@@ -3078,7 +3211,18 @@ def should_append_next_intake_prompt(current_reply: Optional[str], next_prompt: 
     if current_asks_time and (next_asks_time or next_asks_patient_type):
         return False
 
+    # Do not stack an intake question after Mia already asked the patient to confirm scheduling.
+    current_offers_help = (
+        "would you like help requesting" in current_norm
+        or "would you like to request" in current_norm
+        or "would you like help" in current_norm
+    )
+    if current_offers_help:
+        return False
+
     return True
+
+
 # =========================================================
 # The /chat endpoint
 # =========================================================
@@ -3275,6 +3419,33 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     )
 
     # =========================================================
+    # Respect simple declines / done replies after Mia offers scheduling.
+    # =========================================================
+    if looks_like_done_or_negative(user_text) and offered_service_reason and not has_any_lead_data:
+        post_text = _norm_text(user_text)
+        if post_text in {"nothing", "nothing else", "that s all", "thats all", "all set", "all good"}:
+            reply_text = "No problem. Have a great day."
+        else:
+            reply_text = "No problem. Is there anything else I can help with?"
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "declined_offer", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    if looks_like_done_or_negative(user_text) and not in_intake_mode and not has_any_lead_data:
+        reply_text = "No problem. Have a great day."
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "done", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    # =========================================================
     # Pricing questions should be answered directly, not mistaken for intake.
     # =========================================================
     if looks_like_price_question(user_text):
@@ -3315,27 +3486,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     # =========================================================
-    # Early question guard
+    # Dangerous self-treatment / medical advice guard early.
     # =========================================================
-    if looks_like_question_request(user_text) and not in_intake_mode:
-        reply_text = "Sure — what’s your question?"
-        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
-        db.commit()
-        return ChatResponse(
-            reply=reply_text,
-            conversation_id=str(conversation.id),
-            meta={"mode": "question_guard", "faq_match": False, "show_start_over": show_start_over,},
-        )
-
-    # =========================================================
-    # Dangerous dental self-treatment requests
-    # =========================================================
-    if looks_like_dangerous_dental_instruction(user_text):
+    if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
         conversation.is_lead = True
         conversation.lead_is_priority = True
-        conversation.lead_is_emergency = True
         if not (conversation.lead_reason or "").strip():
-            conversation.lead_reason = "tooth pain"
+            conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
             conversation.lead_reason_source_text = (user_text or "")[:120]
         db.add(conversation)
         db.commit()
@@ -3348,7 +3505,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={
-                "mode": "dangerous_medical_instruction_guard",
+                "mode": "medical_advice_guard",
                 "faq_match": False,
                 "emergency_mode": True,
                 "hide_booking_button": True,
@@ -3357,6 +3514,19 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
             },
+        )
+
+    # =========================================================
+    # Early question guard
+    # =========================================================
+    if looks_like_question_request(user_text) and not in_intake_mode:
+        reply_text = "Sure — what’s your question?"
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "question_guard", "faq_match": False, "show_start_over": show_start_over,},
         )
 
     # =========================================================
@@ -3452,7 +3622,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation.lead_is_priority = True
 
             if not (conversation.lead_reason or "").strip():
-                conversation.lead_reason = "tooth pain"
+                conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
 
             if not (getattr(conversation, "lead_time_window", None) or "").strip():
                 conversation.lead_time_window = "ASAP"
@@ -3942,6 +4112,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     phone = extract_phone(user_text)
     name = extract_name(user_text)
 
+    if not name and accepted_schedule:
+        name = extract_name_from_affirmative_reply(user_text)
+
     # If user replied with compact "name + phone" format, capture the leftover text as name
     if not name and phone:
         if last_assistant_asked_for_name(db, conversation.id):
@@ -4181,7 +4354,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             else:
                 combined_reply = outside_hours_reply
 
-        # Only append the next intake prompt when it will not create a double-question.
+        # Only append the next intake prompt if it is not doubling up.
         next_prompt = _next_intake_prompt(client, conversation)
 
         if should_append_next_intake_prompt(combined_reply, next_prompt):
@@ -4462,26 +4635,19 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         post_text = _norm_text(user_text)
         practice_name = getattr(client, "practice_name", None) or "our office"
 
-        if bool(getattr(conversation, "lead_is_emergency", False)):
-            if any(x in post_text for x in ["die", "dying", "worse", "wait", "wait time", "how long", "before you call", "911", "er", "emergency"]):
+        if bool(getattr(conversation, "lead_is_emergency", False)) or bool(getattr(conversation, "lead_is_priority", False)):
+            if any(x in post_text for x in ["office is closed", "closed", "after hours"]):
                 reply_text = (
-                    "If you feel your condition is life-threatening or getting worse, please call 911 or go to the ER now. "
-                    f"For urgent dental guidance, please call the office directly at {office_phone}."
+                    f"We’ve already flagged this as urgent for the team. If symptoms are severe, worsening, or life-threatening, "
+                    f"please call 911 or go to the ER now. You can also call the office directly at {office_phone}."
                 )
-                should_close = False
-            elif any(x in post_text for x in ["thanks", "thank you", "thx", "ty", "ok", "okay", "got it", "sounds good"]):
-                reply_text = (
-                    "You’re welcome. We’ve flagged this as urgent for the team. "
-                    "If anything gets worse, please call the office directly or seek urgent care."
-                )
-                should_close = False
             else:
                 reply_text = (
-                    "We’ve already flagged this as urgent for the team. "
-                    "If symptoms are severe, worsening, or life-threatening, please call 911 or go to the ER now. "
-                    f"You can also call the office directly at {office_phone}."
+                    "Understood. We’ve flagged this as urgent for the team. If anything gets worse, "
+                    "please call the office directly or seek urgent care."
                 )
-                should_close = False
+            should_close = False
+
         elif any(x in post_text for x in ["thanks", "thank you", "thx", "ty"]):
             reply_text = f"Thank you for choosing {practice_name}. Have a great day!"
             should_close = True
@@ -4512,7 +4678,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "faq_match": False,
-                "mode": "post_completion_emergency" if bool(getattr(conversation, "lead_is_emergency", False)) else "post_completion_polite",
+                "mode": "post_completion_polite",
                 "show_start_over": show_start_over,
             },
         )
@@ -4593,7 +4759,29 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         and not question_mode
         and not bool(getattr(conversation, "lead_is_emergency", False))
     ):
-        if service_reason_now == "other" and not (conversation.lead_reason or "").strip():
+        last_assistant_norm = _norm_text(last_assistant_text)
+        waiting_for_reason_detail = (
+            not (conversation.lead_reason or "").strip()
+            and "can you briefly tell me what you need help with" in last_assistant_norm
+        )
+
+        if waiting_for_reason_detail:
+            mapped_reason = map_reason_detail_to_enum(user_text)
+            if mapped_reason:
+                conversation.lead_reason = mapped_reason
+                if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
+                    conversation.lead_reason_source_text = user_text[:120]
+                db.add(conversation)
+                db.commit()
+                db.refresh(conversation)
+                bypass_text, bypass_stage = receptionist_bypass_reply(conversation)
+            else:
+                bypass_text = (
+                    "Please briefly describe the issue using plain words only, like "
+                    "'chipped tooth', 'tooth pain', or 'consultation'."
+                )
+                bypass_stage = "reason_detail"
+        elif service_reason_now == "other" and not (conversation.lead_reason or "").strip():
             bypass_text = "Got it — can you briefly tell me what you need help with?"
             bypass_stage = "reason_detail"
         else:
