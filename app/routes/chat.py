@@ -538,20 +538,17 @@ def looks_like_office_phone_request(user_text: str) -> bool:
 
 
 def build_office_phone_reply(client: Client, conversation: Conversation, office_phone: str) -> str:
-    """Return the correct office-phone answer without accidentally ending intake."""
+    """Answer office-phone questions only. Do not start intake from a pure info request."""
     phone = (office_phone or "").strip() or "(555) 123-4567"
     base = f"Our office number is {phone}."
 
+    # Mode 1: normal phone-number question. Give the number and stop.
+    # If the conversation is already a true emergency, add a short safety note,
+    # but still do not ask for the user's name from a phone-number question.
     if bool(getattr(conversation, "lead_is_emergency", False)):
         return (
             f"{base}\n\n"
             "If this is urgent and you’re unable to reach the office, please seek urgent care."
-        )
-
-    if is_currently_after_hours_for_client(client):
-        return (
-            f"{base}\n\n"
-            "The office is currently closed, but I can collect your information and have the team follow up when they reopen."
         )
 
     return base
@@ -727,13 +724,24 @@ def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     return dangerous_action and dental_context
 
 
-def build_no_medical_instructions_reply(conversation: Conversation, include_next_prompt: bool = True) -> str:
-    reply = (
-        "I can’t provide medical advice or instructions for treating, pulling, extracting, or gluing a tooth in chat. "
-        "If there is bleeding, severe pain, swelling, or risk of injury, please call the office right away or seek urgent care."
-    )
+def build_no_medical_instructions_reply(
+    conversation: Conversation,
+    include_next_prompt: bool = True,
+    emergency_context: bool = False,
+) -> str:
+    if emergency_context:
+        reply = (
+            "I can’t provide medical advice or instructions for treating, pulling, extracting, or gluing a tooth in chat. "
+            "If symptoms are severe, worsening, or involve uncontrolled bleeding, swelling, trouble breathing, or trouble swallowing, "
+            "please call the office right away or seek urgent care."
+        )
+    else:
+        reply = (
+            "I can’t provide medical advice or instructions in chat, but I can help send your concern to the office."
+        )
+
     if include_next_prompt:
-        next_prompt = _next_emergency_prompt(conversation)
+        next_prompt = _next_emergency_prompt(conversation) if emergency_context else None
         if next_prompt:
             reply += f"\n\n{next_prompt}"
     return reply
@@ -1098,7 +1106,7 @@ def is_saturday_open(client) -> bool:
     return bool(row.get("open", False))
 
 
-def pretty_time_window(tw: Optional[str]) -> str:
+def pretty_time_window(tw: Optional[str], client: Optional[Client] = None) -> str:
     if not tw:
         return ""
 
@@ -1111,7 +1119,7 @@ def pretty_time_window(tw: Optional[str]) -> str:
     day_token = parts[0]  # e.g. "thu"
     rest = " ".join(parts[1:])  # e.g. "morning"
 
-    today_dt = datetime.now()
+    today_dt = get_client_now(client) if client is not None else datetime.now()
     today_str = today_dt.strftime("%a").lower()
     tomorrow_dt = today_dt + timedelta(days=1)
     tomorrow_str = tomorrow_dt.strftime("%a").lower()
@@ -1491,8 +1499,12 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     if (conversation.lead_reason or "").strip():
         lines.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
+    reason_detail = (getattr(conversation, "lead_reason_source_text", None) or "").strip()
+    if reason_detail and reason_detail not in {"emergency_followup"}:
+        lines.append(f"Details: {reason_detail[:200]}")
+
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        lines.append(f"Preferred time: {pretty_time_window(conversation.lead_time_window)}")
+        lines.append(f"Preferred time: {pretty_time_window(conversation.lead_time_window, client)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         lines.append("Outside hours: Yes")
@@ -3662,13 +3674,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         conversation.is_lead = True
         conversation.lead_reason = detect_appointment_reason(user_text) or "appointment request"
         conversation.lead_reason_source_text = (user_text or "")[:120]
+
+        requested_tw = detect_time_window(user_text, client)
+        time_note = ""
+        if requested_tw:
+            conversation.lead_time_window = requested_tw
+            time_note = f"\n\nI noted your request for {pretty_time_window(requested_tw, client)}."
+
         db.add(conversation)
         db.commit()
         db.refresh(conversation)
 
         reply_text = (
             f"Our office number is {office_phone}.\n\n"
-            "The office is currently closed, but I can collect your information and have the team follow up when they reopen.\n\n"
+            "The office is currently closed, but I can collect your information and have the team follow up when they reopen."
+            f"{time_note}\n\n"
             "What’s your first name?"
         )
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
@@ -3780,7 +3800,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(conversation)
 
-        base_reply = build_no_medical_instructions_reply(conversation, include_next_prompt=False)
+        base_reply = build_no_medical_instructions_reply(conversation, include_next_prompt=False, emergency_context=bool(is_true_emergency))
         next_prompt = _next_emergency_prompt(conversation) if is_true_emergency else _next_intake_prompt(client, conversation)
         reply_text = f"{base_reply}\n\n{next_prompt}" if next_prompt else base_reply
 
@@ -3879,6 +3899,20 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if accepts_walkins:
                     reply_text += "\n\nWalk-ins may be available, but please call first so we can direct you."
 
+            # Store emergency state BEFORE asking for the user's name.
+            # Without this, the next user reply (e.g., "John") can fall back to the generic menu.
+            conversation.is_lead = True
+            conversation.lead_is_priority = True
+            conversation.lead_is_emergency = True
+            if not (conversation.lead_reason or "").strip():
+                conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
+            if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
+                conversation.lead_reason_source_text = (user_text or "")[:120]
+
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
             reply_text += f"\n\nOur office number is {office_phone}."
             reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
@@ -3948,7 +3982,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     if emergency_followup:
         if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
-            reply_text = build_no_medical_instructions_reply(conversation, include_next_prompt=True)
+            reply_text = build_no_medical_instructions_reply(conversation, include_next_prompt=True, emergency_context=True)
             db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
             db.commit()
             return ChatResponse(
@@ -4291,12 +4325,8 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             op_reply = "Please call the office and our team can share those details."
             meta = {"faq_match": False, "mode": "faq_operational_no_match"}
 
-        lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if (in_intake_mode or resume_intake_after_answer) and not lead_completed:
-            next_prompt = _next_intake_prompt(client, conversation)
-            if should_append_next_intake_prompt(op_reply, next_prompt):
-                op_reply = f"{op_reply}\n\n{next_prompt}"
-
+        # Pure FAQ / operational questions should answer and stop.
+        # Do not start or resume intake from hours, address, phone, or insurance questions.
         db.add(Message(conversation_id=conversation.id, role="assistant", content=op_reply))
         db.commit()
         meta["show_start_over"] = show_start_over
@@ -5092,7 +5122,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
 
-        reply_text = f"Thanks{name_part}! We’ve got your request—our team will contact you shortly to confirm the appointment time."
+        reply_text = f"Thanks{name_part}! We’ve received your appointment request. A team member will contact you shortly to confirm availability."
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
 
