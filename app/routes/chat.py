@@ -75,14 +75,15 @@ MAX_CONTEXT_MESSAGES = 12
 # }
 # ---------------------------------------------------------
 DEFAULT_MIA_OPENING_MESSAGE = (
-    "Hi, I’m Mia — the AI dental receptionist for this office. I can help request "
-    "an appointment, answer common questions, or check services, insurance, hours, "
-    "and location. How can I help today?"
+    "Hi, I’m Mia, the office’s AI dental receptionist. I can help with appointment "
+    "requests, services, insurance questions, office hours, and location information. "
+    "How can I help today?"
 )
 
 DEFAULT_MIA_MOBILE_OPENING_MESSAGE = (
-    "Hi, I’m Mia — the office’s AI dental receptionist. I can help with "
-    "appointments, services, insurance, hours, or location. How can I help today?"
+    "Hi, I’m Mia, the office’s AI dental receptionist. I can help with appointment "
+    "requests, services, insurance questions, office hours, and location information. "
+    "How can I help today?"
 )
 
 DEFAULT_MIA_THEME = {
@@ -509,6 +510,97 @@ def looks_like_not_urgent_correction(user_text: str) -> bool:
     ])
 
 
+
+def looks_like_office_phone_request(user_text: str) -> bool:
+    """Detect when the patient is asking for the office's phone number."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    phone_phrases = [
+        "what s your number",
+        "whats your number",
+        "what is your number",
+        "phone number",
+        "office number",
+        "contact number",
+        "number to call",
+        "what number do i call",
+        "what number should i call",
+        "can i call",
+        "how do i call",
+        "how can i call",
+        "give me the number",
+        "call you",
+        "call the office",
+    ]
+    return any(p in t for p in phone_phrases)
+
+
+def build_office_phone_reply(client: Client, conversation: Conversation, office_phone: str) -> str:
+    """Return the correct office-phone answer without accidentally ending intake."""
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    base = f"Our office number is {phone}."
+
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return (
+            f"{base}\n\n"
+            "If this is urgent and you’re unable to reach the office, please seek urgent care."
+        )
+
+    if is_currently_after_hours_for_client(client):
+        return (
+            f"{base}\n\n"
+            "The office is currently closed, but I can collect your information and have the team follow up when they reopen."
+        )
+
+    return base
+
+
+def looks_like_url_or_browser_request(user_text: str) -> bool:
+    t_raw = (user_text or "").strip()
+    t = _norm_text(t_raw)
+    if not t:
+        return False
+
+    has_url = bool(re.search(r"\b(?:https?://|www\.|[a-z0-9-]+\.(?:com|net|org|io|ai|co))", t_raw, flags=re.IGNORECASE))
+    browse_words = any(p in t for p in ["go to", "open", "visit", "browse", "website"])
+    return has_url or (browse_words and any(x in t for x in ["com", "www", "website"]))
+
+
+def looks_like_conversation_ending(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    endings = {
+        "thanks",
+        "thank you",
+        "thank you so much",
+        "thx",
+        "ty",
+        "no thanks",
+        "no thank you",
+        "nope thank you",
+        "nothing",
+        "nothing else",
+        "that s all",
+        "thats all",
+        "that s it",
+        "thats it",
+        "all set",
+        "all good",
+        "i m good",
+        "im good",
+        "i am good",
+        "goodbye",
+        "bye",
+    }
+    if t in endings:
+        return True
+
+    return bool(re.match(r"^(thanks|thank you|no thanks|no thank you)\b", t))
+
 def detect_service_topic(user_text: str) -> Optional[str]:
     t = normalize_minor_typos(_norm_text(user_text))
     if not t:
@@ -684,7 +776,15 @@ def extract_name_from_affirmative_reply(user_text: str) -> Optional[str]:
 
 def looks_like_done_or_negative(user_text: str) -> bool:
     t = _norm_text(user_text)
-    return t in {"no", "nope", "nah", "nothing", "nothing else", "that s all", "thats all", "all set", "all good"}
+    return t in {
+        "no", "nope", "nah",
+        "no thanks", "no thank you",
+        "nothing", "nothing else",
+        "that s all", "thats all",
+        "that s it", "thats it",
+        "all set", "all good",
+        "i m good", "im good", "i am good",
+    }
 
 
 def looks_like_info_intent(user_text: str) -> bool:
@@ -2392,18 +2492,19 @@ def _validate_lead_reason(reason: Optional[str]) -> Optional[str]:
 
 EMERGENCY_TRIGGERS = [
     "emergency",
-    "severe pain", "extreme pain", "unbearable",
-    "swelling", "face swelling", "jaw swelling",
-    "bleeding", "won't stop bleeding",
-    "knocked out", "knocked-out", "tooth fell out",
-    "broken tooth", "cracked tooth",
+    "severe pain", "extreme pain", "unbearable pain", "unbearable",
+    "rapidly worsening swelling", "face swelling", "facial swelling", "jaw swelling",
+    "uncontrolled bleeding", "won t stop bleeding", "wont stop bleeding",
+    "bleeding won t stop", "bleeding wont stop", "heavy bleeding",
+    "knocked out", "knocked-out", "tooth knocked out", "tooth fell out",
+    "hit in the mouth", "mouth injury", "dental trauma", "trauma",
     "abscess", "infection", "pus",
-    "can't swallow", "cant swallow",
-    "can't breathe", "cant breathe",
+    "can t swallow", "cant swallow", "trouble swallowing",
+    "can t breathe", "cant breathe", "trouble breathing",
 ]
 
 def looks_like_emergency(text: str) -> bool:
-    t = _norm_text(text)
+    t = normalize_minor_typos(_norm_text(text))
     return any(k in t for k in EMERGENCY_TRIGGERS)
 
 def is_after_hours(now: datetime, office_hours_obj) -> bool:
@@ -3501,11 +3602,100 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     )
 
     # =========================================================
+    # Office phone / after-hours / clean closing guards
+    # =========================================================
+    if looks_like_office_phone_request(user_text):
+        reply_text = build_office_phone_reply(client, conversation, office_phone)
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "office_phone",
+                "faq_match": False,
+                "show_call_button": True,
+                "call_phone": office_phone,
+                "call_cta_label": "Call Office",
+                "show_start_over": show_start_over,
+            },
+        )
+
+    if (
+        looks_like_conversation_ending(user_text)
+        and not in_intake_mode
+        and not has_any_lead_data
+    ):
+        reply_text = "You’re welcome! Have a great day."
+        conversation.final_closed = True
+        db.add(conversation)
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "conversation_closed", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    if looks_like_url_or_browser_request(user_text) and not in_intake_mode:
+        reply_text = (
+            "I’m unable to open websites or browse the internet. If you need help with an appointment, "
+            "insurance, hours, services, or location, I’d be happy to help."
+        )
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={"mode": "browser_request", "faq_match": False, "show_start_over": show_start_over},
+        )
+
+    # Mode 2: after-hours lead. Normal appointment requests after hours should not pretend
+    # someone is answering live; Mia gives the office number and offers callback intake.
+    if (
+        is_scheduling_now
+        and not has_any_lead_data
+        and is_currently_after_hours_for_client(client)
+        and not looks_like_emergency(user_text)
+        and not looks_like_urgent_but_not_er(user_text)
+    ):
+        conversation.is_lead = True
+        conversation.lead_reason = detect_appointment_reason(user_text) or "appointment request"
+        conversation.lead_reason_source_text = (user_text or "")[:120]
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        reply_text = (
+            f"Our office number is {office_phone}.\n\n"
+            "The office is currently closed, but I can collect your information and have the team follow up when they reopen.\n\n"
+            "What’s your first name?"
+        )
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "after_hours_lead",
+                "faq_match": False,
+                "show_call_button": True,
+                "call_phone": office_phone,
+                "call_cta_label": "Call Office",
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
     # Respect simple declines / done replies after Mia offers scheduling.
     # =========================================================
     if looks_like_done_or_negative(user_text) and offered_service_reason and not has_any_lead_data:
         post_text = _norm_text(user_text)
-        if post_text in {"nothing", "nothing else", "that s all", "thats all", "all set", "all good"}:
+        if post_text in {
+            "nothing", "nothing else", "that s all", "thats all", "that s it", "thats it",
+            "all set", "all good", "i m good", "im good", "i am good",
+            "no thanks", "no thank you"
+        }:
             reply_text = "No problem. Have a great day."
         else:
             reply_text = "No problem. Is there anything else I can help with?"
@@ -3576,17 +3766,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # Dangerous self-treatment / medical advice guard early.
     # =========================================================
     if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
+        is_true_emergency = looks_like_emergency(user_text)
+
         conversation.is_lead = True
         conversation.lead_is_priority = True
-        conversation.lead_is_emergency = True
+        conversation.lead_is_emergency = bool(is_true_emergency)
+
         if not (conversation.lead_reason or "").strip():
             conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
             conversation.lead_reason_source_text = (user_text or "")[:120]
+
         db.add(conversation)
         db.commit()
         db.refresh(conversation)
 
-        reply_text = build_no_medical_instructions_reply(conversation, include_next_prompt=True)
+        base_reply = build_no_medical_instructions_reply(conversation, include_next_prompt=False)
+        next_prompt = _next_emergency_prompt(conversation) if is_true_emergency else _next_intake_prompt(client, conversation)
+        reply_text = f"{base_reply}\n\n{next_prompt}" if next_prompt else base_reply
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -3595,7 +3792,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={
                 "mode": "medical_advice_guard",
                 "faq_match": False,
-                "emergency_mode": True,
+                "emergency_mode": bool(is_true_emergency),
                 "hide_booking_button": True,
                 "show_call_button": True,
                 "call_phone": office_phone,
@@ -3678,10 +3875,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
                 reply_text = f"{base_msg}\n\n{after_msg}"
             else:
-                reply_text = base_msg
+                reply_text = "This may require prompt attention.\n\n" + base_msg
                 if accepts_walkins:
                     reply_text += "\n\nWalk-ins may be available, but please call first so we can direct you."
 
+            reply_text += f"\n\nOur office number is {office_phone}."
             reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
@@ -4798,15 +4996,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         if bool(getattr(conversation, "lead_is_emergency", False)):
             if any(x in post_text for x in ["office is closed", "closed", "after hours"]):
                 reply_text = (
-                    f"We’ve already flagged this as urgent for the team. If symptoms are severe, worsening, or life-threatening, "
+                    f"The office has your urgent request. If symptoms are severe, worsening, or life-threatening, "
                     f"please call 911 or go to the ER now. You can also call the office directly at {office_phone}."
                 )
+                should_close = False
+            elif looks_like_conversation_ending(user_text) or any(x in post_text for x in ["ok", "okay", "got it", "perfect", "no problem"]):
+                reply_text = "You’re welcome. The office will follow up as soon as possible."
+                should_close = True
             else:
-                reply_text = (
-                    "Understood. We’ve flagged this as urgent for the team. If anything gets worse, "
-                    "please call the office directly or seek urgent care."
-                )
-            should_close = False
+                reply_text = "The office has your urgent request. They’ll follow up as soon as possible."
+                should_close = False
 
         elif any(x in post_text for x in ["thanks", "thank you", "thx", "ty"]):
             reply_text = f"Thank you for choosing {practice_name}. Have a great day!"
@@ -5041,7 +5240,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
         reply_text = (response.output_text or "").strip()
         if not reply_text:
-            reply_text = "I can help with appointments, services, insurance, hours, location, or pricing questions. What would you like help with?"
+            reply_text = (
+                "I can help with appointment requests, services, insurance questions, office hours, "
+                "location information, or pricing questions. What would you like help with?"
+            )
 
     except Exception as e:
         print("OPENAI ERROR:", repr(e))  # log the real OpenAI error in Render/local console
