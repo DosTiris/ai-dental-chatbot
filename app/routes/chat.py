@@ -347,16 +347,16 @@ def next_booking_capture_prompt(conversation: Conversation, service_reason: Opti
     # 🔥 ROUTINE SERVICES → PHONE ONLY
     if is_routine_service(service_reason):
         if not has_phone:
-            return "Before I send you to online booking, what’s the best phone number to reach you? SMS updates are optional."
+            return "Before I send you to online booking, what’s the best phone number for the office to call you back?"
         return None
 
     # 🔥 HIGH VALUE → NAME + PHONE
     if not has_name and not has_phone:
-        return "Before I send you to online booking, what’s your name and phone number? SMS updates are optional."
+        return "Before I send you to online booking, what’s your name and the best phone number for the office to call you back?"
     if not has_name:
         return "Before I send you to online booking, what’s your first name?"
     if not has_phone:
-        return "Before I send you to online booking, what’s your phone number? SMS updates are optional."
+        return "Before I send you to online booking, what’s the best phone number for the office to call you back?"
 
     return None
 
@@ -1207,11 +1207,11 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
     practice_name = getattr(client, "practice_name", None) or "Dental Office"
 
     if bool(getattr(conversation, "lead_is_emergency", False)):
-        parts = [f"🚨 EMERGENCY lead for {practice_name}"]
+        parts = [f"Dos Tiris Alert: 🚨 EMERGENCY lead for {practice_name}"]
     elif bool(getattr(conversation, "lead_is_priority", False)):
-        parts = [f"🔥 PRIORITY lead for {practice_name}"]
+        parts = [f"Dos Tiris Alert: 🔥 PRIORITY lead for {practice_name}"]
     else:
-        parts = [f"✅ New lead for {practice_name}"]
+        parts = [f"Dos Tiris Alert: New patient inquiry for {practice_name}"]
 
     if (conversation.lead_name or "").strip():
         parts.append(f"Name: {conversation.lead_name}")
@@ -1624,7 +1624,7 @@ def handle_time_window_capture(
             return ("What’s your first name?", True)
 
         if not (conversation.lead_phone or "").strip():
-            return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you? SMS updates are optional.", True)
+            return (f"Thanks {conversation.lead_name}! What’s the best phone number for the office to call you back?", True)
 
         if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
             return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", True)
@@ -2472,7 +2472,7 @@ def _next_emergency_prompt(conversation) -> str:
     if not (conversation.lead_name or "").strip():
         return "To help quickly, what’s your first name?"
     if not (conversation.lead_phone or "").strip():
-        return "Thanks — what’s the best phone number to reach you right now? SMS updates are optional."
+        return "Thanks — what’s the best phone number for the office to call you right now?"
     if not (conversation.lead_reason or "").strip():
         return "Briefly, what’s going on? (e.g., severe pain, swelling, broken tooth)"
     return "Thanks — please call the office now so we can advise you and fit you in."
@@ -2861,7 +2861,7 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
     if not has_name:
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
     if not has_phone:
-        return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you? SMS updates are optional.", "phone")
+        return (f"Thanks {conversation.lead_name}! What’s the best phone number for the office to call you back?", "phone")
     if not has_email and not email_opt_out:
         return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", "email")
 
@@ -2879,7 +2879,7 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
 
         return (f"One quick question — {prefix}are you a new or returning patient?", "new_patient")
 
-    return (f"Thanks! We’ve got your request—our team will contact you shortly to confirm the appointment time.")
+    return (f"Thanks! We’ve got your request — the office team will call you back to follow up.")
 
 def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
@@ -2888,14 +2888,14 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     if not (conversation.lead_name or "").strip():
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
-        return "Thanks — what’s the best phone number to reach you? SMS updates are optional."
+        return "Thanks — what’s the best phone number for the office to call you back?"
     if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
         return "What’s your email? (You can also type 'skip'.)"
     if not (getattr(conversation, "lead_time_window", None) or "").strip():
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
     if getattr(conversation, "lead_is_new_patient", None) is None:
         return "Are you a new patient?"
-    return "Thanks — our team will reach out to confirm your appointment."
+    return "Thanks — the office team will call you back to follow up."
 
 def _emergency_meta(label="Call the office now") -> dict:
     return {
@@ -3166,7 +3166,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         reply_text = (
             f"Our office number is {office_phone}.\n\n"
-            "The office is currently closed, but I can collect your information and have the team follow up when they reopen."
+            "The office is currently closed, but I can collect your information and have the team call you back when they reopen."
             f"{time_note}\n\n"
             "What’s your first name?"
         )
@@ -3555,7 +3555,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
             reply_text = (
                 f"Thanks{name_part} — I’ve flagged this as urgent for the team.\n\n"
-                "They’ll reach out shortly. If anything gets worse, please call us right away."
+                "The office team will call you back shortly. If anything gets worse, please call us right away."
             )
 
             db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
@@ -4472,7 +4472,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
 
-        reply_text = f"Thanks{name_part}! We’ve got your request—our team will contact you shortly to confirm the appointment time."
+        reply_text = f"Thanks{name_part}! We’ve got your request — the office team will call you back to follow up."
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
 
@@ -4546,7 +4546,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             "mode": "bypass",
             "show_start_over": show_start_over,
             "show_service_menu": bypass_stage == "reason",
-            "show_sms_phone_consent": bypass_stage == "phone",
+            "show_sms_phone_consent": False,
         }
 
         if bypass_stage == "time_window":
@@ -4607,7 +4607,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = (  # friendly message shown to the user instead of ugly JSON
             "I’m sorry, I had trouble processing that. "
             "I can still help you schedule an appointment. "
-            "What phone number should the office use to follow up?"
+            "What phone number should the office use to call you back?"
         )  # safe fallback reply
 
     db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))

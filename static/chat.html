@@ -624,9 +624,9 @@
     <div id="consentModal" class="consent-modal">
       <div class="consent-box">
         <h2>Before We Begin</h2>
-        <p>You can use Mia and browse this website without agreeing to receive SMS messages.</p>
-        <p>SMS consent is optional and is only requested if you choose to provide your phone number for appointment requests, confirmations, reminders, follow-ups, or customer support communications.</p>
-        <p class="small">Message frequency may vary.<br>Message &amp; data rates may apply.<br>Reply STOP to opt out and HELP for assistance.<br>Consent is not a condition of purchase or service.</p>
+        <p>You can use Mia to ask questions or request an appointment.</p>
+        <p>If you choose to provide your phone number, Mia will share it with the dental office so the office can call you back about your request.</p>
+        <p class="small">Mia and Dos Tiris do not send SMS messages to patients. Any SMS notification from Dos Tiris is sent only to the dental office staff. For emergencies, please call the office directly or seek urgent care.</p>
 
         <button id="agreeBtn" type="button" class="enabled">Continue to Mia</button>
       </div>
@@ -920,20 +920,13 @@
       card.id = "smsPhoneConsentCard";
       card.className = "sms-consent-card";
       card.innerHTML = `
-        <h3>Optional SMS Updates</h3>
+        <h3>Phone Follow-Up Notice</h3>
         <div>
-          If you would like text message updates from Dos Tiris LLC about your appointment request, confirmations, reminders, follow-ups, or customer support, you may check the box below. You can continue without checking this box.
-          <br><br>
-          Message frequency may vary. Message &amp; data rates may apply. Reply STOP to opt out and HELP for assistance. Consent is not a condition of purchase or service.
+          If you provide your phone number, Mia will send your request to the dental office so the office can call you back. Mia and Dos Tiris do not send SMS messages to patients.
         </div>
 
-        <label class="sms-consent-check">
-          <input id="smsPhoneConsentCheckbox" type="checkbox" onchange="toggleSmsPhoneConsent()" />
-          <span>I agree to receive SMS messages from Dos Tiris LLC.</span>
-        </label>
-
         <button id="smsPhoneConsentContinue" type="button" onclick="dismissSmsPhoneConsent()" class="enabled">
-          Continue without SMS
+          Got it
         </button>
       `;
 
@@ -949,7 +942,7 @@
       if (!checkbox || !btn) return;
 
       smsPhoneConsentAccepted = checkbox.checked;
-      btn.textContent = checkbox.checked ? "Continue with SMS updates" : "Continue without SMS";
+      btn.textContent = "Got it";
     }
 
     function dismissSmsPhoneConsent() {
@@ -1024,13 +1017,10 @@
         hideTyping();
         addMessage("bot", reply);
 
+        // Mia does not send SMS messages to patients.
+        // Phone numbers are collected only so the dental office can call the patient back.
+        // Do not show an SMS consent card in the patient chat.
         const replyText = String(reply || "").toLowerCase();
-        if (
-          (data.meta && data.meta.show_sms_phone_consent && !smsPhoneConsentChoiceMade) ||
-          (!smsPhoneConsentChoiceMade && replyText.includes("best phone number"))
-        ) {
-          renderSmsPhoneConsent();
-        }
 
         if (data.meta && data.meta.show_service_menu) {
           renderQuickReplies([
