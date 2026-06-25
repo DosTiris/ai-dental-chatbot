@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional, Any, Tuple
 from difflib import get_close_matches
 import time
@@ -261,6 +262,23 @@ def get_booking_button_label(client) -> str:
     return (get_client_setting(client, "booking_button_label", "") or "").strip() or "Book Online"
 
 
+def get_client_timezone_name(client) -> str:
+    """Return the practice timezone, defaulting to New York for current demos."""
+    tz = (getattr(client, "timezone", None) or "").strip()
+    if not tz:
+        tz = str(get_client_setting(client, "timezone", "") or "").strip()
+    return tz or "America/New_York"
+
+
+def get_client_now(client) -> datetime:
+    """Get current time in the practice's timezone, not the server timezone."""
+    tz_name = get_client_timezone_name(client)
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now(ZoneInfo("America/New_York"))
+
+
 def has_external_booking(client) -> bool:
     return bool(get_booking_url(client))
 
@@ -285,7 +303,10 @@ def is_currently_after_hours_for_client(client: Client) -> bool:
     if not hours:
         return False
 
-    now_local = datetime.now()
+    # IMPORTANT:
+    # Render/server time may be UTC, but office hours are stored as local practice hours.
+    # Use the client's timezone so Mia does not say the office is closed during local business hours.
+    now_local = get_client_now(client)
     day_key = now_local.strftime("%a").lower()[:3]
 
     row = hours.get(day_key, {}) or {}
@@ -1366,7 +1387,7 @@ def detect_new_patient_flag(user_text: str) -> Optional[bool]:
     return None
 
 
-def detect_time_window(user_text: str) -> Optional[str]:
+def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optional[str]:
     t = (user_text or "").strip()
     if not t:
         return None
@@ -1377,7 +1398,7 @@ def detect_time_window(user_text: str) -> Optional[str]:
 
     # relative day handling
     if re.search(r"\btoday\b", tl) or re.search(r"\btomorrow\b", tl):
-        base = datetime.now()
+        base = get_client_now(client) if client is not None else datetime.now()
         if re.search(r"\btomorrow\b", tl):
             base = base + timedelta(days=1)
 
@@ -1591,11 +1612,11 @@ def handle_time_window_capture(
     last_assistant_text: str
 ) -> Tuple[Optional[str], bool]:
     current_tw = (getattr(conversation, "lead_time_window", None) or "").strip()
-    detected_tw = detect_time_window(user_text)
+    detected_tw = detect_time_window(user_text, client)
     norm_user_text = _norm_text(user_text).strip()
     is_priority_time = looks_like_priority_time_request(user_text)
 
-    now_local = datetime.now()
+    now_local = get_client_now(client)
     is_after_noon = now_local.hour >= 12
     today_tok = now_local.strftime("%a")
 
@@ -3154,7 +3175,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         conversation.lead_reason = detect_appointment_reason(user_text) or "appointment request"
         conversation.lead_reason_source_text = (user_text or "")[:120]
 
-        requested_tw = detect_time_window(user_text)
+        requested_tw = detect_time_window(user_text, client)
         time_note = ""
         if requested_tw:
             conversation.lead_time_window = requested_tw
@@ -3633,7 +3654,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if ("open" in tokens or "close" in tokens) and (tokens & time_words):
         is_hours_intent = True
 
-    if in_intake_mode and detect_time_window(user_text):
+    if in_intake_mode and detect_time_window(user_text, client):
         is_hours_intent = False
 
     insurance_words = {"insurance", "ppo", "hmo", "medicaid", "medicare"}
