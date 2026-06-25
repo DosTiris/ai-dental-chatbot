@@ -347,16 +347,16 @@ def next_booking_capture_prompt(conversation: Conversation, service_reason: Opti
     # 🔥 ROUTINE SERVICES → PHONE ONLY
     if is_routine_service(service_reason):
         if not has_phone:
-            return "Before I send you to online booking, what’s the best phone number to reach you?"
+            return "Before I send you to online booking, what’s the best phone number to reach you? SMS updates are optional."
         return None
 
     # 🔥 HIGH VALUE → NAME + PHONE
     if not has_name and not has_phone:
-        return "Before I send you to online booking, what’s your name and phone number?"
+        return "Before I send you to online booking, what’s your name and phone number? SMS updates are optional."
     if not has_name:
         return "Before I send you to online booking, what’s your first name?"
     if not has_phone:
-        return "Before I send you to online booking, what’s your phone number?"
+        return "Before I send you to online booking, what’s your phone number? SMS updates are optional."
 
     return None
 
@@ -1624,7 +1624,7 @@ def handle_time_window_capture(
             return ("What’s your first name?", True)
 
         if not (conversation.lead_phone or "").strip():
-            return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", True)
+            return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you? SMS updates are optional.", True)
 
         if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
             return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", True)
@@ -2472,7 +2472,7 @@ def _next_emergency_prompt(conversation) -> str:
     if not (conversation.lead_name or "").strip():
         return "To help quickly, what’s your first name?"
     if not (conversation.lead_phone or "").strip():
-        return "Thanks — what’s the best phone number to reach you right now?"
+        return "Thanks — what’s the best phone number to reach you right now? SMS updates are optional."
     if not (conversation.lead_reason or "").strip():
         return "Briefly, what’s going on? (e.g., severe pain, swelling, broken tooth)"
     return "Thanks — please call the office now so we can advise you and fit you in."
@@ -2861,7 +2861,7 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
     if not has_name:
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
     if not has_phone:
-        return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", "phone")
+        return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you? SMS updates are optional.", "phone")
     if not has_email and not email_opt_out:
         return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", "email")
 
@@ -2888,7 +2888,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     if not (conversation.lead_name or "").strip():
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
-        return "Thanks — what’s the best phone number to reach you?"
+        return "Thanks — what’s the best phone number to reach you? SMS updates are optional."
     if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
         return "What’s your email? (You can also type 'skip'.)"
     if not (getattr(conversation, "lead_time_window", None) or "").strip():

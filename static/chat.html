@@ -478,7 +478,7 @@
       font-size: 16px;
       color: white;
       background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
-      opacity: 0.55;
+      opacity: 1;
     }
 
     #agreeBtn.enabled { opacity: 1; }
@@ -624,15 +624,11 @@
     <div id="consentModal" class="consent-modal">
       <div class="consent-box">
         <h2>Before We Begin</h2>
-        <p>By clicking “I Agree” and submitting your phone number, you consent to receive SMS messages from Dos Tiris LLC regarding appointment requests, confirmations, reminders, follow-ups, and customer support communications.</p>
-        <p class="small">Message frequency may vary.<br>Message &amp; data rates may apply.<br>Reply STOP to opt out.</p>
+        <p>You can use Mia and browse this website without agreeing to receive SMS messages.</p>
+        <p>SMS consent is optional and is only requested if you choose to provide your phone number for appointment requests, confirmations, reminders, follow-ups, or customer support communications.</p>
+        <p class="small">Message frequency may vary.<br>Message &amp; data rates may apply.<br>Reply STOP to opt out and HELP for assistance.<br>Consent is not a condition of purchase or service.</p>
 
-        <label class="consent-modal-check">
-          <input id="modalConsentCheckbox" type="checkbox" />
-          <span>I agree to receive SMS messages if I submit my phone number.</span>
-        </label>
-
-        <button id="agreeBtn" disabled>I Agree</button>
+        <button id="agreeBtn" type="button" class="enabled">Continue to Mia</button>
       </div>
     </div>
 
@@ -710,8 +706,8 @@
     let conversationId = localStorage.getItem(`chat_conversation_id_${clientKey}`) || null;
     let miaOpeningMessage = DEFAULT_OPENING_MESSAGE;
     let miaMobileOpeningMessage = DEFAULT_MOBILE_OPENING_MESSAGE;
-    let smsPhoneConsentRequired = false;
     let smsPhoneConsentAccepted = false;
+    let smsPhoneConsentChoiceMade = false;
     let modalConsentAccepted = false;
     let configLoaded = false;
     let openingStarted = false;
@@ -908,10 +904,8 @@
       sendMessage();
     }
 
-    function setPhoneInputBlocked(blocked) {
-      inputEl.disabled = blocked;
-      sendBtn.disabled = blocked;
-      inputEl.placeholder = blocked ? "Please accept SMS consent first..." : (mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...");
+    function resetInputPlaceholder() {
+      inputEl.placeholder = mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...";
     }
 
     function removeSmsPhoneConsent() {
@@ -922,65 +916,56 @@
     function renderSmsPhoneConsent() {
       removeSmsPhoneConsent();
 
-      smsPhoneConsentRequired = true;
-      smsPhoneConsentAccepted = false;
-      setPhoneInputBlocked(true);
-
       const card = document.createElement("div");
       card.id = "smsPhoneConsentCard";
       card.className = "sms-consent-card";
       card.innerHTML = `
-        <h3>SMS Consent</h3>
+        <h3>Optional SMS Updates</h3>
         <div>
-          By providing your phone number, you agree to receive SMS messages from Dos Tiris LLC regarding appointment requests, appointment confirmations, reminders, follow-ups, and customer support communications. Message frequency may vary. Message &amp; data rates may apply. Reply STOP to opt out and HELP for assistance. Consent is not a condition of purchase.
+          If you would like text message updates from Dos Tiris LLC about your appointment request, confirmations, reminders, follow-ups, or customer support, you may check the box below. You can continue without checking this box.
+          <br><br>
+          Message frequency may vary. Message &amp; data rates may apply. Reply STOP to opt out and HELP for assistance. Consent is not a condition of purchase or service.
         </div>
 
         <label class="sms-consent-check">
-          <input id="smsPhoneConsentCheckbox" type="checkbox" onchange="toggleSmsConsentContinue()" />
-          <span>I agree to receive SMS messages.</span>
+          <input id="smsPhoneConsentCheckbox" type="checkbox" onchange="toggleSmsPhoneConsent()" />
+          <span>I agree to receive SMS messages from Dos Tiris LLC.</span>
         </label>
 
-        <button id="smsPhoneConsentContinue" type="button" onclick="acceptSmsPhoneConsent()" disabled>
-          Continue
+        <button id="smsPhoneConsentContinue" type="button" onclick="dismissSmsPhoneConsent()" class="enabled">
+          Continue without SMS
         </button>
       `;
 
       messagesEl.appendChild(card);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      resetInputPlaceholder();
+      inputEl.focus();
     }
 
-    function toggleSmsConsentContinue() {
+    function toggleSmsPhoneConsent() {
       const checkbox = document.getElementById("smsPhoneConsentCheckbox");
       const btn = document.getElementById("smsPhoneConsentContinue");
       if (!checkbox || !btn) return;
 
-      btn.disabled = !checkbox.checked;
-      btn.classList.toggle("enabled", checkbox.checked);
+      smsPhoneConsentAccepted = checkbox.checked;
+      btn.textContent = checkbox.checked ? "Continue with SMS updates" : "Continue without SMS";
     }
 
-    function acceptSmsPhoneConsent() {
+    function dismissSmsPhoneConsent() {
       const checkbox = document.getElementById("smsPhoneConsentCheckbox");
-      if (!checkbox || !checkbox.checked) return;
-
-      smsPhoneConsentAccepted = true;
-      smsPhoneConsentRequired = false;
+      smsPhoneConsentAccepted = !!(checkbox && checkbox.checked);
+      smsPhoneConsentChoiceMade = true;
       removeSmsPhoneConsent();
-      setPhoneInputBlocked(false);
+      resetInputPlaceholder();
       inputEl.focus();
     }
 
     function setupModalConsent() {
       const consentModal = document.getElementById("consentModal");
       const agreeBtn = document.getElementById("agreeBtn");
-      const checkbox = document.getElementById("modalConsentCheckbox");
-
-      checkbox.addEventListener("change", () => {
-        agreeBtn.disabled = !checkbox.checked;
-        agreeBtn.classList.toggle("enabled", checkbox.checked);
-      });
 
       agreeBtn.addEventListener("click", () => {
-        if (!checkbox.checked) return;
         consentModal.style.display = "none";
         modalConsentAccepted = true;
         maybeStartOpeningSequence();
@@ -1007,10 +992,6 @@
     async function sendMessage() {
       const message = inputEl.value.trim();
       if (!message) return;
-
-      if (smsPhoneConsentRequired && !smsPhoneConsentAccepted) {
-        return;
-      }
 
       clearActionRows();
       addMessage("user", message);
@@ -1045,8 +1026,8 @@
 
         const replyText = String(reply || "").toLowerCase();
         if (
-          (data.meta && data.meta.show_sms_phone_consent) ||
-          (!smsPhoneConsentAccepted && replyText.includes("best phone number"))
+          (data.meta && data.meta.show_sms_phone_consent && !smsPhoneConsentChoiceMade) ||
+          (!smsPhoneConsentChoiceMade && replyText.includes("best phone number"))
         ) {
           renderSmsPhoneConsent();
         }
@@ -1082,11 +1063,13 @@
       conversationId = null;
       localStorage.removeItem(`chat_conversation_id_${clientKey}`);
 
-      smsPhoneConsentRequired = false;
       smsPhoneConsentAccepted = false;
+      smsPhoneConsentChoiceMade = false;
       removeSmsPhoneConsent();
       clearActionRows();
-      setPhoneInputBlocked(false);
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      resetInputPlaceholder();
 
       inputEl.value = "";
       openingStarted = false;
