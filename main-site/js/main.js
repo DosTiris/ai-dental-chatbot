@@ -5,6 +5,11 @@ const chatClose = document.getElementById("dostiris-chat-close");
 const chatWidget = document.getElementById("dostiris-chat-widget");
 
 if (chatButton && chatClose && chatWidget) {
+    chatButton.style.visibility = "hidden";
+    chatButton.style.opacity = "0";
+    chatButton.style.transform = "translateY(8px) scale(0.96)";
+
+
     const launcherSvg = `
         <svg class="dt-mia-launcher-svg" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false">
             <path
@@ -60,13 +65,37 @@ if (chatButton && chatClose && chatWidget) {
         }
     }
 
+    function revealLauncher() {
+        window.requestAnimationFrame(() => {
+            chatButton.style.transition = [
+                "opacity 0.18s ease",
+                "transform 0.2s ease",
+                "box-shadow 0.2s ease",
+                "filter 0.2s ease",
+                "border-color 0.2s ease"
+            ].join(", ");
+
+            chatButton.style.visibility = "visible";
+            chatButton.style.opacity = "1";
+            chatButton.style.transform = "";
+        });
+    }
+
     async function applyLauncherTheme() {
         const configUrl = getWidgetConfigUrl();
-        if (!configUrl || !window.fetch) return;
+
+        if (!configUrl || !window.fetch) {
+            revealLauncher();
+            return;
+        }
 
         try {
             const response = await fetch(configUrl, { mode: "cors", credentials: "omit" });
-            if (!response.ok) return;
+
+            if (!response.ok) {
+                revealLauncher();
+                return;
+            }
 
             const config = await response.json();
             const theme = config.launcher_theme || config.mia_launcher_theme || config.theme || {};
@@ -79,6 +108,8 @@ if (chatButton && chatClose && chatWidget) {
             setCssVar("--dt-widget-sparkle", theme.sparkle);
         } catch (error) {
             // Keep the default launcher colors if the public config request is unavailable.
+        } finally {
+            revealLauncher();
         }
     }
 
