@@ -135,8 +135,13 @@ if (chatButton && chatClose && chatWidget) {
         chatButton.style.opacity = "0";
         chatButton.style.transform = "translateY(8px) scale(0.9)";
 
+        chatWidget.classList.remove("dt-widget-open");
+        chatWidget.classList.remove("dt-widget-closing");
+
+        // Force the browser to register the hidden starting state before animating open.
+        void chatWidget.offsetHeight;
+
         window.requestAnimationFrame(() => {
-            chatWidget.classList.remove("dt-widget-closing");
             chatWidget.classList.add("dt-widget-open");
             chatClose.classList.add("dt-close-open");
         });
