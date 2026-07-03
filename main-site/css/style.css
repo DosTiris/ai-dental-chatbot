@@ -50,8 +50,8 @@ html {
     position: fixed;
     right: 34px;
     bottom: 34px;
-    width: 78px;
-    height: 78px;
+    width: 68px;
+    height: 68px;
     border: 1px solid rgba(255, 255, 255, 0.82);
     border-radius: 999px;
     background:
@@ -64,9 +64,9 @@ html {
     display: grid;
     place-items: center;
     box-shadow:
-        0 18px 42px rgba(15, 23, 42, 0.22),
-        0 0 0 8px rgba(255, 255, 255, 0.35),
-        0 0 28px color-mix(in srgb, var(--dt-widget-secondary) 22%, transparent);
+        0 14px 32px rgba(15, 23, 42, 0.20),
+        0 0 0 5px rgba(255, 255, 255, 0.30),
+        0 0 20px color-mix(in srgb, var(--dt-widget-secondary) 18%, transparent);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     transition:
@@ -79,7 +79,7 @@ html {
 #dostiris-chat-button::before {
     content: "";
     position: absolute;
-    inset: -6px;
+    inset: -4px;
     border-radius: inherit;
     background:
         linear-gradient(
@@ -87,8 +87,8 @@ html {
             color-mix(in srgb, var(--dt-widget-primary) 28%, transparent),
             color-mix(in srgb, var(--dt-widget-secondary) 32%, transparent)
         );
-    opacity: 0.42;
-    filter: blur(10px);
+    opacity: 0.34;
+    filter: blur(8px);
     z-index: -1;
     pointer-events: none;
     transition: opacity 0.2s ease, filter 0.2s ease;
@@ -99,11 +99,11 @@ html {
     position: absolute;
     right: -1px;
     bottom: 0;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     border-radius: 999px;
     background: var(--dt-widget-accent);
-    border: 4px solid #ffffff;
+    border: 3px solid #ffffff;
     box-shadow:
         0 3px 10px rgba(15, 23, 42, 0.22),
         0 0 0 0 color-mix(in srgb, var(--dt-widget-accent) 45%, transparent);
@@ -675,8 +675,8 @@ background: white;
     #dostiris-chat-button {
         right: 18px;
         bottom: 18px;
-        width: 78px;
-        height: 78px;
+        width: 68px;
+        height: 68px;
     }
 
     #dostiris-chat-button::after {
