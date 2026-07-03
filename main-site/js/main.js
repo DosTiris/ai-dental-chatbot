@@ -104,7 +104,7 @@ if (chatButton && chatClose && chatWidget) {
             setCssVar("--dt-widget-secondary", theme.secondary);
             setCssVar("--dt-widget-accent", theme.accent);
             setCssVar("--dt-widget-ring", theme.ring);
-            setCssVar("--dt-widget-tooth", theme.tooth);
+            setCssVar("--dt-widget-tooth", theme.primary || theme.tooth);
             setCssVar("--dt-widget-sparkle", theme.sparkle);
         } catch (error) {
             // Keep the default launcher colors if the public config request is unavailable.
