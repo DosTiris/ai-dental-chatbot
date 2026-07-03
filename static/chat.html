@@ -295,6 +295,13 @@
       box-shadow: 0 12px 28px color-mix(in srgb, var(--mia-primary) 12%, transparent);
     }
 
+    .typing-label {
+      font-style: normal;
+      font-size: 12px;
+      color: var(--mia-muted);
+      margin-right: 2px;
+    }
+
     .quick-replies,
     .booking-link-row {
       display: flex;
@@ -324,6 +331,18 @@
       bottom: 0;
       backdrop-filter: blur(10px);
       z-index: 2;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition:
+        opacity 260ms ease,
+        transform 280ms cubic-bezier(.2,.8,.2,1);
+    }
+
+    .chat-input-row.is-ready {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
     }
 
     input {
@@ -716,6 +735,7 @@
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("input");
     const sendBtn = document.getElementById("sendBtn");
+    const inputRow = document.querySelector(".chat-input-row");
 
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const mobileQuery = window.matchMedia("(max-width: 640px)");
@@ -765,6 +785,15 @@
       });
     }
 
+    function setInputReady(isReady) {
+      if (inputRow) {
+        inputRow.classList.toggle("is-ready", isReady);
+      }
+
+      inputEl.disabled = !isReady;
+      sendBtn.disabled = !isReady;
+    }
+
     function showMainMenu(isReady = true) {
       const mainMenu = document.getElementById("main-menu");
       const serviceMenu = document.getElementById("service-menu");
@@ -788,6 +817,7 @@
     function resetOpeningMessage() {
       messagesEl.innerHTML = "";
       showMainMenu(true);
+      setInputReady(true);
       addMessage("bot", getOpeningMessage(), { className: "opening-message" });
     }
 
@@ -800,6 +830,7 @@
       messagesEl.innerHTML = "";
       showMainMenu(false);
       setMenusReady(false);
+      setInputReady(false);
 
       await sleep(mobileQuery.matches ? 160 : 220);
       if (token !== openingSequenceToken) return;
@@ -816,7 +847,9 @@
       if (token !== openingSequenceToken) return;
 
       setMenusReady(true);
+      setInputReady(true);
       inputEl.placeholder = mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...";
+      inputEl.focus();
     }
 
     function maybeStartOpeningSequence() {
@@ -972,7 +1005,9 @@
       typing.id = "typingIndicator";
       typing.className = `msg bot typing${options.opening ? " opening-typing" : ""}`;
       typing.setAttribute("aria-label", "Mia is typing");
-      typing.innerHTML = "<span></span><span></span><span></span>";
+      typing.innerHTML = options.opening
+        ? '<em class="typing-label">Typing…</em><span></span><span></span><span></span>'
+        : "<span></span><span></span><span></span>";
       messagesEl.appendChild(typing);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
