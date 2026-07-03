@@ -116,17 +116,61 @@ if (chatButton && chatClose && chatWidget) {
     installLauncherIcon();
     applyLauncherTheme();
 
-    chatButton.addEventListener("click", () => {
+    let widgetAnimationTimer = null;
+
+    function clearWidgetAnimationTimer() {
+        if (widgetAnimationTimer) {
+            window.clearTimeout(widgetAnimationTimer);
+            widgetAnimationTimer = null;
+        }
+    }
+
+    function openChatWidget() {
+        clearWidgetAnimationTimer();
+
         chatWidget.style.display = "block";
         chatClose.style.display = "block";
-        chatButton.style.display = "none";
-    });
 
-    chatClose.addEventListener("click", () => {
-        chatWidget.style.display = "none";
-        chatClose.style.display = "none";
+        chatButton.style.pointerEvents = "none";
+        chatButton.style.opacity = "0";
+        chatButton.style.transform = "translateY(8px) scale(0.9)";
+
+        window.requestAnimationFrame(() => {
+            chatWidget.classList.remove("dt-widget-closing");
+            chatWidget.classList.add("dt-widget-open");
+            chatClose.classList.add("dt-close-open");
+        });
+
+        widgetAnimationTimer = window.setTimeout(() => {
+            chatButton.style.visibility = "hidden";
+        }, 220);
+    }
+
+    function closeChatWidget() {
+        clearWidgetAnimationTimer();
+
+        chatWidget.classList.remove("dt-widget-open");
+        chatWidget.classList.add("dt-widget-closing");
+        chatClose.classList.remove("dt-close-open");
+
         chatButton.style.display = "grid";
-    });
+        chatButton.style.visibility = "visible";
+
+        window.requestAnimationFrame(() => {
+            chatButton.style.pointerEvents = "";
+            chatButton.style.opacity = "1";
+            chatButton.style.transform = "";
+        });
+
+        widgetAnimationTimer = window.setTimeout(() => {
+            chatWidget.style.display = "none";
+            chatWidget.classList.remove("dt-widget-closing");
+            chatClose.style.display = "none";
+        }, 260);
+    }
+
+    chatButton.addEventListener("click", openChatWidget);
+    chatClose.addEventListener("click", closeChatWidget);
 }
 
 const demoForm = document.getElementById("demoRequestForm");
