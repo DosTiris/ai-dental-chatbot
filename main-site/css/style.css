@@ -673,12 +673,12 @@ html {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transform: translateY(18px) scale(0.94);
+    transform: translateY(34px) scale(0.88);
     transform-origin: bottom right;
     transition:
-        opacity 0.22s ease,
-        transform 0.26s cubic-bezier(0.16, 1, 0.3, 1),
-        visibility 0s linear 0.26s;
+        opacity 0.32s ease,
+        transform 0.38s cubic-bezier(0.16, 1, 0.3, 1),
+        visibility 0s linear 0.38s;
     will-change: opacity, transform;
 }
 
@@ -688,8 +688,8 @@ html {
     pointer-events: auto;
     transform: translateY(0) scale(1);
     transition:
-        opacity 0.22s ease,
-        transform 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 0.32s ease,
+        transform 0.38s cubic-bezier(0.16, 1, 0.3, 1),
         visibility 0s;
 }
 
@@ -697,7 +697,7 @@ html {
     opacity: 0;
     visibility: visible;
     pointer-events: none;
-    transform: translateY(16px) scale(0.96);
+    transform: translateY(26px) scale(0.92);
 }
 
 @media (max-width: 600px) {
