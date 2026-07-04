@@ -53,6 +53,151 @@ SYSTEM_PROMPT = (
 MAX_USER_CHARS = 300
 MAX_CONTEXT_MESSAGES = 12
 
+# ---------------------------------------------------------
+# Public widget config helpers
+# Reads safe Mia display settings from clients.settings JSONB
+# Example Supabase clients.settings:
+# {
+#   "mia_theme": {
+#     "primary": "#2563eb",
+#     "secondary": "#06b6d4",
+#     "bot_bubble": "#374151",
+#     "chat_background": "#0f172a"
+#   },
+#   "mia_opening_message": "Hi, I’m Mia, the AI dental receptionist..."
+# }
+# ---------------------------------------------------------
+DEFAULT_MIA_OPENING_MESSAGE = (
+    "Hi, I’m Mia, the office’s AI dental receptionist. I can help with appointment "
+    "requests, services, insurance questions, office hours, and location information. "
+    "How can I help today?"
+)
+
+DEFAULT_MIA_MOBILE_OPENING_MESSAGE = (
+    "Hi, I’m Mia, the office’s AI dental receptionist. I can help with appointment "
+    "requests, services, insurance questions, office hours, and location information. "
+    "How can I help today?"
+)
+
+DEFAULT_MIA_THEME = {
+    "primary": "#2563eb",
+    "secondary": "#06b6d4",
+    "accent": "#22c55e",
+    "chat_background": "#0f172a",
+    "panel_background": "#111827",
+    "bot_bubble": "#374151",
+    "user_bubble": "#2563eb",
+    "button_background": "#111827",
+    "button_text": "#e5e7eb",
+    "border": "#1e293b",
+    "muted_text": "#94a3b8",
+}
+
+DEFAULT_MIA_LAUNCHER_THEME = {
+    "primary": "#2563eb",
+    "secondary": "#06b6d4",
+    "accent": "#22c55e",
+    "ring": "#dff9ff",
+    "tooth": "#ffffff",
+    "sparkle": "#ffffff",
+}
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _clean_hex_color(value: Any, fallback: str) -> str:
+    value = str(value or "").strip()
+    if _HEX_COLOR_RE.match(value):
+        return value
+    return fallback
+
+
+def _clean_short_text(value: Any, fallback: str, max_len: int = 240) -> str:
+    value = str(value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if not value:
+        return fallback
+    return value[:max_len]
+
+
+def build_public_widget_config(client: Client) -> dict:
+    """Return only safe, public-facing settings for the Mia widget."""
+    settings = getattr(client, "settings", None)
+    if not isinstance(settings, dict):
+        settings = {}
+
+    theme_source = settings.get("mia_theme") or settings.get("theme") or {}
+    if not isinstance(theme_source, dict):
+        theme_source = {}
+
+    theme = {
+        key: _clean_hex_color(theme_source.get(key), fallback)
+        for key, fallback in DEFAULT_MIA_THEME.items()
+    }
+
+    launcher_source = settings.get("mia_launcher_theme") or settings.get("launcher_theme") or {}
+    if not isinstance(launcher_source, dict):
+        launcher_source = {}
+
+    launcher_theme = {
+        key: _clean_hex_color(launcher_source.get(key), fallback)
+        for key, fallback in DEFAULT_MIA_LAUNCHER_THEME.items()
+    }
+
+    # If there is no separate launcher theme, let the launcher follow the main Mia theme.
+    launcher_theme["primary"] = _clean_hex_color(
+        launcher_source.get("primary") or theme_source.get("launcher_primary") or theme.get("primary"),
+        launcher_theme["primary"],
+    )
+    launcher_theme["secondary"] = _clean_hex_color(
+        launcher_source.get("secondary") or theme_source.get("launcher_secondary") or theme.get("secondary"),
+        launcher_theme["secondary"],
+    )
+    launcher_theme["accent"] = _clean_hex_color(
+        launcher_source.get("accent") or launcher_source.get("online_dot") or theme.get("accent"),
+        launcher_theme["accent"],
+    )
+
+    # Convenience aliases in case you type simpler names in Supabase.
+    theme["primary"] = _clean_hex_color(
+        theme_source.get("primary") or theme_source.get("primary_color") or theme_source.get("brand_color"),
+        theme["primary"],
+    )
+    theme["secondary"] = _clean_hex_color(
+        theme_source.get("secondary") or theme_source.get("secondary_color") or theme_source.get("gradient_color"),
+        theme["secondary"],
+    )
+    theme["accent"] = _clean_hex_color(
+        theme_source.get("accent") or theme_source.get("accent_color") or theme_source.get("online_dot"),
+        theme["accent"],
+    )
+
+    opening_message = _clean_short_text(
+        settings.get("mia_opening_message") or settings.get("opening_message"),
+        DEFAULT_MIA_OPENING_MESSAGE,
+    )
+
+    mobile_opening_message = _clean_short_text(
+        settings.get("mia_mobile_opening_message") or settings.get("mobile_opening_message"),
+        DEFAULT_MIA_MOBILE_OPENING_MESSAGE,
+    )
+
+    header_subtitle = _clean_short_text(
+        settings.get("mia_header_subtitle") or settings.get("header_subtitle"),
+        "AI Dental Receptionist",
+        max_len=80,
+    )
+
+    return {
+        "practice_name": client.practice_name,
+        "header_title": "Mia",
+        "header_subtitle": header_subtitle,
+        "opening_message": opening_message,
+        "mobile_opening_message": mobile_opening_message,
+        "theme": theme,
+        "launcher_theme": launcher_theme,
+    }
+
 EXTRACTOR_MODEL = "gpt-5-nano"
 CHAT_MODEL = "gpt-5-nano"
 
@@ -1544,6 +1689,22 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@router.get("/chat/config")
+def get_chat_config(client_key: str, db: Session = Depends(get_db)):
+    client_key = (client_key or "").strip()
+    if not client_key:
+        raise HTTPException(status_code=400, detail="client_key is required")
+
+    client = (
+        db.query(Client)
+        .filter(Client.api_key == client_key, Client.active == True)
+        .first()
+    )
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    return build_public_widget_config(client)
 
 
 # =========================================================
