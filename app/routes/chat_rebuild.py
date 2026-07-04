@@ -479,6 +479,32 @@ def build_zero_tolerance_lock_reply(office_phone: str) -> str:
         f"please contact the office directly at {phone}."
     )
 
+def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    dangerous_action = any(p in t for p in [
+        "pull out",
+        "pull my tooth",
+        "pull a tooth",
+        "take out my tooth",
+        "extract my tooth",
+        "walk me through",
+        "pliers",
+        "yank",
+        "rip out",
+        "use glue",
+        "super glue",
+        "glue it",
+        "glue my tooth",
+        "floss string",
+        "with floss",
+        "use floss to pull",
+        "paper towel",
+        "baby wipe",
+        "baby wipes",
+    ])
+    dental_context = any(p in t for p in ["tooth", "teeth", "bleeding", "gum", "gums", "mouth"])
+    return dangerous_action and dental_context
+
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABELS = {
     "mon": "Mon",
@@ -3005,6 +3031,60 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={
                 "mode": "office_phone",
                 "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Dangerous dental self-treatment guard
+    # =========================================================
+    if looks_like_dangerous_dental_instruction(user_text):
+        is_true_emergency = looks_like_emergency(user_text)
+
+        conversation.is_lead = True
+        conversation.lead_is_priority = bool(is_true_emergency)
+        conversation.lead_is_emergency = bool(is_true_emergency)
+
+        if not (conversation.lead_reason or "").strip():
+            conversation.lead_reason = detect_appointment_reason(user_text) or "tooth pain"
+            conversation.lead_reason_source_text = (user_text or "")[:120]
+
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        reply_text = (
+            "I can’t provide medical advice or home-care instructions in chat, "
+            "but please do not try to pull out a tooth yourself or use household materials like glue in your mouth."
+        )
+
+        if is_true_emergency:
+            reply_text = (
+                f"{reply_text}\n\n"
+                "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
+                "please call 911 or go to the ER now.\n\n"
+                f"Our office number is {office_phone}."
+            )
+            next_prompt = _next_emergency_prompt(conversation)
+        else:
+            next_prompt = _next_intake_prompt(client, conversation)
+
+        if next_prompt and "?" not in reply_text:
+            reply_text = f"{reply_text}\n\n{next_prompt}"
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "dangerous_dental_self_treatment_guard",
+                "faq_match": False,
+                "emergency_mode": bool(is_true_emergency),
+                "hide_booking_button": True,
+                "show_call_button": True,
+                "call_phone": office_phone,
+                "call_cta_label": "Call Office Now" if is_true_emergency else "Call Office",
                 "show_start_over": show_start_over,
             },
         )
