@@ -471,6 +471,14 @@ def build_office_phone_reply(client: Client, conversation: Conversation, office_
 
     return base
 
+def build_zero_tolerance_lock_reply(office_phone: str) -> str:
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    return (
+        "I’m unable to assist with that request.\n\n"
+        "For help with appointments, services, insurance, office hours, or location information, "
+        f"please contact the office directly at {phone}."
+    )
+
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABELS = {
     "mon": "Mon",
@@ -2856,10 +2864,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # 0) Guard rails
     # =========================================================
     if conversation_is_locked(conversation):
-        reply_text = (
-            "Please be respectful. I can’t continue this chat. "
-            f"Please call the office directly at {office_phone}."
-        )
+        reply_text = build_zero_tolerance_lock_reply(office_phone)
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -2885,10 +2890,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         if has_contact or has_reason:
             notify_office_of_lock(db, client, conversation, user_text=user_text, ip=ip)
 
-        reply_text = (
-            "Please be respectful. I can’t continue this chat. "
-            f"Please call the office directly at {office_phone}."
-        )
+        reply_text = build_zero_tolerance_lock_reply(office_phone)
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
