@@ -901,6 +901,73 @@ def build_office_hours_answer(client) -> Optional[str]:
     return "\n".join(lines)
 
 
+def detect_specific_hours_day(user_text: str) -> Optional[str]:
+    """Detect questions about a specific day's office hours."""
+    t = _norm_text(user_text)
+    if not t:
+        return None
+
+    # Only answer direct hours/open/closed questions here.
+    # Appointment requests like "I want Sunday" should stay in scheduling flow.
+    hours_words = [
+        "open",
+        "closed",
+        "close",
+        "closing",
+        "hours",
+        "what time",
+        "available on",
+        "are you open",
+        "do you open",
+    ]
+    if not any(p in t for p in hours_words):
+        return None
+
+    day_map = {
+        "monday": "mon",
+        "mon": "mon",
+        "tuesday": "tue",
+        "tues": "tue",
+        "tue": "tue",
+        "wednesday": "wed",
+        "wed": "wed",
+        "thursday": "thu",
+        "thurs": "thu",
+        "thur": "thu",
+        "thu": "thu",
+        "friday": "fri",
+        "fri": "fri",
+        "saturday": "sat",
+        "sat": "sat",
+        "sunday": "sun",
+        "sun": "sun",
+    }
+
+    for token, day_key in day_map.items():
+        if re.search(rf"\b{re.escape(token)}\b", t):
+            return day_key
+
+    return None
+
+
+def build_specific_day_hours_answer(client, day_key: str) -> Optional[str]:
+    """Build direct answer for questions like 'Are you open on Sunday?'."""
+    hours = get_office_hours_struct(client)
+    if not hours:
+        return None
+
+    row = hours.get(day_key, {}) or {}
+    day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
+
+    is_open = bool(row.get("open", False))
+    start = row.get("start")
+    end = row.get("end")
+
+    if not is_open or not start or not end:
+        return f"The office is closed on {day_name}."
+
+    return f"Yes — the office is open on {day_name} from {_format_time_label(start)} to {_format_time_label(end)}."
+
 def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
     if not hhmm or ":" not in hhmm:
         return None
@@ -3501,6 +3568,26 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "show_start_over": show_start_over,
             },
         )
+
+    # =========================================================
+    # Specific-day hours guard
+    # =========================================================
+    specific_hours_day = detect_specific_hours_day(user_text)
+    if specific_hours_day and not looks_like_scheduling_intent(user_text):
+        reply_text = build_specific_day_hours_answer(client, specific_hours_day)
+
+        if reply_text:
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "specific_day_hours",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
 
     # =========================================================
     # Dangerous dental self-treatment guard
