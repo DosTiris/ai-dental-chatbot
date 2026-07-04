@@ -2768,7 +2768,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     if not (getattr(conversation, "lead_time_window", None) or "").strip():
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
     if getattr(conversation, "lead_is_new_patient", None) is None:
-        return "Are you a new patient?"
+        return f"One quick question — {name_prefix}are you a new or returning patient?"
     return "Thanks — our team will reach out to confirm your appointment."
 
 def _emergency_meta(label="Call the office now") -> dict:
@@ -3767,14 +3767,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             else:
                 combined_reply = outside_hours_reply
 
-        # Only append the next intake prompt if it is NOT the same question
+        # ONE-QUESTION-PER-MESSAGE RULE:
+        # If the time-window handler already asked a question, do not append
+        # another intake question underneath it. This prevents messages like:
+        # "Are you a new or returning patient?" + "Are you a new patient?"
         next_prompt = _next_intake_prompt(client, conversation)
 
         if next_prompt:
-            tw_norm = (tw_reply or "").strip().lower()
+            combined_norm = (combined_reply or "").strip().lower()
             next_norm = (next_prompt or "").strip().lower()
+            combined_has_question = "?" in (combined_reply or "")
 
-            if next_norm and next_norm != tw_norm:
+            if next_norm and next_norm != combined_norm and not combined_has_question:
                 if combined_reply:
                     combined_reply = f"{combined_reply}\n\n{next_prompt}"
                 else:
