@@ -540,6 +540,113 @@ def build_insurance_reply(user_text: str) -> str:
         "when they follow up."
     )
 
+def looks_like_pricing_request(user_text: str) -> bool:
+    """Detect pricing/cost questions without starting appointment intake too early."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    pricing_phrases = [
+        "how much",
+        "how much is",
+        "how much are",
+        "how much for",
+        "what does it cost",
+        "what do you charge",
+        "how much do you charge",
+        "cost",
+        "costs",
+        "price",
+        "prices",
+        "pricing",
+        "fee",
+        "fees",
+        "charge",
+        "charges",
+        "out of pocket",
+        "payment",
+    ]
+
+    service_terms = [
+        "implant",
+        "implants",
+        "veneer",
+        "veneers",
+        "filling",
+        "fillings",
+        "cavity",
+        "cavities",
+        "crown",
+        "crowns",
+        "braces",
+        "invisalign",
+        "whitening",
+        "cleaning",
+        "checkup",
+        "check-up",
+        "exam",
+        "extraction",
+        "extractions",
+        "wisdom tooth",
+        "wisdom teeth",
+        "consultation",
+        "appointment",
+    ]
+
+    generic_pricing_phrases = [
+        "what are your prices",
+        "do you have prices",
+        "price list",
+        "pricing list",
+        "how much do you charge",
+    ]
+
+    has_pricing = any(p in t for p in pricing_phrases)
+    has_service = any(s in t for s in service_terms)
+    has_generic_pricing = any(p in t for p in generic_pricing_phrases)
+
+    return has_pricing and (has_service or has_generic_pricing)
+
+
+def detect_pricing_service(user_text: str) -> Optional[str]:
+    """Return a friendly service label for pricing replies."""
+    t = _norm_text(user_text)
+
+    if any(p in t for p in ["implant", "implants"]):
+        return "implants"
+    if any(p in t for p in ["veneer", "veneers"]):
+        return "veneers"
+    if any(p in t for p in ["filling", "fillings", "cavity", "cavities"]):
+        return "fillings"
+    if any(p in t for p in ["crown", "crowns"]):
+        return "crowns"
+    if any(p in t for p in ["braces", "invisalign"]):
+        return "braces or Invisalign"
+    if any(p in t for p in ["whitening", "teeth whitening"]):
+        return "teeth whitening"
+    if any(p in t for p in ["extraction", "extractions", "wisdom tooth", "wisdom teeth"]):
+        return "extractions"
+    if any(p in t for p in ["cleaning", "checkup", "check-up", "exam"]):
+        return "cleanings or exams"
+
+    return None
+
+
+def build_pricing_reply(user_text: str) -> str:
+    """Safe pricing response. Does not quote exact prices or start intake."""
+    service = detect_pricing_service(user_text)
+
+    if service:
+        return (
+            f"Pricing for {service} can vary depending on the exam, treatment plan, and insurance coverage. "
+            "The office team can review your options and give a more accurate estimate after evaluating your case."
+        )
+
+    return (
+        "Pricing can vary depending on the exam, treatment plan, and insurance coverage. "
+        "The office team can review your options and give a more accurate estimate after evaluating your case."
+    )
+
 def build_zero_tolerance_lock_reply(office_phone: str) -> str:
     phone = (office_phone or "").strip() or "(555) 123-4567"
     return (
@@ -1142,7 +1249,7 @@ def detect_service_selection(user_text: str) -> Optional[str]:
     if "implant" in t or "extraction" in t:
         return "extraction/implant"
 
-    if "whitening" in t or "cosmetic" in t:
+    if "whitening" in t or "cosmetic" in t or "veneer" in t or "veneers" in t:
         return "cosmetic/whitening"
 
     if "braces" in t or "invisalign" in t:
@@ -3317,6 +3424,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             },
         )
 
+
+    # =========================================================
+    # Pricing / cost question guard
+    # =========================================================
+    if looks_like_pricing_request(user_text):
+        reply_text = build_pricing_reply(user_text)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "pricing_info",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
 
     # =========================================================
     # Emergency routing FIRST
