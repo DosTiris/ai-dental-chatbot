@@ -2,7 +2,12 @@
   const openButton = document.getElementById("dostiris-chat-button");
   const closeButton = document.getElementById("dostiris-chat-close");
   const widget = document.getElementById("dostiris-chat-widget");
+
   if (!openButton || !closeButton || !widget) return;
+
+  openButton.style.visibility = "hidden";
+  openButton.style.opacity = "0";
+  openButton.style.transform = "translateY(8px) scale(0.96)";
 
   const launcherSvg = `
     <svg class="dt-mia-launcher-svg" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false">
@@ -59,13 +64,46 @@
     }
   }
 
+  function syncDefaultToothColor() {
+    const styles = window.getComputedStyle(openButton);
+    const primary = styles.getPropertyValue("--dt-widget-primary").trim();
+
+    if (/^#[0-9a-fA-F]{6}$/.test(primary)) {
+      openButton.style.setProperty("--dt-widget-tooth", primary);
+    }
+  }
+
+  function revealLauncher() {
+    window.requestAnimationFrame(() => {
+      openButton.style.transition = [
+        "opacity 0.18s ease",
+        "transform 0.2s ease",
+        "box-shadow 0.2s ease",
+        "filter 0.2s ease",
+        "border-color 0.2s ease"
+      ].join(", ");
+
+      openButton.style.visibility = "visible";
+      openButton.style.opacity = "1";
+      openButton.style.transform = "";
+    });
+  }
+
   async function applyLauncherTheme() {
     const configUrl = getWidgetConfigUrl();
-    if (!configUrl || !window.fetch) return;
+
+    if (!configUrl || !window.fetch) {
+      revealLauncher();
+      return;
+    }
 
     try {
       const response = await fetch(configUrl, { mode: "cors", credentials: "omit" });
-      if (!response.ok) return;
+
+      if (!response.ok) {
+        revealLauncher();
+        return;
+      }
 
       const config = await response.json();
       const theme = config.launcher_theme || config.mia_launcher_theme || config.theme || {};
@@ -74,27 +112,76 @@
       setCssVar("--dt-widget-secondary", theme.secondary);
       setCssVar("--dt-widget-accent", theme.accent);
       setCssVar("--dt-widget-ring", theme.ring);
-      setCssVar("--dt-widget-tooth", theme.tooth);
+      setCssVar("--dt-widget-tooth", theme.primary || theme.tooth);
       setCssVar("--dt-widget-sparkle", theme.sparkle);
     } catch (error) {
       // Keep the default launcher colors if the public config request is unavailable.
+    } finally {
+      revealLauncher();
+    }
+  }
+
+  installLauncherIcon();
+  syncDefaultToothColor();
+  applyLauncherTheme();
+
+  let widgetAnimationTimer = null;
+
+  function clearWidgetAnimationTimer() {
+    if (widgetAnimationTimer) {
+      window.clearTimeout(widgetAnimationTimer);
+      widgetAnimationTimer = null;
     }
   }
 
   function openMia() {
+    clearWidgetAnimationTimer();
+
     widget.style.display = "block";
     closeButton.style.display = "block";
-    openButton.style.display = "none";
+
+    openButton.style.pointerEvents = "none";
+    openButton.style.opacity = "0";
+    openButton.style.transform = "translateY(8px) scale(0.9)";
+
+    widget.classList.remove("dt-widget-open");
+    widget.classList.remove("dt-widget-closing");
+
+    // Force the browser to register the hidden starting state before animating open.
+    void widget.offsetHeight;
+
+    window.requestAnimationFrame(() => {
+      widget.classList.add("dt-widget-open");
+      closeButton.classList.add("dt-close-open");
+    });
+
+    widgetAnimationTimer = window.setTimeout(() => {
+      openButton.style.visibility = "hidden";
+    }, 220);
   }
 
   function closeMia() {
-    widget.style.display = "none";
-    closeButton.style.display = "none";
-    openButton.style.display = "grid";
-  }
+    clearWidgetAnimationTimer();
 
-  installLauncherIcon();
-  applyLauncherTheme();
+    widget.classList.remove("dt-widget-open");
+    widget.classList.add("dt-widget-closing");
+    closeButton.classList.remove("dt-close-open");
+
+    openButton.style.display = "grid";
+    openButton.style.visibility = "visible";
+
+    window.requestAnimationFrame(() => {
+      openButton.style.pointerEvents = "";
+      openButton.style.opacity = "1";
+      openButton.style.transform = "";
+    });
+
+    widgetAnimationTimer = window.setTimeout(() => {
+      widget.style.display = "none";
+      widget.classList.remove("dt-widget-closing");
+      closeButton.style.display = "none";
+    }, 460);
+  }
 
   openButton.addEventListener("click", openMia);
   closeButton.addEventListener("click", closeMia);
