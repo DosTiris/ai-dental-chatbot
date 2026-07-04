@@ -1071,6 +1071,49 @@ def check_outside_hours(client: Client, time_window: Optional[str]) -> Tuple[boo
 
     return (False, None)
 
+def build_time_window_issue_reply(client: Client, time_window: Optional[str]) -> Optional[str]:
+    """
+    Detects when a requested exact time is already in the past today
+    or outside the office's normal hours.
+    """
+    if not time_window:
+        return None
+
+    day_key = _get_day_key_from_time_window(time_window)
+    if not day_key:
+        return None
+
+    req_minutes = _extract_exact_time_minutes_from_tw(time_window)
+    if req_minutes is None:
+        return None
+
+    now_local = get_client_now(client)
+    today_key = now_local.strftime("%a").lower()[:3]
+    now_minutes = now_local.hour * 60 + now_local.minute
+
+    # If the requested time is today and already passed, ask for another time.
+    if day_key == today_key and req_minutes <= now_minutes:
+        return "That time has already passed for today. What day/time works better for you?"
+
+    hours = get_office_hours_struct(client)
+    row = hours.get(day_key, {}) or {}
+
+    is_open = bool(row.get("open", False))
+    start_minutes = _parse_hhmm_to_minutes(row.get("start"))
+    end_minutes = _parse_hhmm_to_minutes(row.get("end"))
+
+    if not is_open:
+        day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
+        return f"The office is closed on {day_name}. What day/time works better for you?"
+
+    if start_minutes is None or end_minutes is None:
+        return None
+
+    if req_minutes < start_minutes or req_minutes >= end_minutes:
+        return "That time is outside normal office hours. What day/time works better for you?"
+
+    return None
+
 def build_hours_hint_text(client) -> Optional[str]:
     hours = get_office_hours_struct(client)
     if not hours:
@@ -1911,6 +1954,10 @@ def handle_time_window_capture(
         detected_tw = base.strftime("%a")
 
     is_today_request = ("today" in norm_user_text) or (detected_tw == today_tok)
+
+    time_issue_reply = build_time_window_issue_reply(client, detected_tw)
+    if time_issue_reply:
+        return (time_issue_reply, False)
 
     last_t = (last_assistant_text or "").lower()
 
