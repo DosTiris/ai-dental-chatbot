@@ -2135,6 +2135,63 @@ def looks_like_emergency(text: str) -> bool:
     t = _norm_text(text)
     return any(k in t for k in EMERGENCY_TRIGGERS)
 
+def looks_like_urgent_dental_safety_issue(text: str) -> bool:
+    """
+    Catches urgent dental safety situations that may not use exact emergency keywords.
+    This is intentionally narrow so normal broken-tooth messages do not all become emergencies.
+    """
+    t = _norm_text(text)
+    if not t:
+        return False
+
+    trauma_words = [
+        "fell",
+        "fall",
+        "fallen",
+        "hit",
+        "accident",
+        "injury",
+        "injured",
+    ]
+
+    tooth_damage_words = [
+        "tooth broke",
+        "broke my tooth",
+        "my tooth broke",
+        "broken tooth",
+        "cracked tooth",
+        "chipped tooth",
+        "tooth fell out",
+        "knocked out",
+    ]
+
+    strong_bleeding_words = [
+        "blood everywhere",
+        "bleeding everywhere",
+        "there is blood everywhere",
+        "blood all over",
+        "bleeding a lot",
+        "a lot of blood",
+        "lots of blood",
+        "mouth is bleeding",
+        "bleeding from my mouth",
+    ]
+
+    dangerous_self_treatment = looks_like_dangerous_dental_instruction(text)
+
+    has_trauma = any(p in t for p in trauma_words)
+    has_tooth_damage = any(p in t for p in tooth_damage_words)
+    has_strong_bleeding = any(p in t for p in strong_bleeding_words)
+
+    # Examples:
+    # "I fell and my tooth broke and there is blood everywhere"
+    # "My mouth is bleeding, should I pull out my tooth with my fingers?"
+    return (
+        (has_trauma and (has_tooth_damage or has_strong_bleeding))
+        or (has_tooth_damage and has_strong_bleeding)
+        or (dangerous_self_treatment and has_strong_bleeding)
+    )
+
 def is_after_hours(now: datetime, office_hours_obj) -> bool:
     """
     office_hours_obj is whatever you already store for hours.
@@ -3222,8 +3279,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Dangerous self-treatment / dental problem guard
     # =========================================================
-    if looks_like_dangerous_dental_instruction(user_text) or looks_like_medical_advice(user_text):
-        is_true_emergency = looks_like_emergency(user_text)
+    if (
+        looks_like_dangerous_dental_instruction(user_text)
+        or looks_like_medical_advice(user_text)
+        or looks_like_urgent_dental_safety_issue(user_text)
+    ):
+        is_true_emergency = looks_like_emergency(user_text) or looks_like_urgent_dental_safety_issue(user_text)
         conversation.is_lead = True
         conversation.lead_is_priority = bool(is_true_emergency)
         conversation.lead_is_emergency = bool(is_true_emergency)
@@ -3235,11 +3296,22 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.refresh(conversation)
 
         if is_true_emergency:
-            reply_text = (
-                "I can’t provide medical advice or home-care instructions in chat. "
-                "If symptoms are severe, worsening, or involve uncontrolled bleeding, swelling, trouble breathing, or trouble swallowing, "
-                "please call the office right away or seek urgent care."
-            )
+            if looks_like_dangerous_dental_instruction(user_text):
+                reply_text = (
+                    "I can’t provide medical advice or home-care instructions in chat, "
+                    "but please do not try to pull out a tooth yourself.\n\n"
+                    "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
+                    "please call 911 or go to the ER now.\n\n"
+                    f"Our office number is {office_phone}."
+                )
+            else:
+                reply_text = (
+                    "This may require prompt attention.\n\n"
+                    "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
+                    "please call 911 or go to the ER now.\n\n"
+                    f"Our office number is {office_phone}."
+                )
+
             next_prompt = _next_emergency_prompt(conversation)
         else:
             reply_text = "I can’t provide medical advice or home-care instructions in chat, but I can help send your concern to the office."
