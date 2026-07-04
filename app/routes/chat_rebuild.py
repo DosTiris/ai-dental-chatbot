@@ -441,6 +441,36 @@ def looks_like_question_request(user_text: str) -> bool:
     # exact or startswith covers "I have a question about ___"
     return any(t == x or t.startswith(x) for x in triggers)
 
+def looks_like_office_phone_request(user_text: str) -> bool:
+    """Detect when the patient is asking for the office's phone number."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    phone_phrases = [
+        "what s your number", "whats your number", "what is your number",
+        "what s your phone number", "whats your phone number", "what is your phone number",
+        "phone number", "office number", "contact number", "number to call",
+        "what number do i call", "what number should i call", "can i call",
+        "how do i call", "how can i call", "give me the number", "call you",
+        "call the office",
+    ]
+    return any(p in t for p in phone_phrases)
+
+
+def build_office_phone_reply(client: Client, conversation: Conversation, office_phone: str) -> str:
+    """Answer office-phone questions only. Do not start intake from a pure phone request."""
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    base = f"Our office number is {phone}."
+
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return (
+            f"{base}\n\n"
+            "If this is urgent and you’re unable to reach the office, please seek urgent care."
+        )
+
+    return base
+
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABELS = {
     "mon": "Mon",
@@ -2965,6 +2995,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={"mode": "question_guard", "faq_match": False, "show_start_over": show_start_over,},
+        )
+    
+    # =========================================================
+    # Office phone request guard
+    # =========================================================
+    if looks_like_office_phone_request(user_text) and not looks_like_scheduling_intent(user_text):
+        reply_text = build_office_phone_reply(client, conversation, office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "office_phone",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
         )
 
     # =========================================================
