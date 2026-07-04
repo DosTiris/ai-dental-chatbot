@@ -2654,6 +2654,62 @@ def looks_like_greeting(text: str) -> bool:
     t = (text or "").strip().lower()
     return t in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}
 
+def looks_like_friendly_greeting_or_small_talk(user_text: str) -> bool:
+    """Detect simple greetings and small talk without hijacking real office questions."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    # Do not treat real office/service questions as small talk.
+    if (
+        looks_like_office_phone_request(user_text)
+        or looks_like_insurance_request(user_text)
+        or looks_like_pricing_request(user_text)
+        or looks_like_scheduling_intent(user_text)
+        or detect_service_selection(user_text)
+        or detect_appointment_reason(user_text)
+    ):
+        return False
+
+    greeting_phrases = [
+        "hi",
+        "hello",
+        "hey",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "hi mia",
+        "hello mia",
+        "hey mia",
+    ]
+
+    small_talk_phrases = [
+        "how are you",
+        "how are you doing",
+        "how are u",
+        "how r you",
+        "how s it going",
+        "hows it going",
+        "how is it going",
+    ]
+
+    return any(t == p or t.startswith(p + " ") for p in greeting_phrases) or any(p in t for p in small_talk_phrases)
+
+
+def build_friendly_greeting_reply(user_text: str) -> str:
+    t = _norm_text(user_text)
+
+    if any(p in t for p in ["how are you", "how are you doing", "how are u", "how r you", "how s it going", "hows it going", "how is it going"]):
+        return (
+            "I’m doing well, thank you for asking. "
+            "How can I help you today with appointments, services, insurance, hours, or location?"
+        )
+
+    return (
+        "Hi, I’m Mia. "
+        "How can I help you today with appointments, services, insurance, hours, or location?"
+    )
+
 def looks_like_sensitive_data_request(user_text: str) -> bool:
     t = _norm_text(user_text)
     if not t:
@@ -3287,6 +3343,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={"mode": "question_guard", "faq_match": False, "show_start_over": show_start_over,},
+        )
+    
+    # =========================================================
+    # Friendly greeting / small-talk guard
+    # =========================================================
+    if looks_like_friendly_greeting_or_small_talk(user_text) and not in_intake_mode:
+        reply_text = build_friendly_greeting_reply(user_text)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "friendly_greeting",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
         )
     
     # =========================================================
