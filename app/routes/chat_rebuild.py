@@ -647,6 +647,100 @@ def build_pricing_reply(user_text: str) -> str:
         "The office team can review your options and give a more accurate estimate after evaluating your case."
     )
 
+def looks_like_service_question(user_text: str) -> bool:
+    """Detect direct service questions like 'Do you do implants?' without starting intake too early."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    # Pricing questions should be handled by the pricing guard first.
+    if looks_like_pricing_request(user_text):
+        return False
+
+    service_reason = detect_service_selection(user_text) or detect_appointment_reason(user_text)
+    if not service_reason or service_reason == "appointment request":
+        return False
+
+    service_question_phrases = [
+        "do you do",
+        "do you offer",
+        "do you provide",
+        "do you have",
+        "can you do",
+        "can i get",
+        "can i do",
+        "does the office do",
+        "does this office do",
+        "are implants available",
+        "is invisalign available",
+    ]
+
+    return any(p in t for p in service_question_phrases)
+
+
+def build_service_question_reply(user_text: str) -> str:
+    """Answer service availability first, then offer scheduling without collecting name immediately."""
+    t = _norm_text(user_text)
+    service_reason = detect_service_selection(user_text) or detect_appointment_reason(user_text)
+
+    if service_reason == "extraction/implant":
+        if "implant" in t:
+            return (
+                "Yes — the office can help with dental implant consultations. "
+                "Would you like to schedule a consultation for implants?"
+            )
+        return (
+            "Yes — the office can help with extractions. "
+            "Would you like to schedule an appointment?"
+        )
+
+    if service_reason == "orthodontics":
+        return (
+            "Yes — the office can help with braces and Invisalign. "
+            "Would you like to schedule a consultation?"
+        )
+
+    if service_reason == "crown":
+        return (
+            "Yes — the office does crowns. "
+            "Would you like to schedule an appointment?"
+        )
+
+    if service_reason == "cosmetic/whitening":
+        if "veneer" in t or "veneers" in t:
+            return (
+                "Yes — the office can help with cosmetic dentistry, including veneers. "
+                "Would you like to schedule a consultation?"
+            )
+        return (
+            "Yes — the office offers teeth whitening. "
+            "Would you like to schedule an appointment?"
+        )
+
+    if service_reason == "broken tooth/filling":
+        return (
+            "Yes — the office does fillings and can help with broken or chipped teeth. "
+            "Would you like to schedule an appointment?"
+        )
+
+    if service_reason == "cleaning/checkup":
+        return (
+            "Yes — the office offers cleanings and exams. "
+            "Would you like to schedule an appointment?"
+        )
+
+    if service_reason == "tooth pain":
+        return (
+            "Yes — the office can help with tooth pain. "
+            "Would you like to request an appointment?"
+        )
+
+    return (
+        "Yes — the office can help with that service. "
+        "Would you like to schedule an appointment?"
+    )
+
+
 def build_zero_tolerance_lock_reply(office_phone: str) -> str:
     phone = (office_phone or "").strip() or "(555) 123-4567"
     return (
@@ -2159,6 +2253,15 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
     if "do extractions" in t or "wisdom" in t or "extractions" in t:
         return "extraction/implant"
 
+    if "cleanings and exams" in t or "offer cleanings" in t:
+        return "cleaning/checkup"
+
+    if "veneers" in t and ("schedule" in t or "consultation" in t):
+        return "cosmetic/whitening"
+
+    if "tooth pain" in t and ("request an appointment" in t or "schedule" in t):
+        return "tooth pain"
+
     return None
 
 def last_assistant_was_emergency(db: Session, conversation_id: uuid.UUID) -> bool:
@@ -3512,6 +3615,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "mode": "pricing_info",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Service availability question guard
+    # =========================================================
+    if looks_like_service_question(user_text) and not in_intake_mode:
+        reply_text = build_service_question_reply(user_text)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "service_question",
                 "faq_match": False,
                 "show_start_over": show_start_over,
             },
