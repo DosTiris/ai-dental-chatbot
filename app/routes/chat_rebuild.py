@@ -472,6 +472,74 @@ def build_office_phone_reply(client: Client, conversation: Conversation, office_
 
     return base
 
+def looks_like_insurance_request(user_text: str) -> bool:
+    """Detect insurance questions without guaranteeing coverage."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    insurance_phrases = [
+        "insurance",
+        "insurances",
+        "do you take",
+        "do you accept",
+        "accept insurance",
+        "take insurance",
+        "covered",
+        "coverage",
+        "ppo",
+        "hmo",
+        "in network",
+        "in-network",
+        "out of network",
+        "out-of-network",
+        "delta dental",
+        "delta",
+        "aetna",
+        "cigna",
+        "metlife",
+        "guardian",
+        "principal",
+        "united healthcare",
+        "uhc",
+        "medicaid",
+        "medicare",
+    ]
+
+    return any(p in t for p in insurance_phrases)
+
+
+def build_insurance_reply(user_text: str) -> str:
+    """Safe default insurance response. Does not promise exact plan acceptance."""
+    t = _norm_text(user_text)
+
+    known_carriers = [
+        "delta dental",
+        "delta",
+        "aetna",
+        "cigna",
+        "metlife",
+        "guardian",
+        "principal",
+        "united healthcare",
+        "uhc",
+        "medicaid",
+        "medicare",
+    ]
+
+    mentioned_carrier = next((carrier for carrier in known_carriers if carrier in t), None)
+
+    if mentioned_carrier:
+        return (
+            "Coverage can vary by plan. The office team can help verify your insurance benefits "
+            "when they follow up."
+        )
+
+    return (
+        "Coverage may vary by plan. The office team can help verify your insurance benefits "
+        "when they follow up."
+    )
+
 def build_zero_tolerance_lock_reply(office_phone: str) -> str:
     phone = (office_phone or "").strip() or "(555) 123-4567"
     return (
@@ -3127,6 +3195,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "mode": "office_phone",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Insurance request guard
+    # =========================================================
+    if looks_like_insurance_request(user_text) and not looks_like_scheduling_intent(user_text):
+        reply_text = build_insurance_reply(user_text)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "insurance_info",
                 "faq_match": False,
                 "show_start_over": show_start_over,
             },
