@@ -3510,11 +3510,29 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
 
     email_opt_out = bool(getattr(conversation, "lead_email_opt_out", False))
 
+    time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
+    is_priority_non_emergency = (
+        (
+            bool(getattr(conversation, "lead_is_priority", False))
+            or time_window in {"ASAP", "ASAP / tomorrow ok"}
+        )
+        and not bool(getattr(conversation, "lead_is_emergency", False))
+    )
+
     if not has_reason:
         return (
             "What brings you in—cleaning/checkup, tooth pain, fillings, crowns, braces/Invisalign, whitening, or something else?",
             "reason",
         )
+
+    # Priority non-emergency flow: name + phone only.
+    # Do not ask email, preferred time, or new/returning for ASAP tooth pain.
+    if is_priority_non_emergency:
+        if not has_name:
+            return ("Got it — I’ll mark this as urgent. What’s your first name?", "name")
+        if not has_phone:
+            return (f"Thanks {conversation.lead_name}! What’s the best phone number for the office to call you back?", "phone")
+        return (build_priority_handoff_reply(conversation), "complete")
     if not has_name:
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
     if not has_phone:
@@ -3540,9 +3558,18 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
 
 def priority_intake_is_complete(conversation: Conversation) -> bool:
     """Priority non-emergency leads only need name + phone."""
-    return (
+    time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
+
+    is_priority = (
         bool(getattr(conversation, "lead_is_priority", False))
-        and not bool(getattr(conversation, "lead_is_emergency", False))
+        or time_window in {"ASAP", "ASAP / tomorrow ok"}
+    )
+
+    is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
+
+    return (
+        is_priority
+        and not is_emergency
         and bool((conversation.lead_name or "").strip())
         and bool((conversation.lead_phone or "").strip())
     )
