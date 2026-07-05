@@ -1036,6 +1036,78 @@ def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
 
     return None
 
+def _minutes_to_time_token(minutes: int) -> str:
+    h = minutes // 60
+    m = minutes % 60
+    suffix = "am" if h < 12 else "pm"
+    h12 = h % 12
+    if h12 == 0:
+        h12 = 12
+    if m == 0:
+        return f"{h12}{suffix}"
+    return f"{h12}:{m:02d}{suffix}"
+
+
+def _resolve_ambiguous_time_label_for_client(
+    client: Optional[Client],
+    day_key: Optional[str],
+    time_label: Optional[str],
+) -> Optional[str]:
+    """
+    If user says '4:45' without AM/PM, choose the version that makes sense
+    for the dental office's hours. Example: 4:45 -> 4:45pm, not 4:45am.
+    """
+    if not time_label:
+        return time_label
+
+    tl = (time_label or "").strip().lower()
+
+    # Already explicit.
+    if "am" in tl or "pm" in tl:
+        return time_label
+
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", tl)
+    if not m:
+        return time_label
+
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+
+    # 13:00–23:59 is already 24-hour time.
+    if hour == 0 or hour >= 13:
+        return time_label
+
+    # 12:30 naturally means noon-ish in this context.
+    if hour == 12:
+        return time_label
+
+    am_minutes = hour * 60 + minute
+    pm_minutes = (hour + 12) * 60 + minute
+
+    hours = get_office_hours_struct(client) if client is not None else {}
+    row = hours.get(day_key, {}) if day_key else {}
+
+    if bool(row.get("open", False)):
+        start_minutes = _parse_hhmm_to_minutes(row.get("start"))
+        end_minutes = _parse_hhmm_to_minutes(row.get("end"))
+
+        if start_minutes is not None and end_minutes is not None:
+            am_fits = start_minutes <= am_minutes < end_minutes
+            pm_fits = start_minutes <= pm_minutes < end_minutes
+
+            if pm_fits and not am_fits:
+                return _minutes_to_time_token(pm_minutes)
+
+            if am_fits and not pm_fits:
+                return _minutes_to_time_token(am_minutes)
+
+    # Fallback dental-office logic:
+    # 1–7 without AM/PM is usually afternoon/evening, not early morning.
+    if 1 <= hour <= 7:
+        return _minutes_to_time_token(pm_minutes)
+
+    return time_label
+
 
 def _get_day_key_from_time_window(tw: Optional[str]) -> Optional[str]:
     if not tw:
@@ -1125,6 +1197,9 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     end_minutes = _parse_hhmm_to_minutes(row.get("end"))
 
     if not is_open:
+        if day_key == today_key:
+            return "The office is closed today. What day/time works better for you?"
+
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
         return f"The office is closed on {day_name}. What day/time works better for you?"
 
@@ -1762,6 +1837,9 @@ def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optio
                 time_label = f"{hh}:{mm}{ap}" if mm != "00" else f"{hh}{ap}"
             else:
                 time_label = f"{time_match.group(4)}:{time_match.group(5)}"
+
+            day_key_for_time = day.lower()[:3]
+            time_label = _resolve_ambiguous_time_label_for_client(client, day_key_for_time, time_label)
             return f"{day} {time_label}"
 
         # part of day SECOND
@@ -1826,6 +1904,9 @@ def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optio
             time_label = f"{hh}:{mm}{ap}" if mm != "00" else f"{hh}{ap}"
         else:
             time_label = f"{time_match.group(4)}:{time_match.group(5)}"
+
+        day_key_for_time = day.lower()[:3] if day else None
+        time_label = _resolve_ambiguous_time_label_for_client(client, day_key_for_time, time_label)
 
     detail = time_label or part
     if day and detail:
