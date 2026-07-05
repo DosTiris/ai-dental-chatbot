@@ -749,6 +749,42 @@ def build_zero_tolerance_lock_reply(office_phone: str) -> str:
         f"please contact the office directly at {phone}."
     )
 
+def looks_like_self_harm_crisis(user_text: str) -> bool:
+    """Detect clear self-harm or suicide crisis language."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    crisis_phrases = [
+        "kill myself",
+        "kms",
+        "commit suicide",
+        "suicide tonight",
+        "suicidal",
+        "end my life",
+        "take my life",
+        "hurt myself",
+        "harm myself",
+        "jump off a bridge",
+        "jump off the bridge",
+        "jump in front of a train",
+        "i want to die",
+        "i don t want to live",
+        "i dont want to live",
+        "i hate myself",
+    ]
+
+    return any(p in t for p in crisis_phrases)
+
+
+def build_self_harm_crisis_reply() -> str:
+    return (
+        "I’m really sorry you’re feeling this way. I’m not equipped to help with this, "
+        "but you deserve immediate support.\n\n"
+        "If you may hurt yourself or are in immediate danger, please call 911 now.\n\n"
+        "You can also call or text 988 to reach the Suicide & Crisis Lifeline."
+    )
+
 def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     t = _norm_text(user_text)
     dangerous_action = any(p in t for p in [
@@ -3820,6 +3856,26 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         "resume_after_answer=", resume_intake_after_answer,
         "text=", user_text[:80]
     )
+
+    # =========================================================
+    # Self-harm / suicide crisis guard
+    # =========================================================
+    if looks_like_self_harm_crisis(user_text):
+        reply_text = build_self_harm_crisis_reply()
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "self_harm_crisis",
+                "faq_match": False,
+                "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
+
 
     # =========================================================
     # Early question guard
