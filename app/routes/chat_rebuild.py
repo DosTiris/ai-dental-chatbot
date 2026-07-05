@@ -778,24 +778,44 @@ def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
 def build_dangerous_dental_self_treatment_reply(user_text: str) -> str:
     """
     Safety reply for dangerous DIY dental questions.
-    Keep the wording specific to what the patient actually mentioned.
+    Keep the wording specific to what the patient actually mentioned,
+    while avoiding step-by-step medical or home-care instructions.
     """
     t = _norm_text(user_text)
-    base = "I can’t provide medical advice or home-care instructions in chat"
+
+    base = (
+        "I can’t provide medical advice or home-care instructions in chat. "
+    )
 
     if any(p in t for p in ["pull out", "pull my tooth", "pull a tooth", "take out my tooth", "extract my tooth", "yank", "rip out", "pliers"]):
-        return f"{base}, but please do not try to pull out a tooth yourself."
+        return (
+            f"{base}"
+            "A tooth extraction should be handled by a dental professional and should not be attempted at home."
+        )
 
     if any(p in t for p in ["use glue", "super glue", "glue it", "glue my tooth"]):
-        return f"{base}, but please do not use household glue or adhesives in your mouth."
+        return (
+            f"{base}"
+            "Household glue or adhesives are not appropriate for dental treatment. "
+            "A dental professional should evaluate it."
+        )
 
     if any(p in t for p in ["floss string", "with floss", "use floss to pull"]):
-        return f"{base}, but please do not try to pull a tooth using floss or string."
+        return (
+            f"{base}"
+            "Trying to remove a tooth with floss or string should be handled by a dental professional, not at home."
+        )
 
     if any(p in t for p in ["paper towel", "baby wipe", "baby wipes"]):
-        return f"{base}, but please do not use household items as a substitute for dental care."
+        return (
+            f"{base}"
+            "This should be evaluated by a dental professional rather than handled with household items."
+        )
 
-    return f"{base}, but please avoid trying to treat this yourself."
+    return (
+        f"{base}"
+        "This should be evaluated by a dental professional."
+    )
 
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABELS = {
