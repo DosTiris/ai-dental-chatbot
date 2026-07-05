@@ -785,6 +785,39 @@ def build_self_harm_crisis_reply() -> str:
         "You can also call or text 988 to reach the Suicide & Crisis Lifeline."
     )
 
+def looks_like_emergency_service_confusion(user_text: str) -> bool:
+    """Detect when the user thinks Mia may be 911 or emergency services."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    phrases = [
+        "is this 911",
+        "is this nine one one",
+        "is this emergency services",
+        "is this emergency service",
+        "is this the police",
+        "is this police",
+        "is this an ambulance",
+        "is this ambulance",
+        "am i calling 911",
+        "am i texting 911",
+        "did i call 911",
+        "did i text 911",
+        "are you 911",
+        "are you emergency services",
+        "are you the police",
+    ]
+
+    return any(p in t for p in phrases)
+
+
+def build_emergency_service_confusion_reply() -> str:
+    return (
+        "No — this is the dental office’s AI receptionist, not 911.\n\n"
+        "If this is a medical emergency or someone is in immediate danger, please call 911 now."
+    )
+
 def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     t = _norm_text(user_text)
     dangerous_action = any(p in t for p in [
@@ -3876,6 +3909,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             },
         )
 
+    # =========================================================
+    # 911 / emergency-service confusion guard
+    # =========================================================
+    if looks_like_emergency_service_confusion(user_text):
+        reply_text = build_emergency_service_confusion_reply()
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "emergency_service_confusion",
+                "faq_match": False,
+                "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
 
     # =========================================================
     # Early question guard
