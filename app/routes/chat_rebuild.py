@@ -1195,6 +1195,30 @@ def build_specific_day_hours_answer(client, day_key: str) -> Optional[str]:
 
     return f"Yes — the office is open on {day_name} from {_format_time_label(start)} to {_format_time_label(end)}."
 
+def looks_like_general_hours_request(user_text: str) -> bool:
+    """Detect general office-hours questions without handling specific-day questions here."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    # Specific day questions are handled by detect_specific_hours_day().
+    if detect_specific_hours_day(user_text):
+        return False
+
+    phrases = [
+        "hours",
+        "office hours",
+        "business hours",
+        "what are your hours",
+        "when are you open",
+        "when do you open",
+        "when do you close",
+        "what time do you open",
+        "what time do you close",
+    ]
+
+    return any(p in t for p in phrases)
+
 def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
     if not hhmm or ":" not in hhmm:
         return None
@@ -2664,6 +2688,31 @@ def last_assistant_was_final_handoff(db: Session, conversation_id: uuid.UUID) ->
     ]
 
     return any(p in t for p in final_signatures)
+
+def last_assistant_requested_time_correction(db: Session, conversation_id: uuid.UUID) -> bool:
+    """
+    Detect when Mia recently asked the patient to choose a better day/time.
+    This prevents Mia from jumping to name/phone too early if the patient asks for hours first.
+    """
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+
+    return any(p in t for p in [
+        "what day time works better for you",
+        "what day time window works better for you",
+        "what day time would work better for you",
+        "what day and time works better for you",
+    ])
 
 
 def build_conversation_ending_reply(conversation: Conversation) -> str:
@@ -4137,6 +4186,59 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "show_start_over": show_start_over,
             },
         )
+
+    # =========================================================
+    # Pending time correction guard
+    # =========================================================
+    if last_assistant_requested_time_correction(db, conversation.id):
+        detected_tw = detect_time_window(user_text, client)
+
+        if looks_like_general_hours_request(user_text):
+            hours_text = build_office_hours_answer(client) or "Please call the office for current hours."
+            reply_text = f"{hours_text}\n\nWhat day/time works better for you?"
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "pending_time_hours_answer",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
+        if detected_tw:
+            time_issue_reply = build_time_window_issue_reply(client, detected_tw)
+
+            if time_issue_reply:
+                reply_text = time_issue_reply
+            else:
+                conversation.is_lead = True
+                conversation.lead_time_window = detected_tw
+
+                if hasattr(conversation, "lead_outside_hours_note"):
+                    conversation.lead_outside_hours_note = None
+
+                db.add(conversation)
+                db.commit()
+                db.refresh(conversation)
+
+                reply_text = _next_intake_prompt(client, conversation)
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "pending_time_correction",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
 
     # =========================================================
     # Office phone request guard
