@@ -2715,9 +2715,57 @@ def last_assistant_requested_time_correction(db: Session, conversation_id: uuid.
     ])
 
 
+def conversation_has_symptom_or_safety_reason(conversation: Conversation) -> bool:
+    """
+    Detect whether the lead is symptom/safety based.
+    This keeps urgent wording for pain/bleeding/trauma cases,
+    but avoids emergency-style endings for implant/cosmetic consultations.
+    """
+    reason_parts = [
+        getattr(conversation, "lead_reason", "") or "",
+        getattr(conversation, "lead_reason_source_text", "") or "",
+        getattr(conversation, "lead_time_window", "") or "",
+    ]
+
+    t = _norm_text(" ".join(reason_parts))
+
+    symptom_terms = [
+        "tooth pain",
+        "pain",
+        "hurt",
+        "hurts",
+        "bleeding",
+        "blood",
+        "swelling",
+        "swollen",
+        "trauma",
+        "injury",
+        "injured",
+        "fell",
+        "fall",
+        "broken",
+        "broke",
+        "cracked",
+        "chipped",
+        "knocked out",
+        "infection",
+        "abscess",
+        "emergency",
+    ]
+
+    return any(term in t for term in symptom_terms)
+
+
 def build_conversation_ending_reply(conversation: Conversation) -> str:
-    if bool(getattr(conversation, "lead_is_emergency", False)) or bool(getattr(conversation, "lead_is_priority", False)):
+    is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
+    is_priority = bool(getattr(conversation, "lead_is_priority", False))
+    has_symptom_reason = conversation_has_symptom_or_safety_reason(conversation)
+
+    if is_emergency or (is_priority and has_symptom_reason):
         return "You’re welcome. If anything gets worse, please call the office right away."
+
+    if is_priority:
+        return "You’re welcome. The office team will follow up shortly."
 
     return "You’re welcome. Please contact the office if you need anything else."
 
