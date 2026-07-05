@@ -818,6 +818,66 @@ def build_emergency_service_confusion_reply() -> str:
         "If this is a medical emergency or someone is in immediate danger, please call 911 now."
     )
 
+def looks_like_complaint_or_discrimination_concern(user_text: str) -> bool:
+    """Detect complaints or discrimination concerns without starting appointment intake."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    complaint_terms = [
+        "racist",
+        "discriminated",
+        "discrimination",
+        "treated me unfairly",
+        "unfair treatment",
+        "complaint",
+        "complain",
+        "report the doctor",
+        "report my dentist",
+        "report the dentist",
+        "doctor was rude",
+        "dentist was rude",
+        "staff was rude",
+        "front desk was rude",
+        "they were rude",
+        "he was rude",
+        "she was rude",
+        "doctor yelled",
+        "dentist yelled",
+        "bad experience",
+        "terrible experience",
+        "unprofessional",
+        "mistreated",
+        "they mistreated me",
+    ]
+
+    office_context_terms = [
+        "doctor",
+        "dentist",
+        "staff",
+        "front desk",
+        "office",
+        "hygienist",
+        "assistant",
+        "receptionist",
+        "they",
+        "he",
+        "she",
+    ]
+
+    has_complaint = any(p in t for p in complaint_terms)
+    has_office_context = any(p in t for p in office_context_terms)
+
+    return has_complaint and has_office_context
+
+
+def build_complaint_or_discrimination_reply(office_phone: str) -> str:
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    return (
+        "I’m sorry to hear that. I can’t investigate or resolve complaints in chat.\n\n"
+        f"Please contact the office directly at {phone} so the team can address your concern appropriately."
+    )
+
 def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     t = _norm_text(user_text)
     dangerous_action = any(p in t for p in [
@@ -3922,6 +3982,25 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "mode": "emergency_service_confusion",
+                "faq_match": False,
+                "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Complaint / discrimination concern guard
+    # =========================================================
+    if looks_like_complaint_or_discrimination_concern(user_text):
+        reply_text = build_complaint_or_discrimination_reply(office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "complaint_or_discrimination_concern",
                 "faq_match": False,
                 "hide_booking_button": True,
                 "show_start_over": show_start_over,
