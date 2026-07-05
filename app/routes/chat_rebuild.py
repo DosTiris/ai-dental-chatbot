@@ -2282,6 +2282,110 @@ def last_assistant_asked_for_question(db: Session, conversation_id: uuid.UUID) -
     ]
     return any(p in t for p in prompts)
 
+def looks_like_explicit_conversation_ending(user_text: str) -> bool:
+    """Detect clear conversation-ending messages."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    ending_phrases = {
+        "thanks that s all",
+        "thank you that s all",
+        "thats all",
+        "that s all",
+        "that is all",
+        "that s it",
+        "thats it",
+        "that is it",
+        "all good",
+        "i m good",
+        "im good",
+        "no thanks",
+        "no thank you",
+        "nothing else",
+        "bye",
+        "goodbye",
+    }
+
+    if t in ending_phrases:
+        return True
+
+    if ("thanks" in t or "thank you" in t or "thx" in t) and any(
+        p in t for p in ["that s all", "thats all", "that s it", "thats it", "all good", "nothing else"]
+    ):
+        return True
+
+    return False
+
+
+def looks_like_simple_thanks(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    return t in {
+        "thanks",
+        "thank you",
+        "thx",
+        "appreciate it",
+        "thank you so much",
+        "thanks so much",
+    }
+
+
+def looks_like_acknowledgement_after_final(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    return t in {
+        "ok",
+        "okay",
+        "perfect",
+        "great",
+        "sounds good",
+        "got it",
+        "thank you",
+        "thanks",
+        "thx",
+        "ok thanks",
+        "okay thanks",
+        "ok thank you",
+        "okay thank you",
+        "ok thanls",
+        "thanls",
+    }
+
+
+def last_assistant_was_final_handoff(db: Session, conversation_id: uuid.UUID) -> bool:
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+
+    final_signatures = [
+        "we ve got your request",
+        "team will contact you shortly",
+        "office team will call you back shortly",
+        "they ll reach out shortly",
+        "flagged this as urgent",
+        "mark this as urgent",
+        "will call you back shortly",
+        "reach out shortly",
+        "contact you shortly",
+    ]
+
+    return any(p in t for p in final_signatures)
+
+
+def build_conversation_ending_reply(conversation: Conversation) -> str:
+    if bool(getattr(conversation, "lead_is_emergency", False)) or bool(getattr(conversation, "lead_is_priority", False)):
+        return "You’re welcome. If anything gets worse, please call the office right away."
+
+    return "You’re welcome. Please contact the office if you need anything else."
+
 def last_assistant_asked_for_phone(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
         db.query(Message)
@@ -3620,6 +3724,31 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             },
         )
     
+    # =========================================================
+    # Conversation ending guard
+    # =========================================================
+    explicit_done = looks_like_explicit_conversation_ending(user_text)
+    simple_thanks_done = looks_like_simple_thanks(user_text) and not in_intake_mode
+    ack_after_final = (
+        looks_like_acknowledgement_after_final(user_text)
+        and last_assistant_was_final_handoff(db, conversation.id)
+    )
+
+    if explicit_done or simple_thanks_done or ack_after_final:
+        reply_text = build_conversation_ending_reply(conversation)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "conversation_ending",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
     # =========================================================
     # Office phone request guard
     # =========================================================
