@@ -1977,11 +1977,8 @@ def handle_time_window_capture(
         if not (conversation.lead_phone or "").strip():
             return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", True)
 
-        if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
-            return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", True)
-
-        if getattr(conversation, "lead_is_new_patient", None) is None:
-            return (f"One quick question — {conversation.lead_name}, are you a new or returning patient?", True)
+        if priority_intake_is_complete(conversation):
+            return (build_priority_handoff_reply(conversation), True)
 
         next_open_day = get_next_open_day_label(client, now_local)
 
@@ -3334,6 +3331,25 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
 
     return (f"Thanks! We’ve got your request—our team will contact you shortly to confirm the appointment time.")
 
+def priority_intake_is_complete(conversation: Conversation) -> bool:
+    """Priority non-emergency leads only need name + phone."""
+    return (
+        bool(getattr(conversation, "lead_is_priority", False))
+        and not bool(getattr(conversation, "lead_is_emergency", False))
+        and bool((conversation.lead_name or "").strip())
+        and bool((conversation.lead_phone or "").strip())
+    )
+
+
+def build_priority_handoff_reply(conversation: Conversation) -> str:
+    name = (conversation.lead_name or "").strip()
+    name_part = f", {name}" if name else ""
+
+    return (
+        f"Thanks{name_part} — I’ll mark this as urgent for the team.\n\n"
+        "The office team will call you back shortly."
+    )
+
 def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_prefix = f"{name}, " if name else ""
@@ -3342,6 +3358,8 @@ def _next_intake_prompt(client: Client, conversation) -> str:
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
         return "Thanks — what’s the best phone number to reach you?"
+    if priority_intake_is_complete(conversation):
+        return build_priority_handoff_reply(conversation)
     if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
         return "What’s your email? (You can also type 'skip'.)"
     if not (getattr(conversation, "lead_time_window", None) or "").strip():
@@ -4551,6 +4569,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         # another intake question underneath it. This prevents messages like:
         # "Are you a new or returning patient?" + "Are you a new patient?"
         next_prompt = _next_intake_prompt(client, conversation)
+
+        if priority_intake_is_complete(conversation):
+            next_prompt = None
 
         if next_prompt:
             combined_norm = (combined_reply or "").strip().lower()
