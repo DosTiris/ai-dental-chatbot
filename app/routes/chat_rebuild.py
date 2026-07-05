@@ -3923,7 +3923,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Service availability question guard
     # =========================================================
-    if looks_like_service_question(user_text) and not in_intake_mode:
+    if looks_like_service_question(user_text) and not has_any_lead_data and not accepted_schedule:
         reply_text = build_service_question_reply(user_text)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
