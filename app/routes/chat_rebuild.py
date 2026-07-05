@@ -775,6 +775,28 @@ def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     dental_context = any(p in t for p in ["tooth", "teeth", "bleeding", "gum", "gums", "mouth"])
     return dangerous_action and dental_context
 
+def build_dangerous_dental_self_treatment_reply(user_text: str) -> str:
+    """
+    Safety reply for dangerous DIY dental questions.
+    Keep the wording specific to what the patient actually mentioned.
+    """
+    t = _norm_text(user_text)
+    base = "I can’t provide medical advice or home-care instructions in chat"
+
+    if any(p in t for p in ["pull out", "pull my tooth", "pull a tooth", "take out my tooth", "extract my tooth", "yank", "rip out", "pliers"]):
+        return f"{base}, but please do not try to pull out a tooth yourself."
+
+    if any(p in t for p in ["use glue", "super glue", "glue it", "glue my tooth"]):
+        return f"{base}, but please do not use household glue or adhesives in your mouth."
+
+    if any(p in t for p in ["floss string", "with floss", "use floss to pull"]):
+        return f"{base}, but please do not try to pull a tooth using floss or string."
+
+    if any(p in t for p in ["paper towel", "baby wipe", "baby wipes"]):
+        return f"{base}, but please do not use household items as a substitute for dental care."
+
+    return f"{base}, but please avoid trying to treat this yourself."
+
 DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAY_LABELS = {
     "mon": "Mon",
@@ -3672,10 +3694,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(conversation)
 
-        reply_text = (
-            "I can’t provide medical advice or home-care instructions in chat, "
-            "but please do not try to pull out a tooth yourself or use household materials like glue in your mouth."
-        )
+        reply_text = build_dangerous_dental_self_treatment_reply(user_text)
 
         if is_true_emergency:
             reply_text = (
