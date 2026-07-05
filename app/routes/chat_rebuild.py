@@ -878,6 +878,62 @@ def build_complaint_or_discrimination_reply(office_phone: str) -> str:
         f"Please contact the office directly at {phone} so the team can address your concern appropriately."
     )
 
+def looks_like_legal_or_lawsuit_concern(user_text: str) -> bool:
+    """Detect legal threats/lawsuit questions without giving legal advice or starting intake."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    legal_terms = [
+        "sue",
+        "how do i sue",
+        "can i sue",
+        "should i sue",
+        "lawsuit",
+        "law suit",
+        "legal action",
+        "legal claim",
+        "file a claim",
+        "malpractice",
+        "negligence",
+        "lawyer",
+        "attorney",
+        "court",
+        "settlement",
+        "legal advice",
+    ]
+
+    office_context_terms = [
+        "dentist",
+        "doctor",
+        "hygienist",
+        "assistant",
+        "staff",
+        "office",
+        "broke my tooth",
+        "broke a tooth",
+        "damaged my tooth",
+        "hurt me",
+        "injured me",
+        "messed up",
+        "procedure",
+        "treatment",
+    ]
+
+    has_legal_term = any(p in t for p in legal_terms)
+    has_office_context = any(p in t for p in office_context_terms)
+
+    return has_legal_term and has_office_context
+
+
+def build_legal_or_lawsuit_reply(office_phone: str) -> str:
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    return (
+        "I can’t provide legal advice in chat.\n\n"
+        "For legal questions, please contact a qualified attorney. "
+        f"If you need dental care or want to speak with the office about your concern, please call the office directly at {phone}."
+    )
+
 def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     t = _norm_text(user_text)
     dangerous_action = any(p in t for p in [
@@ -4001,6 +4057,25 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "mode": "complaint_or_discrimination_concern",
+                "faq_match": False,
+                "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Legal threat / lawsuit concern guard
+    # =========================================================
+    if looks_like_legal_or_lawsuit_concern(user_text):
+        reply_text = build_legal_or_lawsuit_reply(office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "legal_or_lawsuit_concern",
                 "faq_match": False,
                 "hide_booking_button": True,
                 "show_start_over": show_start_over,
