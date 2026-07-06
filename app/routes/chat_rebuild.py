@@ -2032,6 +2032,53 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
 
     return email_sent, sms_sent, email_send_error, sms_send_error
 
+
+def lead_is_ready_for_office_notification(conversation: Conversation) -> bool:
+    """
+    A lead is notification-ready once Mia has at least a name and phone number.
+    This is important for urgent/short flows and conversation-ending flows.
+    """
+    has_name = bool((getattr(conversation, "lead_name", None) or "").strip())
+    has_phone = bool((getattr(conversation, "lead_phone", None) or "").strip())
+    is_lead = bool(getattr(conversation, "is_lead", False))
+
+    return is_lead and has_name and has_phone
+
+
+def finalize_and_notify_if_ready(
+    db: Session,
+    client: Client,
+    conversation: Conversation,
+) -> tuple[bool, bool, Optional[str], Optional[str]]:
+    """
+    Final safety net: if the lead has enough info and has not notified the office yet,
+    mark completed and send the internal office SMS/email.
+    """
+    if not lead_is_ready_for_office_notification(conversation):
+        return (
+            bool(getattr(conversation, "lead_email_sent", False)),
+            bool(getattr(conversation, "lead_sms_sent", False)),
+            None,
+            None,
+        )
+
+    if (getattr(conversation, "lead_status", None) or "").strip() != "completed":
+        conversation.lead_status = "completed"
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    if bool(getattr(conversation, "lead_email_sent", False)) and bool(getattr(conversation, "lead_sms_sent", False)):
+        return True, True, None, None
+
+    print("✅ FINALIZE AND NOTIFY SAFETY NET TRIGGERED")
+
+    return notify_office_of_completed_lead(
+        db,
+        client,
+        conversation,
+    )
+
 # =========================================================
 # Week 3 fields (email opt-out + new/returning + time window)
 # =========================================================
@@ -4291,6 +4338,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if explicit_done or simple_thanks_done or ack_after_final:
         reply_text = build_conversation_ending_reply(conversation)
 
+        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = finalize_and_notify_if_ready(
+            db,
+            client,
+            conversation,
+        )
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -4299,6 +4352,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={
                 "mode": "conversation_ending",
                 "faq_match": False,
+                "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
+                "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
+                "lead_email_error": lead_email_error,
+                "lead_sms_error": lead_sms_error,
                 "show_start_over": show_start_over,
             },
         )
