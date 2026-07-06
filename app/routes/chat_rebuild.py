@@ -1964,6 +1964,74 @@ def send_office_lead_email(to_email: str, subject: str, body_text: str) -> None:
 
     resend.Emails.send(params)
 
+
+def notify_office_of_completed_lead(db: Session, client: Client, conversation: Conversation) -> tuple[bool, bool, Optional[str], Optional[str]]:
+    """
+    Send internal office SMS/email once a lead is completed.
+    This restores the notification trigger after the rebuilt chat flow.
+    """
+    staff_summary = build_staff_lead_summary(client, conversation)
+
+    try:
+        staff_sms = build_staff_lead_sms(client, conversation)
+    except Exception:
+        staff_sms = staff_summary
+
+    office_notify_email = (getattr(client, "notification_email", None) or "").strip()
+    office_notify_phone = (getattr(client, "notification_phone", None) or "").strip()
+
+    print("[LEAD_NOTIFY_EMAIL]", office_notify_email)
+    print("[LEAD_NOTIFY_PHONE]", office_notify_phone)
+    print("[LEAD_SUMMARY]\n" + staff_summary)
+    print("[LEAD_SMS]\n" + staff_sms)
+
+    email_send_error = None
+    sms_send_error = None
+
+    email_sent = bool(getattr(conversation, "lead_email_sent", False))
+    sms_sent = bool(getattr(conversation, "lead_sms_sent", False))
+
+    subject_prefix = "New appointment request"
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        subject_prefix = "URGENT emergency lead"
+    elif bool(getattr(conversation, "lead_is_priority", False)):
+        subject_prefix = "Priority appointment request"
+
+    practice_name = getattr(client, "practice_name", "Dental Office") or "Dental Office"
+
+    try:
+        if office_notify_email and not email_sent:
+            send_office_lead_email(
+                to_email=office_notify_email,
+                subject=f"{subject_prefix} - {practice_name}",
+                body_text=staff_summary,
+            )
+            conversation.lead_email_sent = True
+            email_sent = True
+            print("✅ LEAD EMAIL SENT")
+    except Exception as e:
+        email_send_error = str(e)
+        print("[LEAD_EMAIL_ERROR]", email_send_error)
+
+    try:
+        if office_notify_phone and not sms_sent:
+            send_office_lead_sms(
+                to_phone=office_notify_phone,
+                body=staff_sms,
+            )
+            conversation.lead_sms_sent = True
+            sms_sent = True
+            print("✅ LEAD SMS SENT")
+    except Exception as e:
+        sms_send_error = str(e)
+        print("[LEAD_SMS_ERROR]", sms_send_error)
+
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+
+    return email_sent, sms_sent, email_send_error, sms_send_error
+
 # =========================================================
 # Week 3 fields (email opt-out + new/returning + time window)
 # =========================================================
@@ -4674,6 +4742,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             print("🔥 EMERGENCY COMPLETION TRIGGERED")
 
             conversation.lead_status = "completed"
+            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+            db,
+            client,
+            conversation,
+        )
 
             staff_summary = build_staff_lead_summary(client, conversation)
             staff_sms = build_staff_lead_sms(client, conversation)
@@ -5580,6 +5653,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     if lead_capture_complete and (conversation.lead_status or "").strip().lower() != "completed":
         conversation.lead_status = "completed"
+        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+            db,
+            client,
+            conversation,
+        )
 
         staff_summary = build_staff_lead_summary(client, conversation)
         staff_sms = build_staff_lead_sms(client, conversation)
