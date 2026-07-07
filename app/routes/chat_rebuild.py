@@ -1283,6 +1283,120 @@ def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
 
     return None
 
+def extract_bare_office_hour_time_window(client: Client, user_text: str) -> Optional[str]:
+    """
+    Convert bare dental-office times into explicit AM/PM when office hours make it obvious.
+
+    Examples:
+    - "wed 9" -> "wed 9am" if 9 AM is open and 9 PM is closed
+    - "monday 3" -> "monday 3pm" if 3 PM is open and 3 AM is closed
+    - "today at 1" -> "today 1pm" if 1 PM is open and 1 AM is closed
+
+    Explicit AM/PM like "today at 1am" is not changed.
+    """
+    raw = (user_text or "").strip()
+    t = _norm_text(raw)
+    if not t:
+        return None
+
+    # Do not override explicit AM/PM.
+    if re.search(r"\b(am|pm|a\.m\.|p\.m\.)\b", t):
+        return None
+
+    day_pattern = (
+        r"(?P<day>"
+        r"today|tomorrow|"
+        r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+        r"fri(?:day)?|sat(?:urday)?|sun(?:day)?"
+        r")"
+    )
+
+    m = re.search(
+        rf"\b{day_pattern}\s*(?:at\s*)?(?P<hour>\d{{1,2}})(?P<minute>:\d{{2}})?\b",
+        t,
+    )
+    if not m:
+        return None
+
+    day_raw = m.group("day")
+    hour = int(m.group("hour"))
+    minute_text = m.group("minute") or ""
+    minute = int(minute_text.replace(":", "") or "0")
+
+    if hour < 1 or hour > 12 or minute < 0 or minute > 59:
+        return None
+
+    def _loose_day_key(day_text: str) -> Optional[str]:
+        day_text = (day_text or "").lower().strip()
+        today_key = get_client_now(client).strftime("%a").lower()[:3]
+        order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+        if day_text == "today":
+            return today_key
+
+        if day_text == "tomorrow":
+            try:
+                return order[(order.index(today_key) + 1) % 7]
+            except ValueError:
+                return None
+
+        if day_text.startswith("mon"):
+            return "mon"
+        if day_text.startswith("tue"):
+            return "tue"
+        if day_text.startswith("wed"):
+            return "wed"
+        if day_text.startswith("thu"):
+            return "thu"
+        if day_text.startswith("fri"):
+            return "fri"
+        if day_text.startswith("sat"):
+            return "sat"
+        if day_text.startswith("sun"):
+            return "sun"
+
+        return None
+
+    day_key = _loose_day_key(day_raw)
+    if not day_key:
+        return None
+
+    hours = get_office_hours_struct(client)
+    row = hours.get(day_key, {}) or {}
+
+    if not bool(row.get("open", False)):
+        return None
+
+    start_minutes = _parse_hhmm_to_minutes(row.get("start"))
+    end_minutes = _parse_hhmm_to_minutes(row.get("end"))
+
+    if start_minutes is None or end_minutes is None:
+        return None
+
+    am_hour = 0 if hour == 12 else hour
+    pm_hour = 12 if hour == 12 else hour + 12
+
+    am_minutes = am_hour * 60 + minute
+    pm_minutes = pm_hour * 60 + minute
+
+    am_is_open = start_minutes <= am_minutes < end_minutes
+    pm_is_open = start_minutes <= pm_minutes < end_minutes
+
+    suffix = None
+
+    if am_is_open and not pm_is_open:
+        suffix = "am"
+    elif pm_is_open and not am_is_open:
+        suffix = "pm"
+    elif am_is_open and pm_is_open:
+        # Rare, but if both are valid, prefer AM for bare "9" style dental-office requests.
+        suffix = "am"
+    else:
+        return None
+
+    minute_part = minute_text if minute_text else ""
+    return f"{day_raw} {hour}{minute_part}{suffix}"
+
 def _minutes_to_time_token(minutes: int) -> str:
     h = minutes // 60
     m = minutes % 60
@@ -2435,7 +2549,7 @@ def time_window_has_detail(tw: Optional[str]) -> bool:
     # Bare hour after a day token, like "Wed 9" or "Monday 3".
     # If a dental-office time can be inferred, treat it as specific enough.
     day_token = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
-    if re.search(rf"\b{day_token}\s+(?:at\s+)?\d{{1,2}}(?::\d{{2}})?\b", tl):
+    if re.search(rf"\b{day_token}\s+(?:at\s+)?\d{{1,2}}(?::\d{{2}})?\s*(am|pm)?\b", tl):
         return True
 
     return False
@@ -2489,6 +2603,9 @@ def handle_time_window_capture(
 ) -> Tuple[Optional[str], bool]:
     current_tw = (getattr(conversation, "lead_time_window", None) or "").strip()
     detected_tw = detect_time_window(user_text, client)
+    bare_office_tw = extract_bare_office_hour_time_window(client, user_text)
+    if bare_office_tw:
+        detected_tw = bare_office_tw
     norm_user_text = _norm_text(user_text).strip()
     is_priority_time = looks_like_priority_time_request(user_text)
 
@@ -4514,6 +4631,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     if last_assistant_requested_time_correction(db, conversation.id):
         detected_tw = detect_time_window(user_text, client)
+        bare_office_tw = extract_bare_office_hour_time_window(client, user_text)
+        if bare_office_tw:
+            detected_tw = bare_office_tw
 
         if looks_like_general_hours_request(user_text):
             hours_text = build_office_hours_answer(client) or "Please call the office for current hours."
