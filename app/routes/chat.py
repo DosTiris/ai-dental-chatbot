@@ -5401,6 +5401,30 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 else:
                     combined_reply = next_prompt
 
+        lead_email_error = None
+        lead_sms_error = None
+
+        if (
+            priority_intake_is_complete(conversation)
+            and (conversation.lead_status or "").strip().lower() != "completed"
+        ):
+            print("✅ PRIORITY TIME WINDOW HANDOFF NOTIFY TRIGGERED")
+
+            conversation.lead_status = "completed"
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
+            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+                db,
+                client,
+                conversation,
+            )
+        else:
+            lead_email_sent = bool(getattr(conversation, "lead_email_sent", False))
+            lead_sms_sent = bool(getattr(conversation, "lead_sms_sent", False))
+
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=combined_reply))
         db.commit()
 
@@ -5410,6 +5434,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={
                 "mode": "time_window_capture",
                 "faq_match": False,
+                "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
+                "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
+                "lead_email_error": lead_email_error,
+                "lead_sms_error": lead_sms_error,
                 "show_start_over": show_start_over,
             }
         )
@@ -5829,6 +5857,27 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 bypass_stage = "reason_detail"
 
         if bypass_text:
+            lead_email_error = None
+            lead_sms_error = None
+
+            if (
+                bypass_stage == "complete"
+                and priority_intake_is_complete(conversation)
+                and (conversation.lead_status or "").strip().lower() != "completed"
+            ):
+                print("✅ PRIORITY BYPASS HANDOFF NOTIFY TRIGGERED")
+
+                conversation.lead_status = "completed"
+                db.add(conversation)
+                db.commit()
+                db.refresh(conversation)
+
+                lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+                    db,
+                    client,
+                    conversation,
+                )
+
             db.add(Message(conversation_id=conversation.id, role="assistant", content=bypass_text))
             db.commit()
 
