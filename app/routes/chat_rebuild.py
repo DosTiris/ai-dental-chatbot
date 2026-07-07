@@ -934,6 +934,117 @@ def build_legal_or_lawsuit_reply(office_phone: str) -> str:
         f"If you need dental care or want to speak with the office about your concern, please call the office directly at {phone}."
     )
 
+def looks_like_personal_identity_or_relationship_topic(user_text: str) -> bool:
+    """
+    Detect personal identity / relationship questions or disclosures that are off-topic
+    for a dental receptionist.
+    """
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    assistant_identity_patterns = [
+        r"\bare you gay\b",
+        r"\bare u gay\b",
+        r"\bare you queer\b",
+        r"\bare u queer\b",
+        r"\bso you are gay\b",
+        r"\bso you are queer\b",
+        r"\bare you straight\b",
+        r"\bare you lgbt\b",
+        r"\bare you lesbian\b",
+        r"\bare you bisexual\b",
+        r"\bare you trans\b",
+        r"\bwhat gender are you\b",
+        r"\bare you male\b",
+        r"\bare you female\b",
+        r"\bare you married\b",
+        r"\bdo you have a boyfriend\b",
+        r"\bdo you have a girlfriend\b",
+        r"\bdo you have a husband\b",
+        r"\bdo you have a wife\b",
+    ]
+
+    user_disclosure_patterns = [
+        r"\bi am gay\b",
+        r"\bi'm gay\b",
+        r"\bim gay\b",
+        r"\bi am queer\b",
+        r"\bi'm queer\b",
+        r"\bim queer\b",
+        r"\bi am lesbian\b",
+        r"\bi'm lesbian\b",
+        r"\bim lesbian\b",
+        r"\bi am bisexual\b",
+        r"\bi'm bisexual\b",
+        r"\bim bisexual\b",
+        r"\bi am trans\b",
+        r"\bi'm trans\b",
+        r"\bim trans\b",
+    ]
+
+    care_concern_patterns = [
+        r"\bdo you accept gay patients\b",
+        r"\bdo you take gay patients\b",
+        r"\bcan gay patients come here\b",
+        r"\bwill the office treat gay patients\b",
+        r"\bwill the dentist treat gay patients\b",
+    ]
+
+    all_patterns = assistant_identity_patterns + user_disclosure_patterns + care_concern_patterns
+    return any(re.search(p, t) for p in all_patterns)
+
+
+def build_personal_identity_or_relationship_reply(user_text: str, office_phone: str) -> str:
+    t = _norm_text(user_text)
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+
+    assistant_question_terms = [
+        "are you gay",
+        "are u gay",
+        "are you queer",
+        "are u queer",
+        "so you are gay",
+        "so you are queer",
+        "are you straight",
+        "are you lgbt",
+        "are you lesbian",
+        "are you bisexual",
+        "are you trans",
+        "what gender are you",
+        "are you male",
+        "are you female",
+        "are you married",
+        "do you have a boyfriend",
+        "do you have a girlfriend",
+        "do you have a husband",
+        "do you have a wife",
+    ]
+
+    care_concern_terms = [
+        "accept gay patients",
+        "take gay patients",
+        "gay patients come here",
+        "treat gay patients",
+    ]
+
+    if any(term in t for term in assistant_question_terms):
+        return (
+            "I’m Mia, the office’s AI receptionist, so I don’t have personal identity or relationships. "
+            "I can help with appointments, services, insurance, hours, or location."
+        )
+
+    if any(term in t for term in care_concern_terms):
+        return (
+            "I can help with appointment requests and general office information. "
+            f"If you have a specific concern you want the office team to address directly, please call the office at {phone}."
+        )
+
+    return (
+        "Thanks for sharing. I’m here to help with dental appointments, services, insurance, hours, or location. "
+        "How can I help?"
+    )
+
 def looks_like_dangerous_dental_instruction(user_text: str) -> bool:
     t = _norm_text(user_text)
     dangerous_action = any(p in t for p in [
@@ -4645,6 +4756,25 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation_id=str(conversation.id),
             meta={
                 "mode": "legal_or_lawsuit_concern",
+                "faq_match": False,
+                "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Personal identity / relationship off-topic guard
+    # =========================================================
+    if looks_like_personal_identity_or_relationship_topic(user_text) and not in_intake_mode:
+        reply_text = build_personal_identity_or_relationship_reply(user_text, office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "personal_identity_or_relationship_topic",
                 "faq_match": False,
                 "hide_booking_button": True,
                 "show_start_over": show_start_over,
