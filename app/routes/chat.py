@@ -1572,6 +1572,69 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
 
     return None
 
+def _extract_time_only_minutes_from_user_text(user_text: str) -> Optional[int]:
+    """
+    Detect explicit AM/PM times with no day attached.
+    Example: "appointment at 3am" -> 180.
+    Does not handle bare "3" because that is ambiguous.
+    """
+    t = _norm_text(user_text)
+    if not t:
+        return None
+
+    # If a day is present, let normal day/time logic handle it.
+    if re.search(r"\b(today|tomorrow|mon|monday|tue|tuesday|wed|wednesday|thu|thursday|fri|friday|sat|saturday|sun|sunday)\b", t):
+        return None
+
+    m = re.search(r"\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)\b", t)
+    if not m:
+        return None
+
+    hour = int(m.group(1))
+    minute = int(m.group(2) or "0")
+    suffix = m.group(3).replace(".", "").lower()
+
+    if hour < 1 or hour > 12 or minute < 0 or minute > 59:
+        return None
+
+    if suffix == "am":
+        hour_24 = 0 if hour == 12 else hour
+    else:
+        hour_24 = 12 if hour == 12 else hour + 12
+
+    return hour_24 * 60 + minute
+
+
+def time_only_request_is_outside_office_hours(client: Client, user_text: str) -> bool:
+    """
+    If the user gives only an exact AM/PM time and that time is outside
+    all normal open office windows, do not start intake.
+    """
+    req_minutes = _extract_time_only_minutes_from_user_text(user_text)
+    if req_minutes is None:
+        return False
+
+    hours = get_office_hours_struct(client)
+    saw_open_day = False
+
+    for _day_key, row in (hours or {}).items():
+        row = row or {}
+        if not bool(row.get("open", False)):
+            continue
+
+        start_minutes = _parse_hhmm_to_minutes(row.get("start"))
+        end_minutes = _parse_hhmm_to_minutes(row.get("end"))
+
+        if start_minutes is None or end_minutes is None:
+            continue
+
+        saw_open_day = True
+
+        if start_minutes <= req_minutes < end_minutes:
+            return False
+
+    return saw_open_day
+
 def build_hours_hint_text(client) -> Optional[str]:
     hours = get_office_hours_struct(client)
     if not hours:
@@ -4622,6 +4685,24 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
                 "lead_email_error": lead_email_error,
                 "lead_sms_error": lead_sms_error,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Time-only outside-hours guard
+    # =========================================================
+    if looks_like_scheduling_intent(user_text) and time_only_request_is_outside_office_hours(client, user_text):
+        reply_text = "That time is outside normal office hours. What day/time works better for you?"
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "time_only_outside_hours",
+                "faq_match": False,
                 "show_start_over": show_start_over,
             },
         )
