@@ -939,15 +939,28 @@ def looks_like_personal_identity_or_relationship_topic(user_text: str) -> bool:
     Detect personal identity / relationship questions or disclosures that are off-topic
     for a dental receptionist.
     """
+    raw = (user_text or "").strip().lower()
     t = _norm_text(user_text)
-    if not t:
+
+    if not t and not raw:
         return False
+
+    combined = f"{raw} {t}"
 
     assistant_identity_patterns = [
         r"\bare you gay\b",
         r"\bare u gay\b",
+        r"\byou are gay\b",
+        r"\byou re gay\b",
+        r"\byoure gay\b",
+        r"\byou're gay\b",
+        r"\bur gay\b",
         r"\bare you queer\b",
         r"\bare u queer\b",
+        r"\byou are queer\b",
+        r"\byou re queer\b",
+        r"\byoure queer\b",
+        r"\byou're queer\b",
         r"\bso you are gay\b",
         r"\bso you are queer\b",
         r"\bare you straight\b",
@@ -969,18 +982,23 @@ def looks_like_personal_identity_or_relationship_topic(user_text: str) -> bool:
         r"\bi am gay\b",
         r"\bi'm gay\b",
         r"\bim gay\b",
+        r"\bi m gay\b",
         r"\bi am queer\b",
         r"\bi'm queer\b",
         r"\bim queer\b",
+        r"\bi m queer\b",
         r"\bi am lesbian\b",
         r"\bi'm lesbian\b",
         r"\bim lesbian\b",
+        r"\bi m lesbian\b",
         r"\bi am bisexual\b",
         r"\bi'm bisexual\b",
         r"\bim bisexual\b",
+        r"\bi m bisexual\b",
         r"\bi am trans\b",
         r"\bi'm trans\b",
         r"\bim trans\b",
+        r"\bi m trans\b",
     ]
 
     care_concern_patterns = [
@@ -992,18 +1010,30 @@ def looks_like_personal_identity_or_relationship_topic(user_text: str) -> bool:
     ]
 
     all_patterns = assistant_identity_patterns + user_disclosure_patterns + care_concern_patterns
-    return any(re.search(p, t) for p in all_patterns)
+    return any(re.search(p, combined) for p in all_patterns)
 
 
 def build_personal_identity_or_relationship_reply(user_text: str, office_phone: str) -> str:
+    raw = (user_text or "").strip().lower()
     t = _norm_text(user_text)
+    combined = f"{raw} {t}"
+
     phone = (office_phone or "").strip() or "(555) 123-4567"
 
     assistant_question_terms = [
         "are you gay",
         "are u gay",
+        "you are gay",
+        "you re gay",
+        "youre gay",
+        "you're gay",
+        "ur gay",
         "are you queer",
         "are u queer",
+        "you are queer",
+        "you re queer",
+        "youre queer",
+        "you're queer",
         "so you are gay",
         "so you are queer",
         "are you straight",
@@ -1028,13 +1058,13 @@ def build_personal_identity_or_relationship_reply(user_text: str, office_phone: 
         "treat gay patients",
     ]
 
-    if any(term in t for term in assistant_question_terms):
+    if any(term in combined for term in assistant_question_terms):
         return (
             "I’m Mia, the office’s AI receptionist, so I don’t have personal identity or relationships. "
             "I can help with appointments, services, insurance, hours, or location."
         )
 
-    if any(term in t for term in care_concern_terms):
+    if any(term in combined for term in care_concern_terms):
         return (
             "I can help with appointment requests and general office information. "
             f"If you have a specific concern you want the office team to address directly, please call the office at {phone}."
