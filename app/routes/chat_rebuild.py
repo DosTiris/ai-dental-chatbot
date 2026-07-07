@@ -1414,8 +1414,8 @@ def check_outside_hours(client: Client, time_window: Optional[str]) -> Tuple[boo
 
 def build_time_window_issue_reply(client: Client, time_window: Optional[str]) -> Optional[str]:
     """
-    Detect when a requested exact time is already in the past today
-    or outside the office's normal hours.
+    Detect when a requested exact time is outside office hours or already in the past today.
+    Outside-hours comes first so 1 AM / 3 AM does not get described as a normal past appointment time.
     """
     if not time_window:
         return None
@@ -1428,14 +1428,6 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     if req_minutes is None:
         return None
 
-    now_local = get_client_now(client)
-    today_key = now_local.strftime("%a").lower()[:3]
-    now_minutes = now_local.hour * 60 + now_local.minute
-
-    # If the requested time is today and already passed, ask for another time.
-    if day_key == today_key and req_minutes <= now_minutes:
-        return "That time has already passed today. What later time today or another day works better for you?"
-
     hours = get_office_hours_struct(client)
     row = hours.get(day_key, {}) or {}
 
@@ -1444,17 +1436,25 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     end_minutes = _parse_hhmm_to_minutes(row.get("end"))
 
     if not is_open:
+        now_local = get_client_now(client)
+        today_key = now_local.strftime("%a").lower()[:3]
+
         if day_key == today_key:
             return "The office is closed today. What day/time works better for you?"
 
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
         return f"The office is closed on {day_name}. What day/time works better for you?"
 
-    if start_minutes is None or end_minutes is None:
-        return None
+    if start_minutes is not None and end_minutes is not None:
+        if req_minutes < start_minutes or req_minutes >= end_minutes:
+            return "That time is outside normal office hours. What day/time works better for you?"
 
-    if req_minutes < start_minutes or req_minutes >= end_minutes:
-        return "That time is outside normal office hours. What day/time works better for you?"
+    now_local = get_client_now(client)
+    today_key = now_local.strftime("%a").lower()[:3]
+    now_minutes = now_local.hour * 60 + now_local.minute
+
+    if day_key == today_key and req_minutes <= now_minutes:
+        return "That time has already passed today. What later time today or another day works better for you?"
 
     return None
 
@@ -1853,6 +1853,60 @@ def pretty_lead_reason(reason: Optional[str]) -> str:
     return mapping.get((reason or "").strip(), (reason or "").strip() or "Not provided")
 
 
+def _explicit_urgency_requested(text: str) -> bool:
+    t = _norm_text(text)
+    urgent_terms = [
+        "asap",
+        "as soon as possible",
+        "earliest",
+        "earliest available",
+        "next available",
+        "right away",
+        "soon as possible",
+        "soonest",
+        "immediately",
+    ]
+    return any(term in t for term in urgent_terms)
+
+
+def lead_is_same_day_without_explicit_urgency(conversation: Conversation) -> bool:
+    """
+    Same-day appointment requests should be treated as priority,
+    but staff notifications should not display them as ASAP unless the user actually said ASAP/urgent.
+    """
+    source_text = getattr(conversation, "lead_reason_source_text", "") or ""
+    time_window = getattr(conversation, "lead_time_window", "") or ""
+
+    source_norm = _norm_text(source_text)
+    time_norm = _norm_text(time_window)
+
+    mentioned_today = "today" in source_norm or "today" in time_norm
+    if not mentioned_today:
+        return False
+
+    if _explicit_urgency_requested(source_text):
+        return False
+
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return False
+
+    if conversation_has_symptom_or_safety_reason(conversation):
+        return False
+
+    return True
+
+
+def pretty_staff_time_window(conversation: Conversation) -> str:
+    tw = (getattr(conversation, "lead_time_window", None) or "").strip()
+    if not tw:
+        return ""
+
+    # If same-day logic internally stored this as ASAP, make the staff label more accurate.
+    if tw.strip().lower() == "asap" and lead_is_same_day_without_explicit_urgency(conversation):
+        return "Today / same-day request"
+
+    return pretty_time_window(tw)
+
 def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     practice_name = getattr(client, "practice_name", None) or "Dental Office"
 
@@ -1878,7 +1932,7 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
         lines.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        lines.append(f"Preferred time: {pretty_time_window(conversation.lead_time_window)}")
+        lines.append(f"Preferred time: {pretty_staff_time_window(conversation)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         lines.append("Outside hours: Yes")
@@ -1914,7 +1968,7 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
         parts.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        parts.append(f"Time: {pretty_time_window(conversation.lead_time_window)}")
+        parts.append(f"Time: {pretty_staff_time_window(conversation)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         note = (getattr(conversation, "lead_outside_hours_note", None) or "").strip()
@@ -2101,9 +2155,29 @@ def finalize_and_notify_if_ready(
 # Week 3 fields (email opt-out + new/returning + time window)
 # =========================================================
 def detect_email_opt_out(user_text: str) -> bool:
-    t = (user_text or "").strip().lower()
-    email_phrases = [
+    raw = (user_text or "").strip().lower()
+    if not raw:
+        return False
+
+    t = re.sub(r"[^a-z0-9\s']", " ", raw)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    exact_skip_replies = {
+        "skip",
+        "skp",
+        "skip email",
+        "no",
+        "nope",
+        "nah",
+        "none",
         "no email",
+        "no e mail",
+    }
+
+    if t in exact_skip_replies:
+        return True
+
+    email_phrases = [
         "dont have email",
         "don't have email",
         "do not have email",
@@ -2111,11 +2185,11 @@ def detect_email_opt_out(user_text: str) -> bool:
         "rather not give my email",
         "i dont want to give my email",
         "i don't want to give my email",
-        "skip email",
-        "skip",
+        "skip my email",
+        "skip the email",
     ]
-    return any(p in t for p in email_phrases)
 
+    return any(p in t for p in email_phrases)
 
 def detect_new_patient_flag(user_text: str) -> Optional[bool]:
     t = (user_text or "").strip().lower()
@@ -2346,13 +2420,24 @@ def last_assistant_asked_asap_today_vs_tomorrow(db: Session, conversation_id: uu
 def time_window_has_detail(tw: Optional[str]) -> bool:
     if not tw:
         return False
+
     tl = (tw or "").lower()
+
     if re.search(r"\b(morning|morn|am|a\.m\.)\b|\b(afternoon|aft|pm|p\.m\.)\b|\b(evening|eve|night)\b", tl):
         return True
+
     if re.search(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", tl):
         return True
+
     if re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", tl):
         return True
+
+    # Bare hour after a day token, like "Wed 9" or "Monday 3".
+    # If a dental-office time can be inferred, treat it as specific enough.
+    day_token = r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+    if re.search(rf"\b{day_token}\s+(?:at\s+)?\d{{1,2}}(?::\d{{2}})?\b", tl):
+        return True
+
     return False
 
 
