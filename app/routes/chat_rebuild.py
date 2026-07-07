@@ -4795,7 +4795,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Personal identity / relationship off-topic guard
     # =========================================================
-    if looks_like_personal_identity_or_relationship_topic(user_text) and not in_intake_mode:
+    if looks_like_personal_identity_or_relationship_topic(user_text):
         reply_text = build_personal_identity_or_relationship_reply(user_text, office_phone)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
