@@ -1256,6 +1256,24 @@ def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
         mm = int(m24.group(2))
         return hh * 60 + mm
 
+    # Bare hour after a day token, like "Tue 1" or "Mon 4:45".
+    # In a dental-office context, 1–7 usually means PM, not early morning.
+    m_bare_day_time = re.search(
+        r"\b(?:mon|tue|wed|thu|fri|sat|sun)\s+(\d{1,2})(?::(\d{2}))?\b",
+        tl,
+    )
+    if m_bare_day_time:
+        hh = int(m_bare_day_time.group(1))
+        mm = int(m_bare_day_time.group(2) or "0")
+
+        if 1 <= hh <= 7:
+            hh += 12
+        elif hh == 12:
+            hh = 12
+
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            return hh * 60 + mm
+
     if "morning" in tl:
         return 9 * 60
     if "afternoon" in tl:
@@ -1396,7 +1414,7 @@ def check_outside_hours(client: Client, time_window: Optional[str]) -> Tuple[boo
 
 def build_time_window_issue_reply(client: Client, time_window: Optional[str]) -> Optional[str]:
     """
-    Detects when a requested exact time is already in the past today
+    Detect when a requested exact time is already in the past today
     or outside the office's normal hours.
     """
     if not time_window:
@@ -1416,7 +1434,7 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
 
     # If the requested time is today and already passed, ask for another time.
     if day_key == today_key and req_minutes <= now_minutes:
-        return "That time has already passed for today. What day/time works better for you?"
+        return "That time has already passed today. What later time today or another day works better for you?"
 
     hours = get_office_hours_struct(client)
     row = hours.get(day_key, {}) or {}
@@ -3996,8 +4014,54 @@ def build_priority_handoff_reply(conversation: Conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_part = f", {name}" if name else ""
 
+    reason_parts = [
+        getattr(conversation, "lead_reason", "") or "",
+        getattr(conversation, "lead_reason_source_text", "") or "",
+        getattr(conversation, "lead_time_window", "") or "",
+    ]
+    t = _norm_text(" ".join(reason_parts))
+
+    symptom_terms = [
+        "tooth pain",
+        "pain",
+        "hurt",
+        "hurts",
+        "bleeding",
+        "blood",
+        "swelling",
+        "swollen",
+        "trauma",
+        "injury",
+        "injured",
+        "fell",
+        "fall",
+        "broken",
+        "broke",
+        "cracked",
+        "chipped",
+        "knocked out",
+        "infection",
+        "abscess",
+        "emergency",
+    ]
+
+    has_symptom_reason = any(term in t for term in symptom_terms)
+    is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
+
+    if is_emergency or has_symptom_reason:
+        return (
+            f"Thanks{name_part} — I’ll mark this as urgent for the team.\n\n"
+            "The office team will call you back shortly."
+        )
+
+    if "today" in t:
+        return (
+            f"Thanks{name_part} — I’ll send this same-day appointment request to the team.\n\n"
+            "The office team will call you back shortly."
+        )
+
     return (
-        f"Thanks{name_part} — I’ll mark this as urgent for the team.\n\n"
+        f"Thanks{name_part} — I’ll send this priority appointment request to the team.\n\n"
         "The office team will call you back shortly."
     )
 
