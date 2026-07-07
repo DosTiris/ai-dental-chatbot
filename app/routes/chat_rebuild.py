@@ -1397,6 +1397,22 @@ def extract_bare_office_hour_time_window(client: Client, user_text: str) -> Opti
     minute_part = minute_text if minute_text else ""
     return f"{day_raw} {hour}{minute_part}{suffix}"
 
+def canonicalize_time_window_for_storage(client: Client, user_text: str) -> Optional[str]:
+    """
+    Return the best saved version of a user's time preference.
+    This makes sure inputs like 'wed 9' are saved as 'wed 9am'
+    when office hours make that obvious.
+    """
+    bare_tw = extract_bare_office_hour_time_window(client, user_text)
+    if bare_tw:
+        return bare_tw
+
+    detected_tw = detect_time_window(user_text, client)
+    if detected_tw:
+        return detected_tw
+
+    return None
+
 def _minutes_to_time_token(minutes: int) -> str:
     h = minutes // 60
     m = minutes % 60
@@ -2551,7 +2567,22 @@ def get_next_open_day_label(client, start_dt: datetime) -> Optional[str]:
 def time_window_has_specific_day(tw: Optional[str]) -> bool:
     if not tw:
         return False
-    return bool(re.search(r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", tw))
+
+    t = _norm_text(tw)
+
+    return bool(
+        re.search(
+            r"\b(today|tomorrow|"
+            r"mon|monday|"
+            r"tue|tuesday|"
+            r"wed|wednesday|"
+            r"thu|thursday|"
+            r"fri|friday|"
+            r"sat|saturday|"
+            r"sun|sunday)\b",
+            t,
+        )
+    )
 
 
 def looks_like_urgent_but_not_er(text: str) -> bool:
@@ -2665,10 +2696,7 @@ def handle_time_window_capture(
     last_assistant_text: str
 ) -> Tuple[Optional[str], bool]:
     current_tw = (getattr(conversation, "lead_time_window", None) or "").strip()
-    detected_tw = detect_time_window(user_text, client)
-    bare_office_tw = extract_bare_office_hour_time_window(client, user_text)
-    if bare_office_tw:
-        detected_tw = bare_office_tw
+    detected_tw = canonicalize_time_window_for_storage(client, user_text)
     norm_user_text = _norm_text(user_text).strip()
     is_priority_time = looks_like_priority_time_request(user_text)
 
@@ -4708,13 +4736,47 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     # =========================================================
+    # Intake time-window capture guard
+    # =========================================================
+    if in_intake_mode and not time_window_is_complete(getattr(conversation, "lead_time_window", None)):
+        canonical_tw = canonicalize_time_window_for_storage(client, user_text)
+
+        if canonical_tw:
+            time_issue_reply = build_time_window_issue_reply(client, canonical_tw)
+
+            if time_issue_reply:
+                reply_text = time_issue_reply
+            else:
+                conversation.lead_time_window = canonical_tw
+
+                if hasattr(conversation, "lead_outside_hours_note"):
+                    conversation.lead_outside_hours_note = None
+
+                db.add(conversation)
+                db.commit()
+                db.refresh(conversation)
+
+                reply_text = _next_intake_prompt(client, conversation)
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "intake_time_window_capture",
+                    "faq_match": False,
+                    "saved_time_window": getattr(conversation, "lead_time_window", None),
+                    "show_start_over": show_start_over,
+                },
+            )
+
+
+    # =========================================================
     # Pending time correction guard
     # =========================================================
     if last_assistant_requested_time_correction(db, conversation.id):
-        detected_tw = detect_time_window(user_text, client)
-        bare_office_tw = extract_bare_office_hour_time_window(client, user_text)
-        if bare_office_tw:
-            detected_tw = bare_office_tw
+        detected_tw = canonicalize_time_window_for_storage(client, user_text)
 
         if looks_like_general_hours_request(user_text):
             hours_text = build_office_hours_answer(client) or "Please call the office for current hours."
