@@ -2337,11 +2337,11 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     practice_name = getattr(client, "practice_name", None) or "Dental Office"
 
     if bool(getattr(conversation, "lead_is_emergency", False)):
-        lines = [f"🚨 EMERGENCY lead for {practice_name}"]
+        lines = [f"🚨 EMERGENCY dental concern  for {practice_name}"]
     elif bool(getattr(conversation, "lead_is_priority", False)):
-        lines = [f"🔥 PRIORITY lead for {practice_name}"]
+        lines = [f"🔥 PRIORITY appointment request for {practice_name}"]
     else:
-        lines = [f"✅ New appointment request for {practice_name}"]
+        lines = [f"✅ Appointment request for {practice_name}"]
 
     if (conversation.lead_name or "").strip():
         lines.append(f"Name: {conversation.lead_name}")
@@ -2382,11 +2382,11 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
     practice_name = getattr(client, "practice_name", None) or "Dental Office"
 
     if bool(getattr(conversation, "lead_is_emergency", False)):
-        parts = [f"🚨 EMERGENCY lead for {practice_name}"]
+        parts = [f"🚨 EMERGENCY dental concern for {practice_name}"]
     elif bool(getattr(conversation, "lead_is_priority", False)):
-        parts = [f"🔥 PRIORITY lead for {practice_name}"]
+        parts = [f"🔥 PRIORITY appointment request for {practice_name}"]
     else:
-        parts = [f"✅ New lead for {practice_name}"]
+        parts = [f"✅ Appointment request for {practice_name}"]
 
     if (conversation.lead_name or "").strip():
         parts.append(f"Name: {conversation.lead_name}")
@@ -2497,9 +2497,9 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
     email_sent = bool(getattr(conversation, "lead_email_sent", False))
     sms_sent = bool(getattr(conversation, "lead_sms_sent", False))
 
-    subject_prefix = "New appointment request"
+    subject_prefix = "Appointment request"
     if bool(getattr(conversation, "lead_is_emergency", False)):
-        subject_prefix = "URGENT emergency lead"
+        subject_prefix = "EMERGENCY dental concern"
     elif bool(getattr(conversation, "lead_is_priority", False)):
         subject_prefix = "Priority appointment request"
 
