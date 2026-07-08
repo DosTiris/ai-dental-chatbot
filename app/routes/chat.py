@@ -3569,6 +3569,24 @@ def build_short_symptom_handoff_reply(conversation: Conversation) -> str:
         "The office will contact you shortly to help with the next available appointment."
     )
 
+def reply_should_show_service_menu(reply_text: str) -> bool:
+    """
+    If Mia asks the generic service/reason question, tell the widget
+    to show the service choice buttons consistently.
+    """
+    t = _norm_text(reply_text or "")
+
+    return (
+        "what brings you in" in t
+        and "cleaning checkup" in t
+        and "tooth pain" in t
+        and "fillings" in t
+        and "braces invisalign" in t
+        and "whitening" in t
+        and "something else" in t
+    )
+
+
 def conversation_has_specific_lead_reason(conversation: Conversation) -> bool:
     """
     Generic 'appointment request' is not enough detail for a real lead.
@@ -5301,6 +5319,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     "mode": "intake_time_window_capture",
                     "faq_match": False,
                     "saved_time_window": getattr(conversation, "lead_time_window", None),
+                    "show_service_menu": reply_should_show_service_menu(reply_text),
                     "show_start_over": show_start_over,
                 },
             )
@@ -5354,6 +5373,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 meta={
                     "mode": "pending_time_correction",
                     "faq_match": False,
+                    "show_service_menu": reply_should_show_service_menu(reply_text),
                     "show_start_over": show_start_over,
                 },
             )
@@ -6378,6 +6398,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
                 "lead_email_error": lead_email_error,
                 "lead_sms_error": lead_sms_error,
+                "show_service_menu": reply_should_show_service_menu(combined_reply),
                 "show_start_over": show_start_over,
             }
         )
