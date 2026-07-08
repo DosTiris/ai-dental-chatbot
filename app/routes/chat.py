@@ -2070,21 +2070,34 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
     if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling"]):
         return "tooth pain"
     if any(k in t for k in [
-    "broken",
-    "broke",
-    "broke a tooth",
-    "broke tooth",
-    "broken tooth",
-    "cracked",
-    "cracked tooth",
-    "chipped",
-    "chipped tooth",
-    "fell out",
-    "filling fell out",
-    "lost filling",
-    "broke a filling",
-    "broke filling",
-    "broken filling",]): 
+        "broken",
+        "broke",
+        "broke a tooth",
+        "broke tooth",
+        "broken tooth",
+        "cracked",
+        "cracked tooth",
+        "chipped",
+        "chipped tooth",
+        "fell out",
+        "filling fell out",
+        "lost filling",
+        "broke a filling",
+        "broke filling",
+        "broken filling",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "tooth is shaky",
+        "tooth is shakey",
+        "tooth is skakey",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
+    ]):
         return "broken tooth/filling"
     if any(k in t for k in ["crown", "crowns", "cap", "caps"]):
         return "crown"
@@ -2150,7 +2163,27 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
     tl = t.lower()
 
     # Extra fallback phrases for free-text "other"
-    if any(k in tl for k in ["chip", "chipped", "crack", "cracked", "broken tooth", "lost filling", "filling fell out"]):
+    if any(k in tl for k in [
+        "chip",
+        "chipped",
+        "crack",
+        "cracked",
+        "broken tooth",
+        "lost filling",
+        "filling fell out",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "tooth is shaky",
+        "tooth is shakey",
+        "tooth is skakey",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
+    ]):
         return "broken tooth/filling"
 
     if any(k in tl for k in ["hurt", "hurts", "ache", "toothache", "pain", "sore tooth", "sore gum"]):
@@ -2324,8 +2357,9 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     if (conversation.lead_reason or "").strip():
         lines.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
-    if (getattr(conversation, "lead_reason_detail", None) or "").strip():
-        lines.append(f"Reason detail: {conversation.lead_reason_detail}")
+    reason_detail = get_other_reason_detail(conversation)
+    if reason_detail:
+        lines.append(f"Reason detail: {reason_detail}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
         lines.append(f"Preferred time: {pretty_staff_time_window(conversation)}")
@@ -2363,8 +2397,9 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
     if (conversation.lead_reason or "").strip():
         parts.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
-    if (getattr(conversation, "lead_reason_detail", None) or "").strip():
-        parts.append(f"Detail: {conversation.lead_reason_detail}")
+    reason_detail = get_other_reason_detail(conversation)
+    if reason_detail:
+        parts.append(f"Detail: {reason_detail}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
         parts.append(f"Time: {pretty_staff_time_window(conversation)}")
@@ -3556,6 +3591,7 @@ def mark_priority_if_symptom_lead(conversation: Conversation) -> bool:
     source_text = " ".join([
         getattr(conversation, "lead_reason_source_text", "") or "",
         getattr(conversation, "lead_reason_detail", "") or "",
+        get_other_reason_detail(conversation),
     ])
 
     if should_mark_reason_as_priority_symptom(reason, source_text):
@@ -3629,6 +3665,42 @@ def build_unsafe_reason_detail_reply() -> str:
         "“jaw pain,” “consultation,” or “something else.”"
     )
 
+def get_other_reason_detail(conversation: Conversation) -> str:
+    """
+    Return the patient's free-text Other reason.
+    Some databases may not have lead_reason_detail yet, so fall back to lead_reason_source_text
+    when the reason is a generic appointment request.
+    """
+    detail = (getattr(conversation, "lead_reason_detail", "") or "").strip()
+    if detail:
+        return detail[:120]
+
+    reason = (getattr(conversation, "lead_reason", "") or "").strip()
+    source = (getattr(conversation, "lead_reason_source_text", "") or "").strip()
+
+    if reason != "appointment request" or not source:
+        return ""
+
+    source_norm = _norm_text(source)
+
+    generic_sources = {
+        "i need an appointment",
+        "need an appointment",
+        "appointment",
+        "book appointment",
+        "book an appointment",
+        "schedule appointment",
+        "schedule an appointment",
+    }
+
+    if source_norm in generic_sources:
+        return ""
+
+    if looks_like_scheduling_intent(source) and not detect_appointment_reason(source):
+        return ""
+
+    return source[:120]
+
 def conversation_has_specific_lead_reason(conversation: Conversation) -> bool:
     """
     Generic 'appointment request' is not enough detail by itself.
@@ -3636,12 +3708,11 @@ def conversation_has_specific_lead_reason(conversation: Conversation) -> bool:
     that counts as a usable reason.
     """
     reason = (getattr(conversation, "lead_reason", "") or "").strip()
-    detail = (getattr(conversation, "lead_reason_detail", "") or "").strip()
 
     if reason and reason != "appointment request":
         return True
 
-    if reason == "appointment request" and detail:
+    if reason == "appointment request" and get_other_reason_detail(conversation):
         return True
 
     return False
