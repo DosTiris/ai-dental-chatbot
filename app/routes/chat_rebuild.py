@@ -2485,6 +2485,32 @@ def finalize_and_notify_if_ready(
         conversation,
     )
 
+
+def mark_completed_and_notify_office(
+    db: Session,
+    client: Client,
+    conversation: Conversation,
+    trigger_label: str = "LEAD NOTIFY TRIGGERED",
+) -> tuple[bool, bool, Optional[str], Optional[str]]:
+    """
+    Central helper for completed leads.
+    Marks the lead completed, then sends office SMS/email through the single notification helper.
+    This prevents duplicate notification logic in multiple chat branches.
+    """
+    if (getattr(conversation, "lead_status", None) or "").strip().lower() != "completed":
+        conversation.lead_status = "completed"
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    print(f"✅ {trigger_label}")
+
+    return notify_office_of_completed_lead(
+        db,
+        client,
+        conversation,
+    )
+
 # =========================================================
 # Week 3 fields (email opt-out + new/returning + time window)
 # =========================================================
@@ -5368,56 +5394,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
        # If we already have name + phone → STOP intake and send handoff message
         if (conversation.lead_name or "").strip() and (conversation.lead_phone or "").strip():
 
-            print("🔥 EMERGENCY COMPLETION TRIGGERED")
-
-            conversation.lead_status = "completed"
-            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
-            db,
-            client,
-            conversation,
-        )
-
-            staff_summary = build_staff_lead_summary(client, conversation)
-            staff_sms = build_staff_lead_sms(client, conversation)
-
-            print("[EMERGENCY_LEAD_SUMMARY]\n" + staff_summary)
-            print("[EMERGENCY_LEAD_SMS]\n" + staff_sms)
-
-            office_notify_email = (getattr(client, "notification_email", None) or "").strip()
-            office_notify_phone = (getattr(client, "notification_phone", None) or "").strip()
-            print("NOTIFY EMAIL:", office_notify_email)
-            print("NOTIFY PHONE:", office_notify_phone)
-            email_send_error = None
-            sms_send_error = None
-
-            try:
-                if office_notify_email and not bool(getattr(conversation, "lead_email_sent", False)):
-                    send_office_lead_email(
-                        to_email=office_notify_email,
-                        subject=f"URGENT emergency lead - {getattr(client, 'practice_name', 'Dental Office')}",
-                        body_text=staff_summary,
-                    )
-                    conversation.lead_email_sent = True
-                    print("✅ EMERGENCY EMAIL SENT")
-            except Exception as e:
-                email_send_error = str(e)
-                print("[EMERGENCY_EMAIL_ERROR]", email_send_error)
-
-            try:
-                if office_notify_phone and not bool(getattr(conversation, "lead_sms_sent", False)):
-                    send_office_lead_sms(
-                        to_phone=office_notify_phone,
-                        body=staff_sms,
-                    )
-                    conversation.lead_sms_sent = True
-                    print("✅ EMERGENCY SMS SENT")
-            except Exception as e:
-                sms_send_error = str(e)
-                print("[EMERGENCY_SMS_ERROR]", sms_send_error)
-
-            db.add(conversation)
-            db.commit()
-            db.refresh(conversation)
+            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
+                db,
+                client,
+                conversation,
+                "EMERGENCY OR PRIORITY COMPLETION NOTIFY TRIGGERED",
+            )
 
             name = (conversation.lead_name or "").strip()
             name_part = f", {name}" if name else ""
@@ -5980,17 +5962,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             priority_intake_is_complete(conversation)
             and (conversation.lead_status or "").strip().lower() != "completed"
         ):
-            print("✅ PRIORITY TIME WINDOW HANDOFF NOTIFY TRIGGERED")
-
-            conversation.lead_status = "completed"
-            db.add(conversation)
-            db.commit()
-            db.refresh(conversation)
-
-            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+            lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
                 db,
                 client,
                 conversation,
+                "PRIORITY TIME WINDOW HANDOFF NOTIFY TRIGGERED",
             )
         else:
             lead_email_sent = bool(getattr(conversation, "lead_email_sent", False))
@@ -6309,56 +6285,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     if lead_capture_complete and (conversation.lead_status or "").strip().lower() != "completed":
-        conversation.lead_status = "completed"
-        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
             db,
             client,
             conversation,
+            "LEAD COMPLETION NOTIFY TRIGGERED",
         )
-
-        staff_summary = build_staff_lead_summary(client, conversation)
-        staff_sms = build_staff_lead_sms(client, conversation)
-
-        print("[LEAD_SUMMARY]\n" + staff_summary)
-        print("[LEAD_SMS]\n" + staff_sms)
-
-        office_notify_email = (getattr(client, "notification_email", None) or "").strip()
-        office_notify_phone = (getattr(client, "notification_phone", None) or "").strip()
-
-        print("NORMAL NOTIFY EMAIL:", office_notify_email)
-        print("NORMAL NOTIFY PHONE:", office_notify_phone)
-
-        email_send_error = None
-        sms_send_error = None
-
-        try:
-            if office_notify_email and not bool(getattr(conversation, "lead_email_sent", False)):
-                send_office_lead_email(
-                    to_email=office_notify_email,
-                    subject=f"New appointment request - {getattr(client, 'practice_name', 'Dental Office')}",
-                    body_text=staff_summary,
-                )
-                conversation.lead_email_sent = True
-                print("✅ NORMAL EMAIL SENT")
-        except Exception as e:
-            email_send_error = str(e)
-            print("[NORMAL_EMAIL_ERROR]", email_send_error)
-
-        try:
-            if office_notify_phone and not bool(getattr(conversation, "lead_sms_sent", False)):
-                send_office_lead_sms(
-                    to_phone=office_notify_phone,
-                    body=staff_sms,
-                )
-                conversation.lead_sms_sent = True
-                print("✅ NORMAL SMS SENT")
-        except Exception as e:
-            sms_send_error = str(e)
-            print("[NORMAL_SMS_ERROR]", sms_send_error)
-
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
 
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
@@ -6437,19 +6369,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 and priority_intake_is_complete(conversation)
                 and (conversation.lead_status or "").strip().lower() != "completed"
             ):
-                print("✅ PRIORITY BYPASS HANDOFF NOTIFY TRIGGERED")
-
-                conversation.lead_status = "completed"
-                db.add(conversation)
-                db.commit()
-                db.refresh(conversation)
-
-                lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = notify_office_of_completed_lead(
+                lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
                     db,
                     client,
                     conversation,
+                    "PRIORITY BYPASS HANDOFF NOTIFY TRIGGERED",
                 )
-
             db.add(Message(conversation_id=conversation.id, role="assistant", content=bypass_text))
             db.commit()
 
