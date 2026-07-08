@@ -3569,13 +3569,41 @@ def build_short_symptom_handoff_reply(conversation: Conversation) -> str:
         "The office will contact you shortly to help with the next available appointment."
     )
 
+def conversation_has_specific_lead_reason(conversation: Conversation) -> bool:
+    """
+    Generic 'appointment request' is not enough detail for a real lead.
+    Mia should ask what the appointment is for before moving too far forward.
+    """
+    reason = (getattr(conversation, "lead_reason", "") or "").strip()
+    return bool(reason and reason != "appointment request")
+
+
+def lead_reason_can_be_replaced(current_reason: Optional[str], new_reason: Optional[str]) -> bool:
+    """
+    Allow a generic appointment request to be replaced once the patient gives
+    a real reason like cleaning/checkup, tooth pain, implants, etc.
+    """
+    current_reason = (current_reason or "").strip()
+    new_reason = (new_reason or "").strip()
+
+    if not new_reason:
+        return False
+
+    if not current_reason:
+        return True
+
+    if current_reason == "appointment request" and new_reason != "appointment request":
+        return True
+
+    return False
+
 def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
     """
     Normal appointment leads require:
     reason + name + phone + complete preferred time + new/returning + email or email opt-out.
     """
     return (
-        bool((getattr(conversation, "lead_reason", "") or "").strip())
+        conversation_has_specific_lead_reason(conversation)
         and bool((getattr(conversation, "lead_name", "") or "").strip())
         and bool((getattr(conversation, "lead_phone", "") or "").strip())
         and time_window_is_complete(getattr(conversation, "lead_time_window", None))
@@ -4643,7 +4671,7 @@ def looks_like_name_only(user_text: str) -> Optional[str]:
 
 
 def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str], Optional[str]]:
-    has_reason = bool((conversation.lead_reason or "").strip())
+    has_reason = conversation_has_specific_lead_reason(conversation)
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
     has_email = bool((conversation.lead_email or "").strip())
@@ -4803,6 +4831,10 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_prefix = f"{name}, " if name else ""
     # Match your existing intake field order
+
+    if not conversation_has_specific_lead_reason(conversation):
+        return "What brings you in—cleaning/checkup, tooth pain, fillings, crowns, braces/Invisalign, whitening, or something else?"
+
     if not (conversation.lead_name or "").strip():
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
@@ -6054,7 +6086,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     lead_captured_now = False
     service_selected_now = False
 
-    if service_reason and service_reason != "other" and not (conversation.lead_reason or "").strip():
+    if service_reason and service_reason != "other" and lead_reason_can_be_replaced(conversation.lead_reason, service_reason):
         conversation.lead_reason = service_reason
         updated = True
         lead_captured_now = True
@@ -6148,7 +6180,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if looks_like_info_intent(user_text) and not is_scheduling_now and not has_any_lead_data:
         can_capture_reason = False
 
-    if can_capture_reason and reason and not (conversation.lead_reason or "").strip():
+    if can_capture_reason and reason and lead_reason_can_be_replaced(conversation.lead_reason, reason):
         conversation.lead_reason = reason
         updated = True
 
