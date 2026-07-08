@@ -2324,6 +2324,9 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     if (conversation.lead_reason or "").strip():
         lines.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
 
+    if (getattr(conversation, "lead_reason_detail", None) or "").strip():
+        lines.append(f"Reason detail: {conversation.lead_reason_detail}")
+
     if (getattr(conversation, "lead_time_window", None) or "").strip():
         lines.append(f"Preferred time: {pretty_staff_time_window(conversation)}")
 
@@ -2359,6 +2362,9 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
 
     if (conversation.lead_reason or "").strip():
         parts.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
+
+    if (getattr(conversation, "lead_reason_detail", None) or "").strip():
+        parts.append(f"Detail: {conversation.lead_reason_detail}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
         parts.append(f"Time: {pretty_staff_time_window(conversation)}")
@@ -3586,14 +3592,59 @@ def reply_should_show_service_menu(reply_text: str) -> bool:
         and "something else" in t
     )
 
+def looks_like_other_service_selection(user_text: str) -> bool:
+    """Detect when the patient chooses Other / Something else from the service menu."""
+    t = _norm_text(user_text)
+    return t in {
+        "other",
+        "something else",
+        "not sure",
+        "none of these",
+        "none",
+    }
+
+
+def build_other_reason_prompt() -> str:
+    return "No problem — please briefly tell me what you’re coming in for."
+
+
+def last_assistant_asked_for_other_reason(db: Session, conversation_id: uuid.UUID) -> bool:
+    """Detect when Mia asked the patient to type a short free-text Other reason."""
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    return "please briefly tell me what you re coming in for" in t
+
+
+def build_unsafe_reason_detail_reply() -> str:
+    return (
+        "Please enter a short description using plain text only, like "
+        "“jaw pain,” “consultation,” or “something else.”"
+    )
 
 def conversation_has_specific_lead_reason(conversation: Conversation) -> bool:
     """
-    Generic 'appointment request' is not enough detail for a real lead.
-    Mia should ask what the appointment is for before moving too far forward.
+    Generic 'appointment request' is not enough detail by itself.
+    But if the patient selected Other and gave a safe free-text detail,
+    that counts as a usable reason.
     """
     reason = (getattr(conversation, "lead_reason", "") or "").strip()
-    return bool(reason and reason != "appointment request")
+    detail = (getattr(conversation, "lead_reason_detail", "") or "").strip()
+
+    if reason and reason != "appointment request":
+        return True
+
+    if reason == "appointment request" and detail:
+        return True
+
+    return False
 
 
 def lead_reason_can_be_replaced(current_reason: Optional[str], new_reason: Optional[str]) -> bool:
@@ -5049,9 +5100,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     accepted_schedule = bool(offered_service_reason) and user_accepted_scheduling(user_text)
 
     service_reason_now = offered_service_reason if accepted_schedule else detect_service_selection(user_text)
-    if user_text.strip().lower() in {"something else", "other", "not sure"}:
+    if looks_like_other_service_selection(user_text):
         service_reason_now = "other"
-        question_mode = False   # ✅ force it back into intake
+        question_mode = False   # force it back into intake
     is_scheduling_now = True if accepted_schedule else is_scheduling_intent(user_text)
 
     has_any_lead_data = bool(
@@ -5178,6 +5229,55 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "mode": "personal_identity_or_relationship_topic",
                 "faq_match": False,
                 "hide_booking_button": True,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
+    # Other service free-text reason capture
+    # =========================================================
+    if last_assistant_asked_for_other_reason(db, conversation.id):
+        if not looks_like_safe_reason_detail(user_text):
+            reply_text = build_unsafe_reason_detail_reply()
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "unsafe_other_reason_detail",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
+        mapped_reason = map_reason_detail_to_enum(user_text)
+
+        conversation.is_lead = True
+        conversation.lead_reason = mapped_reason or "appointment request"
+        conversation.lead_reason_source_text = (user_text or "")[:120]
+
+        if hasattr(conversation, "lead_reason_detail"):
+            conversation.lead_reason_detail = (user_text or "")[:120]
+
+        if mark_priority_if_symptom_lead(conversation):
+            pass
+
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+        reply_text = _next_intake_prompt(client, conversation)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "other_reason_detail_captured",
+                "faq_match": False,
                 "show_start_over": show_start_over,
             },
         )
@@ -6105,6 +6205,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     updated = False
     lead_captured_now = False
     service_selected_now = False
+
+    if service_reason == "other":
+        reply_text = build_other_reason_prompt()
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "other_service_prompt",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
 
     if service_reason and service_reason != "other" and lead_reason_can_be_replaced(conversation.lead_reason, service_reason):
         conversation.lead_reason = service_reason
