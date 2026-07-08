@@ -3348,6 +3348,49 @@ def conversation_has_symptom_or_safety_reason(conversation: Conversation) -> boo
 
     return any(term in t for term in symptom_terms)
 
+def looks_like_dental_symptom_request(user_text: str) -> bool:
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    symptom_terms = [
+        "tooth pain",
+        "toothache",
+        "tooth ache",
+        "my tooth hurts",
+        "teeth hurt",
+        "gum pain",
+        "jaw pain",
+        "swollen gum",
+        "swelling",
+        "swollen",
+        "bleeding gums",
+        "bleeding",
+        "broken tooth",
+        "cracked tooth",
+        "chipped tooth",
+        "infection",
+        "abscess",
+    ]
+
+    return any(term in t for term in symptom_terms)
+
+
+def build_symptom_appointment_start_reply(user_text: str) -> str:
+    t = _norm_text(user_text)
+
+    if any(term in t for term in ["swelling", "swollen", "bleeding", "infection", "abscess", "broken tooth", "cracked tooth", "chipped tooth"]):
+        return (
+            "I’m sorry you’re dealing with that. I can help send this to the team.\n\n"
+            "If you have severe swelling, uncontrolled bleeding, trouble breathing/swallowing, or major trauma, please seek urgent care right away.\n\n"
+            "What’s your first name?"
+        )
+
+    return (
+        "I’m sorry you’re dealing with tooth pain. I can help send this to the team.\n\n"
+        "What’s your first name?"
+    )
+
 
 def build_conversation_ending_reply(conversation: Conversation) -> str:
     is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
@@ -4429,6 +4472,16 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
             return (f"Thanks {conversation.lead_name}! What’s the best phone number for the office to call you back?", "phone")
         return (build_priority_handoff_reply(conversation), "complete")
     if not has_name:
+        symptom_source_text = (
+            getattr(conversation, "lead_reason_source_text", None)
+            or getattr(conversation, "lead_reason_detail", None)
+            or getattr(conversation, "lead_reason", None)
+            or ""
+        )
+
+        if looks_like_dental_symptom_request(symptom_source_text):
+            return (build_symptom_appointment_start_reply(symptom_source_text), "name")
+
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
     if not has_phone:
         return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", "phone")
