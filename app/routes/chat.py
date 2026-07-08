@@ -1487,8 +1487,11 @@ def extract_bare_office_hour_time_window(client: Client, user_text: str) -> Opti
 
     Explicit AM/PM like "today at 1am" is not changed.
     """
-    raw = (user_text or "").strip()
+    raw = normalize_tomorrow_shorthand_for_time(user_text)
+    raw = (raw or "").strip()
     t = _norm_text(raw)
+    raw = normalize_tomorrow_shorthand_for_time(user_text)
+    raw = (raw or "").strip()
     if not t:
         return None
 
@@ -1588,7 +1591,8 @@ def extract_bare_office_hour_time_window(client: Client, user_text: str) -> Opti
         return None
 
     minute_part = minute_text if minute_text else ""
-    return f"{day_raw} {hour}{minute_part}{suffix}"
+    day_label = DAY_LABELS_SHORT.get(day_key, day_raw)
+    return f"{day_label} {hour}{minute_part}{suffix}"
 
 def canonicalize_time_window_for_storage(client: Client, user_text: str) -> Optional[str]:
     """
@@ -4789,8 +4793,16 @@ def _next_intake_prompt(client: Client, conversation) -> str:
         return build_priority_handoff_reply(conversation)
     if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
         return "What’s your email? (You can also type 'skip'.)"
-    if not (getattr(conversation, "lead_time_window", None) or "").strip():
+    
+    tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
+
+    if not time_window_is_complete(tw_val):
+        if tw_val in {"Weekday morning", "Weekday afternoon"}:
+            return "Thanks — which weekday works best (Mon–Fri)?"
+        if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
+            return "Got it — do you prefer morning or afternoon?"
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
+
     if getattr(conversation, "lead_is_new_patient", None) is None:
         return f"One quick question — {name_prefix}are you a new or returning patient?"
     return "Thanks — our team will reach out to confirm your appointment."
