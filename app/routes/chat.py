@@ -3446,6 +3446,62 @@ def build_symptom_appointment_start_reply(user_text: str) -> str:
     )
 
 
+def conversation_uses_short_symptom_flow(conversation: Conversation) -> bool:
+    """
+    Symptom-based leads should use a shorter intake:
+    name -> phone -> preferred day/time -> handoff.
+    This avoids asking email and new/returning for tooth pain or similar concerns.
+    """
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return False
+
+    reason = (getattr(conversation, "lead_reason", "") or "").strip()
+    source_parts = [
+        getattr(conversation, "lead_reason_source_text", "") or "",
+        getattr(conversation, "lead_reason_detail", "") or "",
+    ]
+    source_text = _norm_text(" ".join(source_parts))
+
+    if reason == "tooth pain":
+        return True
+
+    symptom_source_terms = [
+        "tooth pain",
+        "toothache",
+        "tooth ache",
+        "tooth hurts",
+        "my tooth hurts",
+        "teeth hurt",
+        "gum pain",
+        "jaw pain",
+        "bleeding",
+        "bleeding gums",
+        "blood",
+        "swelling",
+        "swollen",
+        "infection",
+        "abscess",
+        "broken tooth",
+        "broke my tooth",
+        "tooth broke",
+        "cracked tooth",
+        "chipped tooth",
+        "lost filling",
+        "filling fell out",
+    ]
+
+    return any(term in source_text for term in symptom_source_terms)
+
+
+def build_short_symptom_handoff_reply(conversation: Conversation) -> str:
+    name = (getattr(conversation, "lead_name", "") or "").strip()
+    name_part = f", {name}" if name else ""
+
+    return (
+        f"Thanks{name_part} — I’ve sent this to the team.\n\n"
+        "The office will contact you shortly to help with the next available appointment."
+    )
+
 def build_conversation_ending_reply(conversation: Conversation) -> str:
     is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
     is_priority = bool(getattr(conversation, "lead_is_priority", False))
@@ -4503,12 +4559,15 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
     email_opt_out = bool(getattr(conversation, "lead_email_opt_out", False))
 
     time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
+    short_symptom_flow = conversation_uses_short_symptom_flow(conversation)
+
     is_priority_non_emergency = (
         (
             bool(getattr(conversation, "lead_is_priority", False))
             or time_window in {"ASAP", "ASAP / tomorrow ok"}
         )
         and not bool(getattr(conversation, "lead_is_emergency", False))
+        and not short_symptom_flow
     )
 
     if not has_reason:
@@ -4539,6 +4598,19 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
     if not has_phone:
         return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", "phone")
+
+    if short_symptom_flow:
+        if not tw_known:
+            if tw_val in {"Weekday morning", "Weekday afternoon"}:
+                return ("Thanks — which weekday works best (Mon–Fri)?", "time_window")
+            if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
+                return ("Got it — do you prefer morning or afternoon?", "time_window")
+            name = (conversation.lead_name or "").strip()
+            name_part = f" {name}" if name else ""
+            return (f"Thanks{name_part}. What day/time window works best?", "time_window")
+
+        return (build_short_symptom_handoff_reply(conversation), "complete")
+
     if not has_email and not email_opt_out:
         return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", "email")
 
@@ -4640,6 +4712,19 @@ def _next_intake_prompt(client: Client, conversation) -> str:
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
         return "Thanks — what’s the best phone number to reach you?"
+
+    if conversation_uses_short_symptom_flow(conversation):
+        tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
+
+        if not time_window_is_complete(tw_val):
+            if tw_val in {"Weekday morning", "Weekday afternoon"}:
+                return "Thanks — which weekday works best (Mon–Fri)?"
+            if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
+                return "Got it — do you prefer morning or afternoon?"
+            return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
+
+        return build_short_symptom_handoff_reply(conversation)
+
     if priority_intake_is_complete(conversation):
         return build_priority_handoff_reply(conversation)
     if not (conversation.lead_email or "").strip() and not bool(getattr(conversation, "lead_email_opt_out", False)):
@@ -5035,6 +5120,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         canonical_tw = canonicalize_time_window_for_storage(client, user_text)
 
         if canonical_tw:
+            lead_email_error = None
+            lead_sms_error = None
+
             time_issue_reply = build_time_window_issue_reply(client, canonical_tw)
 
             if time_issue_reply:
@@ -5050,6 +5138,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 db.refresh(conversation)
 
                 reply_text = _next_intake_prompt(client, conversation)
+                if (
+                    conversation_uses_short_symptom_flow(conversation)
+                    and lead_is_ready_for_office_notification(conversation)
+                    and time_window_is_complete(getattr(conversation, "lead_time_window", None))
+                    and (conversation.lead_status or "").strip().lower() != "completed"
+                ):
+                    lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
+                        db,
+                        client,
+                        conversation,
+                        "SHORT SYMPTOM FLOW COMPLETION NOTIFY TRIGGERED",
+                    )
 
             db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
             db.commit()
@@ -6324,7 +6424,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         or t_lower.startswith("thanks")
     )
 
-    lead_capture_complete = (
+    normal_lead_capture_complete = (
         bool((conversation.lead_reason or "").strip())
         and bool((conversation.lead_name or "").strip())
         and bool((conversation.lead_phone or "").strip())
@@ -6335,6 +6435,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             or bool(getattr(conversation, "lead_email_opt_out", False))
         )
     )
+
+    short_symptom_lead_complete = (
+        conversation_uses_short_symptom_flow(conversation)
+        and bool((conversation.lead_reason or "").strip())
+        and bool((conversation.lead_name or "").strip())
+        and bool((conversation.lead_phone or "").strip())
+        and time_window_is_complete(getattr(conversation, "lead_time_window", None))
+    )
+
+    lead_capture_complete = normal_lead_capture_complete or short_symptom_lead_complete
 
     emergency_lead_complete = (
         bool(getattr(conversation, "lead_is_emergency", False))
