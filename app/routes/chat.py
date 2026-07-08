@@ -3548,7 +3548,7 @@ def should_mark_reason_as_priority_symptom(reason: Optional[str], source_text: s
     reason = (reason or "").strip()
     source_norm = _norm_text(source_text or "")
 
-    if reason == "tooth pain":
+    if reason in {"tooth pain", "broken tooth/filling"}:
         return True
 
     priority_reason_terms = [
@@ -3572,6 +3572,26 @@ def should_mark_reason_as_priority_symptom(reason: Optional[str], source_text: s
         "cracked tooth",
         "chipped tooth",
         "lost filling",
+        "broke a tooth",
+        "broke tooth",
+        "broken tooth",
+        "broken filling",
+        "broke a filling",
+        "broke filling",
+        "cracked tooth",
+        "chipped tooth",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "tooth is shaky",
+        "tooth is shakey",
+        "tooth is skakey",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
         "filling fell out",
     ]
 
