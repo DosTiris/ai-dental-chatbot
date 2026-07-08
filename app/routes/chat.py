@@ -2065,7 +2065,7 @@ def extract_name(text_in: str) -> Optional[str]:
 
 def detect_appointment_reason(text_in: str) -> Optional[str]:
     t = (text_in or "").lower()
-    if any(k in t for k in ["cleaning", "checkup", "check-up", "routine", "exam"]):
+    if any(k in t for k in ["cleaning", "cleanup", "clean up", "clean-up", "checkup", "check-up", "routine", "exam"]):
         return "cleaning/checkup"
     if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling"]):
         return "tooth pain"
@@ -2178,7 +2178,7 @@ def detect_service_selection(user_text: str) -> Optional[str]:
     if "tooth pain" in t or "tooth hurts" in t or "toothache" in t:
         return "tooth pain"
 
-    if "cleaning" in t or "checkup" in t or "check-up" in t:
+    if "cleaning" in t or "cleanup" in t or "clean up" in t or "clean-up" in t or "checkup" in t or "check-up" in t:
         return "cleaning/checkup"
 
     if "broken tooth" in t or "broke a tooth" in t or "filling" in t:
@@ -2194,6 +2194,9 @@ def detect_service_selection(user_text: str) -> Optional[str]:
         return "orthodontics"
     service_map = {
         "cleaning": "cleaning/checkup",
+        "cleanup": "cleaning/checkup",
+        "clean up": "cleaning/checkup",
+        "clean-up": "cleaning/checkup",
         "checkup": "cleaning/checkup",
         "exam": "cleaning/checkup",
         "filling": "broken tooth/filling",
@@ -3565,6 +3568,34 @@ def build_short_symptom_handoff_reply(conversation: Conversation) -> str:
         f"Thanks{name_part} — I’ve sent this to the team.\n\n"
         "The office will contact you shortly to help with the next available appointment."
     )
+
+def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
+    """
+    Normal appointment leads require:
+    reason + name + phone + complete preferred time + new/returning + email or email opt-out.
+    """
+    return (
+        bool((getattr(conversation, "lead_reason", "") or "").strip())
+        and bool((getattr(conversation, "lead_name", "") or "").strip())
+        and bool((getattr(conversation, "lead_phone", "") or "").strip())
+        and time_window_is_complete(getattr(conversation, "lead_time_window", None))
+        and (getattr(conversation, "lead_is_new_patient", None) is not None)
+        and (
+            bool((getattr(conversation, "lead_email", "") or "").strip())
+            or bool(getattr(conversation, "lead_email_opt_out", False))
+        )
+    )
+
+
+def build_normal_lead_complete_reply(conversation: Conversation) -> str:
+    name = (getattr(conversation, "lead_name", "") or "").strip()
+    name_part = f" {name}" if name else ""
+
+    return (
+        f"Thanks{name_part}! We’ve got your request—"
+        "our team will contact you shortly to confirm the appointment time."
+    )
+
 
 def build_conversation_ending_reply(conversation: Conversation) -> str:
     is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
@@ -6223,6 +6254,38 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(conversation)
 
+        
+    if (
+        normal_lead_capture_is_complete(conversation)
+        and detect_new_patient_flag(user_text) is not None
+        and (conversation.lead_status or "").strip().lower() != "completed"
+    ):
+        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
+            db,
+            client,
+            conversation,
+            "NORMAL PATIENT TYPE COMPLETION NOTIFY TRIGGERED",
+        )
+
+        reply_text = build_normal_lead_complete_reply(conversation)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "faq_match": False,
+                "mode": "lead_complete_after_patient_type",
+                "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
+                "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
+                "lead_email_error": lead_email_error,
+                "lead_sms_error": lead_sms_error,
+                "show_start_over": show_start_over,
+            },
+        )   
+
     if tw_reply or outside_hours_reply:
         combined_reply = tw_reply
 
@@ -6514,27 +6577,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         or t_lower.startswith("thanks")
     )
 
-    normal_lead_capture_complete = (
-        bool((conversation.lead_reason or "").strip())
-        and bool((conversation.lead_name or "").strip())
-        and bool((conversation.lead_phone or "").strip())
-        and time_window_is_complete(getattr(conversation, "lead_time_window", None))
-        and (getattr(conversation, "lead_is_new_patient", None) is not None)
-        and (
-            bool((conversation.lead_email or "").strip())
-            or bool(getattr(conversation, "lead_email_opt_out", False))
-        )
-    )
-
-    short_symptom_lead_complete = (
-        conversation_uses_short_symptom_flow(conversation)
-        and bool((conversation.lead_reason or "").strip())
-        and bool((conversation.lead_name or "").strip())
-        and bool((conversation.lead_phone or "").strip())
-        and time_window_is_complete(getattr(conversation, "lead_time_window", None))
-    )
-
-    lead_capture_complete = normal_lead_capture_complete or short_symptom_lead_complete
+    lead_capture_complete = normal_lead_capture_is_complete(conversation)
 
     emergency_lead_complete = (
         bool(getattr(conversation, "lead_is_emergency", False))
