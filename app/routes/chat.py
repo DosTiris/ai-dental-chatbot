@@ -238,6 +238,58 @@ def _norm_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+def normalize_tomorrow_shorthand_for_time(user_text: str) -> str:
+    """
+    Convert common patient shorthand/typos for tomorrow into a form the time parser understands.
+    Example: 'Tom morning' -> 'tomorrow morning'
+    """
+    raw = (user_text or "").strip()
+    if not raw:
+        return raw
+
+    t = _norm_text(raw)
+    if not t:
+        return raw
+
+    tokens = t.split()
+    if len(tokens) < 2:
+        return raw
+
+    first = tokens[0]
+    if first not in {"tom", "tmr", "tmrw", "tmw"}:
+        return raw
+
+    rest_norm = " ".join(tokens[1:]).strip()
+    if not rest_norm:
+        return raw
+
+    time_words = [
+        "morning",
+        "afternoon",
+        "evening",
+        "night",
+        "noon",
+        "am",
+        "pm",
+        "oclock",
+        "o clock",
+        "around",
+        "before",
+        "after",
+    ]
+
+    has_time_word = any(word in rest_norm for word in time_words)
+    has_digit = any(ch.isdigit() for ch in rest_norm)
+
+    if not has_time_word and not has_digit:
+        return raw
+
+    original_parts = raw.split(maxsplit=1)
+    if len(original_parts) < 2:
+        return raw
+
+    return f"tomorrow {original_parts[1].strip()}"
+
 def get_client_setting(client, key: str, default=None):
     settings = getattr(client, "settings", None)
     if isinstance(settings, dict):
@@ -2607,6 +2659,8 @@ def detect_new_patient_flag(user_text: str) -> Optional[bool]:
 
 
 def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optional[str]:
+    user_text = normalize_tomorrow_shorthand_for_time(user_text)
+
     t = (user_text or "").strip()
     if not t:
         return None
