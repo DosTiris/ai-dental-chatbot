@@ -3492,6 +3492,66 @@ def conversation_uses_short_symptom_flow(conversation: Conversation) -> bool:
 
     return any(term in source_text for term in symptom_source_terms)
 
+def should_mark_reason_as_priority_symptom(reason: Optional[str], source_text: str = "") -> bool:
+    """
+    Mark symptom-based dental concerns as priority leads for staff notifications.
+    This does not make them ER/emergency cases unless the separate emergency guards trigger.
+    """
+    reason = (reason or "").strip()
+    source_norm = _norm_text(source_text or "")
+
+    if reason == "tooth pain":
+        return True
+
+    priority_reason_terms = [
+        "tooth pain",
+        "toothache",
+        "tooth ache",
+        "tooth hurts",
+        "my tooth hurts",
+        "teeth hurt",
+        "gum pain",
+        "jaw pain",
+        "bleeding gums",
+        "swollen gum",
+        "swelling",
+        "swollen",
+        "infection",
+        "abscess",
+        "broken tooth",
+        "broke my tooth",
+        "tooth broke",
+        "cracked tooth",
+        "chipped tooth",
+        "lost filling",
+        "filling fell out",
+    ]
+
+    return any(term in source_norm for term in priority_reason_terms)
+
+
+def mark_priority_if_symptom_lead(conversation: Conversation) -> bool:
+    """
+    Set lead_is_priority=True for symptom-based dental leads.
+    Returns True if it changed the conversation.
+    """
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return False
+
+    reason = (getattr(conversation, "lead_reason", "") or "").strip()
+
+    source_text = " ".join([
+        getattr(conversation, "lead_reason_source_text", "") or "",
+        getattr(conversation, "lead_reason_detail", "") or "",
+    ])
+
+    if should_mark_reason_as_priority_symptom(reason, source_text):
+        if not bool(getattr(conversation, "lead_is_priority", False)):
+            conversation.lead_is_priority = True
+            return True
+
+    return False
+
 
 def build_short_symptom_handoff_reply(conversation: Conversation) -> str:
     name = (getattr(conversation, "lead_name", "") or "").strip()
@@ -5138,6 +5198,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 db.refresh(conversation)
 
                 reply_text = _next_intake_prompt(client, conversation)
+
+                if mark_priority_if_symptom_lead(conversation):
+                    db.add(conversation)
+                    db.commit()
+                    db.refresh(conversation)
+
                 if (
                     conversation_uses_short_symptom_flow(conversation)
                     and lead_is_ready_for_office_notification(conversation)
@@ -5951,6 +6017,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         lead_captured_now = True
         service_selected_now = True
 
+        if should_mark_reason_as_priority_symptom(service_reason, user_text):
+            conversation.lead_is_priority = True
+            updated = True
+
         if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
             conversation.lead_reason_source_text = (user_text or "")[:120]
             updated = True
@@ -6038,6 +6108,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if can_capture_reason and reason and not (conversation.lead_reason or "").strip():
         conversation.lead_reason = reason
         updated = True
+
+        if should_mark_reason_as_priority_symptom(reason, user_text):
+            conversation.lead_is_priority = True
+            updated = True
+
         if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
             conversation.lead_reason_source_text = user_text[:120]
             updated = True
@@ -6126,6 +6201,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if lead_captured_now and not conversation.is_lead:
         conversation.is_lead = True
         conversation.last_lead_at = db.execute(text("select now()")).scalar()
+        updated = True
+
+    if mark_priority_if_symptom_lead(conversation):
         updated = True
 
     if updated:
