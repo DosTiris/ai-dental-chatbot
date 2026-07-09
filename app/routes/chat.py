@@ -913,6 +913,14 @@ def looks_like_sexual_misconduct_or_serious_concern(user_text: str) -> bool:
         "inappropriately touched",
         "inappropriate touching",
         "forced himself",
+        "touched my cock",
+        "grabbed my cock",
+        "touched my penis",
+        "grabbed my penis",
+        "touched my private parts",
+        "grabbed my private parts",
+        "touched my genitals",
+        "grabbed my genitals",
         "forced herself",
     ]
 
