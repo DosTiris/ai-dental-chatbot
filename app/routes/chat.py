@@ -5443,13 +5443,32 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # Time-only outside-hours guard
     # =========================================================
     if (
-    (
-        looks_like_scheduling_intent(user_text)
-        or bool(detect_service_selection(user_text))
-        or bool(detect_appointment_reason(user_text))
-    )
-    and time_only_request_is_outside_office_hours(client, user_text)
+        (
+            looks_like_scheduling_intent(user_text)
+            or bool(detect_service_selection(user_text))
+            or bool(detect_appointment_reason(user_text))
+        )
+        and time_only_request_is_outside_office_hours(client, user_text)
     ):
+        detected_reason = detect_service_selection(user_text) or detect_appointment_reason(user_text)
+
+        if detected_reason and detected_reason != "appointment request":
+            conversation.is_lead = True
+
+            if lead_reason_can_be_replaced(
+                getattr(conversation, "lead_reason", None),
+                detected_reason,
+            ):
+                conversation.lead_reason = detected_reason
+                conversation.lead_reason_source_text = (user_text or "")[:120]
+
+            if mark_priority_if_symptom_lead(conversation):
+                pass
+
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
         reply_text = "That time is outside normal office hours. What day/time works better for you?"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
