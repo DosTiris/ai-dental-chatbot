@@ -455,7 +455,20 @@ def looks_like_scheduling_intent(user_text: str) -> bool:
     t = _norm_text(user_text)
     return any(
         k in t
-        for k in ["appointment", "book", "schedule", "available", "availability", "come in", "see the doctor"]
+        for k in [
+            "appointment",
+            "appoitment",
+            "apointment",
+            "appointmant",
+            "appntment",
+            "book",
+            "booking",
+            "schedule",
+            "available",
+            "availability",
+            "come in",
+            "see the doctor",
+        ]
     )
 
 def looks_like_info_intent(user_text: str) -> bool:
@@ -525,7 +538,7 @@ def build_office_phone_reply(client: Client, conversation: Conversation, office_
     return base
 
 def looks_like_insurance_request(user_text: str) -> bool:
-    """Detect insurance questions without guaranteeing coverage."""
+    """Detect insurance questions without accidentally matching typos like 'appoitment' because of 'ppo'."""
     t = _norm_text(user_text)
     if not t:
         return False
@@ -533,19 +546,28 @@ def looks_like_insurance_request(user_text: str) -> bool:
     insurance_phrases = [
         "insurance",
         "insurances",
-        "do you take",
-        "do you accept",
         "accept insurance",
         "take insurance",
+        "do you accept insurance",
+        "do you take insurance",
+        "my insurance",
+        "dental insurance",
         "covered",
         "coverage",
+        "in network",
+        "out of network",
+        "in network with",
+        "out of network with",
+    ]
+
+    if any(p in t for p in insurance_phrases):
+        return True
+
+    carrier_terms = [
         "ppo",
         "hmo",
-        "in network",
-        "in-network",
-        "out of network",
-        "out-of-network",
         "delta dental",
+        "delt dental",
         "delta",
         "aetna",
         "cigna",
@@ -558,7 +580,7 @@ def looks_like_insurance_request(user_text: str) -> bool:
         "medicare",
     ]
 
-    return any(p in t for p in insurance_phrases)
+    return any(re.search(rf"\b{re.escape(term)}\b", t) for term in carrier_terms)
 
 
 def build_insurance_reply(user_text: str) -> str:
@@ -2175,7 +2197,17 @@ def detect_appointment_reason(text_in: str) -> Optional[str]:
         return "cosmetic/whitening"
     if any(k in t for k in ["implant", "extraction", "wisdom tooth", "wisdom teeth"]):
         return "extraction/implant"
-    if any(k in t for k in ["appointment", "schedule", "book", "availability", "available"]):
+    if any(k in t for k in [
+    "appointment",
+    "appoitment",
+    "apointment",
+    "appointmant",
+    "appntment",
+    "schedule",
+    "book",
+    "availability",
+    "available",
+    ]):
         return "appointment request"
     return None
 
@@ -2282,7 +2314,28 @@ def detect_service_selection(user_text: str) -> Optional[str]:
     if "cleaning" in t or "cleanup" in t or "clean up" in t or "clean-up" in t or "checkup" in t or "check-up" in t:
         return "cleaning/checkup"
 
-    if "broken tooth" in t or "broke a tooth" in t or "filling" in t:
+    if any(p in t for p in [
+        "broken tooth",
+        "broke a tooth",
+        "broke tooth",
+        "tooth is broken",
+        "my tooth is broken",
+        "cracked tooth",
+        "chipped tooth",
+        "filling",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "tooth is shaky",
+        "tooth is shakey",
+        "tooth is skakey",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
+    ]):
         return "broken tooth/filling"
 
     if "implant" in t or "extraction" in t:
@@ -3538,6 +3591,20 @@ def looks_like_dental_symptom_request(user_text: str) -> bool:
         "bleeding",
         "broken tooth",
         "cracked tooth",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "tooth is shaky",
+        "tooth is shakey",
+        "tooth is skakey",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
+        "tooth is broken",
+        "my tooth is broken",
         "chipped tooth",
         "infection",
         "abscess",
@@ -4885,6 +4952,10 @@ def is_scheduling_intent(user_text: str) -> bool:
     t = (user_text or "").lower()
     scheduling_keywords = [
         "appointment",
+        "appoitment",
+        "apointment",
+        "appointmant",
+        "appntment",
         "schedule",
         "book",
         "availability",
