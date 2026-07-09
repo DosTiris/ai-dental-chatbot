@@ -5442,7 +5442,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Time-only outside-hours guard
     # =========================================================
-    if looks_like_scheduling_intent(user_text) and time_only_request_is_outside_office_hours(client, user_text):
+    if (
+    (
+        looks_like_scheduling_intent(user_text)
+        or bool(detect_service_selection(user_text))
+        or bool(detect_appointment_reason(user_text))
+    )
+    and time_only_request_is_outside_office_hours(client, user_text)
+    ):
         reply_text = "That time is outside normal office hours. What day/time works better for you?"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
@@ -5576,6 +5583,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if looks_like_office_phone_request(user_text) and not looks_like_scheduling_intent(user_text):
         reply_text = build_office_phone_reply(client, conversation, office_phone)
 
+        lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
+        if in_intake_mode and not lead_completed:
+            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -5593,6 +5604,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     if looks_like_insurance_request(user_text) and not looks_like_scheduling_intent(user_text):
         reply_text = build_insurance_reply(user_text)
+
+        lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
+        if in_intake_mode and not lead_completed:
+            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
