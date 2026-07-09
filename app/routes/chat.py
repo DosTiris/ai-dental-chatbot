@@ -870,6 +870,66 @@ def build_emergency_service_confusion_reply() -> str:
         "If this is a medical emergency or someone is in immediate danger, please call 911 now."
     )
 
+def looks_like_sexual_misconduct_or_serious_concern(user_text: str) -> bool:
+    """
+    Detect serious sexual misconduct / assault allegations involving the office.
+    Mia should not investigate or continue casually, but should redirect safely.
+    """
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    office_context_terms = [
+        "dentist",
+        "doctor",
+        "hygienist",
+        "assistant",
+        "staff",
+        "front desk",
+        "office",
+        "receptionist",
+    ]
+
+    serious_terms = [
+        "sexual assault",
+        "sexually assaulted",
+        "assaulted me",
+        "raped me",
+        "rape me",
+        "molested me",
+        "molested",
+        "fingered me",
+        "touched me sexually",
+        "touched my breast",
+        "touched my breasts",
+        "touched my tits",
+        "grabbed my breast",
+        "grabbed my breasts",
+        "grabbed my tits",
+        "grabbed my pussy",
+        "groped me",
+        "groped",
+        "jerked me off",
+        "inappropriately touched",
+        "inappropriate touching",
+        "forced himself",
+        "forced herself",
+    ]
+
+    has_office_context = any(term in t for term in office_context_terms)
+    has_serious_term = any(term in t for term in serious_terms)
+
+    return has_office_context and has_serious_term
+
+
+def build_sexual_misconduct_or_serious_concern_reply(office_phone: str) -> str:
+    phone = (office_phone or "").strip() or "(555) 123-4567"
+    return (
+        "I’m sorry you’re dealing with that. I can’t investigate or resolve serious complaints in chat.\n\n"
+        "If you are in immediate danger, please call 911 now.\n\n"
+        f"For serious concerns involving the office, please contact the office directly at {phone}."
+    )
+
 def looks_like_complaint_or_discrimination_concern(user_text: str) -> bool:
     """Detect complaints or discrimination concerns without starting appointment intake."""
     t = _norm_text(user_text)
@@ -5189,6 +5249,22 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta={
                 "mode": "locked",
                 "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    if looks_like_sexual_misconduct_or_serious_concern(user_text):
+        reply_text = build_sexual_misconduct_or_serious_concern_reply(office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "sexual_misconduct_or_serious_concern",
+                "faq_match": False,
+                "hide_booking_button": True,
                 "show_start_over": show_start_over,
             },
         )
