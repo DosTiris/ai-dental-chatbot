@@ -4070,6 +4070,8 @@ def looks_like_emergency(text: str) -> bool:
         return True
 
     return False
+
+
 def looks_like_urgent_dental_safety_issue(text: str) -> bool:
     """
     Catches urgent dental safety situations that may not use exact emergency keywords.
@@ -5743,19 +5745,19 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         reply_text = build_dangerous_dental_self_treatment_reply(user_text)
 
-    if is_true_emergency:
-        reply_text = (
-            f"{reply_text}\n\n"
-            "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
-            "please call 911 or go to the ER now.\n\n"
-            f"Our office number is {office_phone}."
-        )
-        next_prompt = _next_emergency_prompt(conversation)
-    else:
-        next_prompt = None
+        if is_true_emergency:
+            reply_text = (
+                f"{reply_text}\n\n"
+                "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
+                "please call 911 or go to the ER now.\n\n"
+                f"Our office number is {office_phone}."
+            )
+            next_prompt = _next_emergency_prompt(conversation)
+        else:
+            next_prompt = None
 
-    if next_prompt and "?" not in reply_text:
-        reply_text = f"{reply_text}\n\n{next_prompt}"
+        if next_prompt and "?" not in reply_text:
+            reply_text = f"{reply_text}\n\n{next_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
