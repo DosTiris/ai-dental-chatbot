@@ -3624,9 +3624,9 @@ def build_symptom_appointment_start_reply(user_text: str) -> str:
         )
 
     return (
-        "I’m sorry you’re dealing with tooth pain. I can help send this to the team.\n\n"
-        "What’s your first name?"
-    )
+    "I’m sorry you’re dealing with that dental concern. I can help send this to the team.\n\n"
+    "What’s your first name?"
+)
 
 
 def conversation_uses_short_symptom_flow(conversation: Conversation) -> bool:
