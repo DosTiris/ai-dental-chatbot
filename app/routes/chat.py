@@ -3510,7 +3510,7 @@ def conversation_uses_short_symptom_flow(conversation: Conversation) -> bool:
     ]
     source_text = _norm_text(" ".join(source_parts))
 
-    if reason == "tooth pain":
+    if reason in {"tooth pain", "broken tooth/filling"}:
         return True
 
     symptom_source_terms = [
@@ -3534,6 +3534,20 @@ def conversation_uses_short_symptom_flow(conversation: Conversation) -> bool:
         "tooth broke",
         "cracked tooth",
         "chipped tooth",
+        "broke a tooth",
+        "broke tooth",
+        "broken filling",
+        "broke a filling",
+        "broke filling",
+        "loose tooth",
+        "tooth is loose",
+        "my tooth is loose",
+        "shaky tooth",
+        "shakey tooth",
+        "skakey tooth",
+        "wobbly tooth",
+        "tooth is wobbly",
+        "moving tooth",
         "lost filling",
         "filling fell out",
     ]
@@ -3993,20 +4007,69 @@ def _validate_lead_reason(reason: Optional[str]) -> Optional[str]:
 
 EMERGENCY_TRIGGERS = [
     "emergency",
-    "severe pain", "extreme pain", "unbearable",
-    "swelling", "face swelling", "jaw swelling",
-    "bleeding", "won't stop bleeding",
-    "knocked out", "knocked-out", "tooth fell out",
-    "broken tooth", "cracked tooth",
-    "abscess", "infection", "pus",
-    "can't swallow", "cant swallow",
-    "can't breathe", "cant breathe",
+    "severe pain",
+    "extreme pain",
+    "unbearable pain",
+    "unbearable",
+    "knocked out",
+    "knocked-out",
+    "tooth fell out",
+    "won t stop bleeding",
+    "wont stop bleeding",
+    "uncontrolled bleeding",
+    "blood everywhere",
+    "bleeding everywhere",
+    "bleeding a lot",
+    "can t swallow",
+    "cant swallow",
+    "cannot swallow",
+    "trouble swallowing",
+    "difficulty swallowing",
+    "can t breathe",
+    "cant breathe",
+    "cannot breathe",
+    "trouble breathing",
+    "difficulty breathing",
+    "rapidly worsening swelling",
+    "worsening swelling",
 ]
 
 def looks_like_emergency(text: str) -> bool:
     t = _norm_text(text)
-    return any(k in t for k in EMERGENCY_TRIGGERS)
+    if not t:
+        return False
 
+    if any(k in t for k in EMERGENCY_TRIGGERS):
+        return True
+
+    swallowing_terms = [
+        "can t swallow",
+        "cant swallow",
+        "cannot swallow",
+        "trouble swallowing",
+        "difficulty swallowing",
+    ]
+
+    breathing_terms = [
+        "can t breathe",
+        "cant breathe",
+        "cannot breathe",
+        "trouble breathing",
+        "difficulty breathing",
+    ]
+
+    if any(p in t for p in swallowing_terms):
+        return True
+
+    if any(p in t for p in breathing_terms):
+        return True
+
+    if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
+        p in t for p in ["swallow", "breathe", "breathing"]
+    ):
+        return True
+
+    return False
 def looks_like_urgent_dental_safety_issue(text: str) -> bool:
     """
     Catches urgent dental safety situations that may not use exact emergency keywords.
@@ -5680,19 +5743,19 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         reply_text = build_dangerous_dental_self_treatment_reply(user_text)
 
-        if is_true_emergency:
-            reply_text = (
-                f"{reply_text}\n\n"
-                "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
-                "please call 911 or go to the ER now.\n\n"
-                f"Our office number is {office_phone}."
-            )
-            next_prompt = _next_emergency_prompt(conversation)
-        else:
-            next_prompt = _next_intake_prompt(client, conversation)
+    if is_true_emergency:
+        reply_text = (
+            f"{reply_text}\n\n"
+            "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
+            "please call 911 or go to the ER now.\n\n"
+            f"Our office number is {office_phone}."
+        )
+        next_prompt = _next_emergency_prompt(conversation)
+    else:
+        next_prompt = None
 
-        if next_prompt and "?" not in reply_text:
-            reply_text = f"{reply_text}\n\n{next_prompt}"
+    if next_prompt and "?" not in reply_text:
+        reply_text = f"{reply_text}\n\n{next_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
