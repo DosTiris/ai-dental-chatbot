@@ -5984,8 +5984,8 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     "call_cta_label": "Call Office Now",
                     "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
                     "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
-                    "lead_email_error": email_send_error,
-                    "lead_sms_error": sms_send_error,
+                    "lead_email_error": lead_email_error,
+                    "lead_sms_error": lead_sms_error,
                     "show_start_over": show_start_over,
                 },
             )
@@ -6916,8 +6916,8 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "mode": "lead_complete",
                 "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
                 "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
-                "lead_email_error": email_send_error,
-                "lead_sms_error": sms_send_error,
+                "lead_email_error": lead_email_error,
+                "lead_sms_error": lead_sms_error,
                 "show_start_over": show_start_over,
             },
         )
