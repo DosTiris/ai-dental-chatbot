@@ -386,6 +386,49 @@ def build_disabled_service_reply(service: DentalService) -> str:
         "The office team can still follow up to confirm. Would you like to leave your information?"
     )
 
+def looks_like_disabled_service_request(user_text: str, disabled_service: Optional[DentalService]) -> bool:
+    """
+    Decide whether a disabled service match should be answered as unavailable.
+
+    This catches both:
+    - short service-only messages: "implants", "dental implants"
+    - request phrases: "I want implants", "Do you do implants?"
+    """
+    if not disabled_service:
+        return False
+
+    t = _norm_text(user_text)
+    if not t:
+        return False
+
+    # Short service-only messages like "implants" or "dental implants"
+    token_count = len(t.split())
+    if token_count <= 4:
+        return True
+
+    service_request_phrases = [
+        "do you do",
+        "do you offer",
+        "do you provide",
+        "do you have",
+        "can you do",
+        "can i get",
+        "can i do",
+        "does the office do",
+        "does this office do",
+        "are implants available",
+        "is invisalign available",
+        "i need",
+        "i want",
+        "looking for",
+        "interested in",
+        "appointment for",
+        "book",
+        "schedule",
+    ]
+
+    return any(p in t for p in service_request_phrases)
+
 # =========================================================
 # FAQ matching + intent helpers (put early because other helpers use _norm_text)
 # =========================================================
@@ -6381,40 +6424,26 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     disabled_service = detect_disabled_library_service_for_client(client, user_text)
 
-    if disabled_service and not looks_like_insurance_request(user_text):
-        service_question_phrases = [
-            "do you do",
-            "do you offer",
-            "do you provide",
-            "do you have",
-            "can you do",
-            "can i get",
-            "can i do",
-            "does the office do",
-            "does this office do",
-            "are implants available",
-            "is invisalign available",
-            "i need",
-            "i want",
-            "looking for",
-        ]
+    if (
+        disabled_service
+        and not looks_like_insurance_request(user_text)
+        and looks_like_disabled_service_request(user_text, disabled_service)
+    ):
+        reply_text = build_disabled_service_reply(disabled_service)
 
-        if any(p in _norm_text(user_text) for p in service_question_phrases):
-            reply_text = build_disabled_service_reply(disabled_service)
-
-            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
-            db.commit()
-            return ChatResponse(
-                reply=reply_text,
-                conversation_id=str(conversation.id),
-                meta={
-                    "mode": "disabled_service",
-                    "faq_match": False,
-                    "disabled_service_key": disabled_service.key,
-                    "disabled_service_name": disabled_service.display_name,
-                    "show_start_over": show_start_over,
-                },
-            )
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "disabled_service",
+                "faq_match": False,
+                "disabled_service_key": disabled_service.key,
+                "disabled_service_name": disabled_service.display_name,
+                "show_start_over": show_start_over,
+            },
+        )
 
 
     # =========================================================
