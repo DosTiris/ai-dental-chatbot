@@ -34,7 +34,13 @@ from app.config import OPENAI_API_KEY
 from app.database import SessionLocal
 from app.models import Client, Conversation, Message, ClientFAQ, FAQEvent
 from app.schemas import ChatRequest, ChatResponse
-from app.services.mia_service_library import DentalService, find_matching_service
+from app.services.mia_service_library import (
+    DentalService,
+    find_matching_service,
+    DEFAULT_ENABLED_SERVICE_KEYS,
+    SPECIALTY_PRESETS,
+    normalize_service_text,
+)
 from twilio.rest import Client as TwilioClient
 import resend
 
@@ -300,12 +306,18 @@ SERVICE_LIBRARY_TO_LEGACY_REASON = {
 }
 
 
-def detect_library_dental_service(user_text: str) -> Optional[DentalService]:
+def detect_library_dental_service(
+    user_text: str,
+    enabled_service_keys: Optional[List[str]] = None,
+) -> Optional[DentalService]:
     """
     Use Mia's master service library to recognize typed dental services.
     Admin/office questions are excluded so insurance/payment/records do not become appointment leads.
     """
-    matched_service = find_matching_service(user_text)
+    matched_service = find_matching_service(
+        user_text,
+        enabled_service_keys=enabled_service_keys,
+    )
 
     if not matched_service:
         return None
@@ -316,12 +328,18 @@ def detect_library_dental_service(user_text: str) -> Optional[DentalService]:
     return matched_service
 
 
-def detect_library_service_reason(user_text: str) -> Optional[str]:
+def detect_library_service_reason(
+    user_text: str,
+    enabled_service_keys: Optional[List[str]] = None,
+) -> Optional[str]:
     """
     Convert a matched master service into Mia's current legacy lead_reason bucket.
     This lets us improve recognition without changing the database enum yet.
     """
-    matched_service = detect_library_dental_service(user_text)
+    matched_service = detect_library_dental_service(
+        user_text,
+        enabled_service_keys=enabled_service_keys,
+    )
 
     if not matched_service:
         return None
@@ -331,6 +349,39 @@ def detect_library_service_reason(user_text: str) -> Optional[str]:
         "appointment request",
     )
 
+
+def detect_disabled_library_service_for_client(client: Client, user_text: str) -> Optional[DentalService]:
+    """
+    Detect if the user asked about a real service that exists in Mia's master library,
+    but this specific client has not enabled it.
+    """
+    all_match = find_matching_service(user_text)
+
+    if not all_match:
+        return None
+
+    if all_match.category == "admin_other":
+        return None
+
+    enabled_keys = get_client_enabled_service_keys(client)
+    enabled_match = find_matching_service(
+        user_text,
+        enabled_service_keys=enabled_keys,
+    )
+
+    if enabled_match:
+        return None
+
+    return all_match
+
+
+def build_disabled_service_reply(service: DentalService) -> str:
+    service_label = (service.display_name or "that service").lower()
+
+    return (
+        f"I’m not seeing {service_label} listed as a service this office currently offers. "
+        "The office team can still follow up to confirm. Would you like to leave your information?"
+    )
 
 # =========================================================
 # FAQ matching + intent helpers (put early because other helpers use _norm_text)
@@ -398,6 +449,39 @@ def get_client_setting(client, key: str, default=None):
     if isinstance(settings, dict):
         return settings.get(key, default)
     return default
+
+def get_client_enabled_service_keys(client) -> List[str]:
+    """
+    Read enabled dental services from clients.settings.
+
+    Priority:
+    1) settings.enabled_services
+    2) settings.practice_specialty preset
+    3) default general dentist services
+
+    This lets each office only offer the services they actually provide.
+    """
+    settings = getattr(client, "settings", None)
+
+    if not isinstance(settings, dict):
+        return DEFAULT_ENABLED_SERVICE_KEYS
+
+    raw_enabled = settings.get("enabled_services")
+
+    if isinstance(raw_enabled, list):
+        cleaned = [
+            str(item).strip()
+            for item in raw_enabled
+            if str(item or "").strip()
+        ]
+
+        if cleaned:
+            return cleaned
+
+    specialty = str(settings.get("practice_specialty") or "general").strip()
+    specialty_key = normalize_service_text(specialty).replace(" ", "_")
+
+    return SPECIALTY_PRESETS.get(specialty_key, DEFAULT_ENABLED_SERVICE_KEYS)
 
 def get_booking_url(client) -> str:
     return (get_client_setting(client, "booking_url", "") or "").strip()
@@ -5473,6 +5557,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(403, "Invalid client key")
     
     show_start_over = get_client_setting(client, "show_start_over", True)
+    enabled_service_keys = get_client_enabled_service_keys(client)
 
     office_phone = getattr(client, "office_phone", None) or "(555) 123-4567"
 
@@ -6180,6 +6265,46 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "show_start_over": show_start_over,
             },
         )
+
+    # =========================================================
+    # Disabled service guard
+    # =========================================================
+    disabled_service = detect_disabled_library_service_for_client(client, user_text)
+
+    if disabled_service and not looks_like_insurance_request(user_text):
+        service_question_phrases = [
+            "do you do",
+            "do you offer",
+            "do you provide",
+            "do you have",
+            "can you do",
+            "can i get",
+            "can i do",
+            "does the office do",
+            "does this office do",
+            "are implants available",
+            "is invisalign available",
+            "i need",
+            "i want",
+            "looking for",
+        ]
+
+        if any(p in _norm_text(user_text) for p in service_question_phrases):
+            reply_text = build_disabled_service_reply(disabled_service)
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "disabled_service",
+                    "faq_match": False,
+                    "disabled_service_key": disabled_service.key,
+                    "disabled_service_name": disabled_service.display_name,
+                    "show_start_over": show_start_over,
+                },
+            )
 
 
     # =========================================================
