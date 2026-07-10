@@ -2884,6 +2884,13 @@ def detect_email_opt_out(user_text: str) -> bool:
     exact_skip_replies = {
         "skip",
         "skp",
+        "skkp",
+        "sip",
+        "sskp",
+        "skipp",
+        "skiip",
+        "sp",
+        "skpp",
         "skip email",
         "no",
         "nope",
@@ -3974,18 +3981,49 @@ def build_unsafe_reason_detail_reply() -> str:
 
 def get_other_reason_detail(conversation: Conversation) -> str:
     """
-    Return the patient's free-text Other reason.
-    Some databases may not have lead_reason_detail yet, so fall back to lead_reason_source_text
-    when the reason is a generic appointment request.
+    Return the most specific service detail for staff notifications.
+
+    Examples:
+    - lead_reason = cleaning/checkup + source 'scaling and root planing'
+      -> Reason detail: Deep Cleaning
+
+    - lead_reason = cleaning/checkup + source 'Dental Sealants'
+      -> Reason detail: Dental Sealants
+
+    - lead_reason = appointment request + source 'root canal'
+      -> Reason detail: Root Canal
     """
     detail = (getattr(conversation, "lead_reason_detail", "") or "").strip()
-    if detail:
-        return detail[:120]
-
     reason = (getattr(conversation, "lead_reason", "") or "").strip()
     source = (getattr(conversation, "lead_reason_source_text", "") or "").strip()
 
-    if reason != "appointment request" or not source:
+    broad_reason_label = pretty_lead_reason(reason)
+
+    # 1) Prefer explicit detail if it exists.
+    if detail:
+        matched_from_detail = detect_library_dental_service(detail)
+
+        if matched_from_detail:
+            matched_label = (matched_from_detail.display_name or "").strip()
+            if matched_label and _norm_text(matched_label) != _norm_text(broad_reason_label):
+                return matched_label[:120]
+
+        return detail[:120]
+
+    if not source:
+        return ""
+
+    # 2) Use the new service library to turn source text into a clean display label.
+    matched_from_source = detect_library_dental_service(source)
+
+    if matched_from_source:
+        matched_label = (matched_from_source.display_name or "").strip()
+
+        if matched_label and _norm_text(matched_label) != _norm_text(broad_reason_label):
+            return matched_label[:120]
+
+    # 3) Preserve old fallback behavior for generic appointment requests.
+    if reason != "appointment request":
         return ""
 
     source_norm = _norm_text(source)
@@ -3998,6 +4036,11 @@ def get_other_reason_detail(conversation: Conversation) -> str:
         "book an appointment",
         "schedule appointment",
         "schedule an appointment",
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
     }
 
     if source_norm in generic_sources:
@@ -4203,6 +4246,25 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
         return "tooth pain"
 
     return None
+
+
+def last_assistant_offered_library_service(db: Session, conversation_id: uuid.UUID) -> Optional[DentalService]:
+    """
+    If Mia just answered a service question like:
+    'Yes — the office can help with dental sealants. Would you like to schedule an appointment?'
+    return the matched master-library service.
+    """
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return None
+
+    return detect_library_dental_service(last_msg.content or "")
+
 
 def last_assistant_was_emergency(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
@@ -5551,6 +5613,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     offered_service_reason = last_assistant_offered_scheduling_service(db, conversation.id)
     accepted_schedule = bool(offered_service_reason) and user_accepted_scheduling(user_text)
+    offered_library_service = last_assistant_offered_library_service(db, conversation.id) if accepted_schedule else None
 
     service_reason_now = offered_service_reason if accepted_schedule else detect_service_selection(user_text)
     if looks_like_other_service_selection(user_text):
@@ -6678,7 +6741,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if service_reason_now:
         question_mode = False
 
-    matched_library_service = None
+    matched_library_service = offered_library_service
 
     if question_mode:
         reason = None
@@ -6686,7 +6749,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         np_flag = None
         email_opt_out = False
     else:
-        matched_library_service = detect_library_dental_service(user_text)
+        matched_library_service = matched_library_service or detect_library_dental_service(user_text)
         reason = detect_appointment_reason(user_text)
         service_reason = service_reason_now
         np_flag = detect_new_patient_flag(user_text)
@@ -6814,7 +6877,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             updated = True
 
         if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
-            conversation.lead_reason_source_text = user_text[:120]
+            source_value = (user_text or "")[:120]
+
+            if matched_library_service and accepted_schedule:
+                source_value = matched_library_service.display_name[:120]
+
+            conversation.lead_reason_source_text = source_value
             updated = True
 
         if (
