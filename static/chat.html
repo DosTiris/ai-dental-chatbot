@@ -709,16 +709,7 @@
       <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
     </div>
 
-    <div id="service-menu" class="quick-actions hidden">
-      <button type="button" onclick="sendQuickMessage('I need a cleaning or checkup')">Cleaning / Checkup</button>
-      <button type="button" onclick="sendQuickMessage('I have tooth pain')">Tooth Pain</button>
-      <button type="button" onclick="sendQuickMessage('I broke a tooth or filling')">Broken Tooth / Filling</button>
-      <button type="button" onclick="sendQuickMessage('I am interested in implants or an extraction')">Implants / Extraction</button>
-      <button type="button" onclick="sendQuickMessage('I want whitening or cosmetic treatment')">Cosmetic / Whitening</button>
-      <button type="button" onclick="sendQuickMessage('I am interested in braces or Invisalign')">Braces / Invisalign</button>
-      <button type="button" onclick="sendQuickMessage('Other')">Other</button>
-      <button type="button" onclick="showMainMenu()">Back</button>
-    </div>
+    <div id="service-menu" class="quick-actions hidden"></div>
 
     <div id="messages"></div>
 
@@ -742,6 +733,17 @@
     let conversationId = localStorage.getItem(`chat_conversation_id_${clientKey}`) || null;
     let miaOpeningMessage = DEFAULT_OPENING_MESSAGE;
     let miaMobileOpeningMessage = DEFAULT_MOBILE_OPENING_MESSAGE;
+    const DEFAULT_SERVICE_BUTTONS = [
+      { key: "cleaning_checkup", label: "Cleaning / Checkup", message: "I need a cleaning or checkup" },
+      { key: "tooth_pain", label: "Tooth Pain", message: "I have tooth pain" },
+      { key: "broken_tooth", label: "Broken Tooth / Filling", message: "I broke a tooth or filling" },
+      { key: "implants", label: "Implants / Extraction", message: "I am interested in implants or an extraction" },
+      { key: "teeth_whitening", label: "Cosmetic / Whitening", message: "I want whitening or cosmetic treatment" },
+      { key: "invisalign", label: "Braces / Invisalign", message: "I am interested in braces or Invisalign" },
+      { key: "other", label: "Other", message: "Other" }
+    ];
+
+    let serviceButtons = DEFAULT_SERVICE_BUTTONS;
     let smsPhoneConsentAccepted = false;
     let smsPhoneConsentChoiceMade = false;
     let modalConsentAccepted = false;
@@ -831,6 +833,46 @@
       serviceMenu.classList.add("is-ready");
     }
 
+    function getServiceReplyLabels() {
+      const buttonsToRender = Array.isArray(serviceButtons) && serviceButtons.length
+        ? serviceButtons
+        : DEFAULT_SERVICE_BUTTONS;
+
+      return buttonsToRender
+        .map(button => String(button.label || "").trim())
+        .filter(Boolean);
+    }
+
+    function renderServiceMenuButtons() {
+      const serviceMenu = document.getElementById("service-menu");
+      if (!serviceMenu) return;
+
+      serviceMenu.innerHTML = "";
+
+      const buttonsToRender = Array.isArray(serviceButtons) && serviceButtons.length
+        ? serviceButtons
+        : DEFAULT_SERVICE_BUTTONS;
+
+      buttonsToRender.forEach(item => {
+        const label = String(item.label || "").trim();
+        const message = String(item.message || label).trim();
+
+        if (!label || !message) return;
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.addEventListener("click", () => sendQuickMessage(message));
+        serviceMenu.appendChild(btn);
+      });
+
+      const backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.textContent = "Back";
+      backBtn.addEventListener("click", () => showMainMenu());
+      serviceMenu.appendChild(backBtn);
+    }
+
     function resetOpeningMessage() {
       messagesEl.innerHTML = "";
       showMainMenu(true);
@@ -897,6 +939,10 @@
         }
         if (config.mobile_opening_message) {
           miaMobileOpeningMessage = config.mobile_opening_message;
+        }
+        if (Array.isArray(config.service_buttons) && config.service_buttons.length) {
+          serviceButtons = config.service_buttons;
+          renderServiceMenuButtons();
         }
       } catch (err) {
         console.warn("Mia config could not be loaded", err);
@@ -1077,15 +1123,7 @@
         const replyText = String(reply || "").toLowerCase();
 
         if (data.meta && data.meta.show_service_menu) {
-          renderQuickReplies([
-            "Cleaning / Checkup",
-            "Tooth Pain",
-            "Broken Tooth / Filling",
-            "Implants / Extraction",
-            "Cosmetic / Whitening",
-            "Braces / Invisalign",
-            "Other"
-          ]);
+          renderQuickReplies(getServiceReplyLabels());
         }
 
         if (data.meta && data.meta.show_booking_button) {
@@ -1126,6 +1164,7 @@
     });
 
     setupModalConsent();
+    renderServiceMenuButtons();
     loadClientConfig();
   </script>
 </body>

@@ -37,7 +37,9 @@ from app.schemas import ChatRequest, ChatResponse
 from app.services.mia_service_library import (
     DentalService,
     find_matching_service,
+    get_service,
     DEFAULT_ENABLED_SERVICE_KEYS,
+    DEFAULT_VISIBLE_SERVICE_BUTTONS,
     SPECIALTY_PRESETS,
     normalize_service_text,
 )
@@ -205,6 +207,7 @@ def build_public_widget_config(client: Client) -> dict:
         "mobile_opening_message": mobile_opening_message,
         "theme": theme,
         "launcher_theme": launcher_theme,
+        "service_buttons": build_widget_service_buttons(client),
     }
 
 EXTRACTOR_MODEL = "gpt-5-nano"
@@ -482,6 +485,118 @@ def get_client_enabled_service_keys(client) -> List[str]:
     specialty_key = normalize_service_text(specialty).replace(" ", "_")
 
     return SPECIALTY_PRESETS.get(specialty_key, DEFAULT_ENABLED_SERVICE_KEYS)
+
+def get_client_visible_service_keys(client) -> List[str]:
+    """
+    Read visible service buttons from clients.settings.
+
+    If missing, use the safe default visible buttons.
+    These are UI buttons only; enabled_services still controls what the office actually offers.
+    """
+    settings = getattr(client, "settings", None)
+
+    if not isinstance(settings, dict):
+        return DEFAULT_VISIBLE_SERVICE_BUTTONS
+
+    raw_visible = settings.get("visible_service_buttons")
+
+    if isinstance(raw_visible, list):
+        cleaned = [
+            str(item).strip()
+            for item in raw_visible
+            if str(item or "").strip()
+        ]
+
+        if cleaned:
+            return cleaned
+
+    return DEFAULT_VISIBLE_SERVICE_BUTTONS
+
+
+def build_widget_service_buttons(client) -> List[dict]:
+    """
+    Build safe service buttons for the public widget.
+    Only show services that are enabled for this client.
+    """
+    enabled_keys = set(get_client_enabled_service_keys(client))
+    visible_keys = get_client_visible_service_keys(client)
+
+    buttons: List[dict] = []
+
+    for key in visible_keys:
+        key = str(key or "").strip()
+
+        if not key:
+            continue
+
+        if key == "other":
+            buttons.append({
+                "key": "other",
+                "label": "Other",
+                "message": "Other",
+            })
+            continue
+
+        if key not in enabled_keys:
+            continue
+
+        service = get_service(key)
+        if not service:
+            continue
+
+        label = service.display_name.strip()
+
+        if not label:
+            continue
+
+        if key == "tooth_pain":
+            message = "I have tooth pain"
+        elif key in {"broken_tooth", "lost_crown_filling"}:
+            message = f"I have a {label.lower()}"
+        else:
+            message = f"I need {label.lower()}"
+
+        buttons.append({
+            "key": key,
+            "label": label,
+            "message": message,
+        })
+
+    if not buttons:
+        buttons = [
+            {"key": "cleaning_checkup", "label": "Cleaning / Checkup", "message": "I need a cleaning or checkup"},
+            {"key": "tooth_pain", "label": "Tooth Pain", "message": "I have tooth pain"},
+            {"key": "fillings", "label": "Fillings", "message": "I need fillings"},
+            {"key": "other", "label": "Other", "message": "Other"},
+        ]
+
+    return buttons[:8]
+
+
+def build_service_menu_prompt(client=None) -> str:
+    """
+    Build the patient-facing reason prompt using the office's visible service buttons.
+    """
+    buttons = build_widget_service_buttons(client) if client is not None else []
+
+    labels = [
+        (button.get("label") or "").strip().lower()
+        for button in buttons
+        if (button.get("label") or "").strip()
+        and (button.get("key") or "").strip() != "other"
+    ]
+
+    if not labels:
+        return "What brings you in—cleaning/checkup, tooth pain, fillings, or something else?"
+
+    if len(labels) == 1:
+        label_text = labels[0]
+    elif len(labels) == 2:
+        label_text = f"{labels[0]} or {labels[1]}"
+    else:
+        label_text = ", ".join(labels[:-1]) + f", or {labels[-1]}"
+
+    return f"What brings you in—{label_text}, or something else?"
 
 def get_booking_url(client) -> str:
     return (get_client_setting(client, "booking_url", "") or "").strip()
@@ -4017,13 +4132,8 @@ def reply_should_show_service_menu(reply_text: str) -> bool:
     t = _norm_text(reply_text or "")
 
     return (
-        "what brings you in" in t
-        and "cleaning checkup" in t
-        and "tooth pain" in t
-        and "fillings" in t
-        and "braces invisalign" in t
-        and "whitening" in t
-        and "something else" in t
+        ("what brings you in" in t or "what can we help you with" in t)
+        and ("something else" in t or "other" in t)
     )
 
 def looks_like_other_service_selection(user_text: str) -> bool:
@@ -5322,7 +5432,7 @@ def looks_like_name_only(user_text: str) -> Optional[str]:
     return normalized
 
 
-def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str], Optional[str]]:
+def receptionist_bypass_reply(conversation: Conversation, client: Optional[Client] = None) -> Tuple[Optional[str], Optional[str]]:
     has_reason = conversation_has_specific_lead_reason(conversation)
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
@@ -5347,7 +5457,7 @@ def receptionist_bypass_reply(conversation: Conversation) -> Tuple[Optional[str]
 
     if not has_reason:
         return (
-            "What brings you in—cleaning/checkup, tooth pain, fillings, crowns, braces/Invisalign, whitening, or something else?",
+            build_service_menu_prompt(client),
             "reason",
         )
 
@@ -5485,7 +5595,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     # Match your existing intake field order
 
     if not conversation_has_specific_lead_reason(conversation):
-        return "What brings you in—cleaning/checkup, tooth pain, fillings, crowns, braces/Invisalign, whitening, or something else?"
+        return build_service_menu_prompt(client)
 
     if not (conversation.lead_name or "").strip():
         return "What’s your first name?"
@@ -7548,13 +7658,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             bypass_text = "Got it — can you briefly tell me what you need help with?"
             bypass_stage = "reason_detail"
         else:
-            bypass_text, bypass_stage = receptionist_bypass_reply(conversation)
+            bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
 
             if not bypass_text:
-                bypass_text = (
-                    "What can we help you with today—cleaning, tooth pain, fillings, crowns, "
-                    "braces/Invisalign, whitening, or something else?"
-                )
+                bypass_text = build_service_menu_prompt(client)
                 bypass_stage = "reason"
 
         # If we were waiting for a free-text reason after "other", safely map it
@@ -7575,7 +7682,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 db.refresh(conversation)
 
                 # Re-enter bypass flow now that reason is safely captured
-                bypass_text, bypass_stage = receptionist_bypass_reply(conversation)
+                bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
             else:
                 bypass_text = (
                     "Please briefly describe the issue using plain words only, like "
