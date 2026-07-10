@@ -34,6 +34,7 @@ from app.config import OPENAI_API_KEY
 from app.database import SessionLocal
 from app.models import Client, Conversation, Message, ClientFAQ, FAQEvent
 from app.schemas import ChatRequest, ChatResponse
+from app.services.mia_service_library import DentalService, find_matching_service
 from twilio.rest import Client as TwilioClient
 import resend
 
@@ -227,6 +228,108 @@ SERVICE_LABELS = {
 
 def pretty_service_label(service_reason: str) -> str:
     return SERVICE_LABELS.get(service_reason, (service_reason or "").title())
+
+
+# =========================================================
+# Mia master service library bridge
+# =========================================================
+
+SERVICE_LIBRARY_TO_LEGACY_REASON = {
+    # General
+    "dental_consultation": "appointment request",
+    "new_patient_exam": "cleaning/checkup",
+    "follow_up": "appointment request",
+
+    # Preventive / diagnostic
+    "cleaning_checkup": "cleaning/checkup",
+    "deep_cleaning": "cleaning/checkup",
+    "x_rays": "appointment request",
+    "fluoride": "cleaning/checkup",
+    "sealants": "cleaning/checkup",
+
+    # Urgent / symptoms
+    "tooth_pain": "tooth pain",
+    "broken_tooth": "broken tooth/filling",
+    "swelling_abscess": "tooth pain",
+    "lost_crown_filling": "broken tooth/filling",
+
+    # Restorative
+    "fillings": "broken tooth/filling",
+    "crowns": "crown",
+    "bridges": "crown",
+    "bonding": "cosmetic/whitening",
+
+    # Endodontic
+    "root_canal": "appointment request",
+
+    # Oral surgery
+    "tooth_extraction": "extraction/implant",
+    "wisdom_tooth": "extraction/implant",
+    "bone_graft": "extraction/implant",
+
+    # Cosmetic
+    "teeth_whitening": "cosmetic/whitening",
+    "veneers": "cosmetic/whitening",
+    "smile_makeover": "cosmetic/whitening",
+
+    # Orthodontic
+    "braces": "orthodontics",
+    "invisalign": "orthodontics",
+    "retainers": "orthodontics",
+
+    # Implants / dentures
+    "implants": "extraction/implant",
+    "dentures": "appointment request",
+
+    # Periodontic
+    "gum_disease": "appointment request",
+    "gum_grafting": "appointment request",
+
+    # Pediatric
+    "child_cleaning": "cleaning/checkup",
+    "child_cavity": "broken tooth/filling",
+    "space_maintainer": "appointment request",
+
+    # TMJ / oral medicine
+    "tmj": "tooth pain",
+    "night_guard": "appointment request",
+    "oral_cancer_screening": "appointment request",
+
+    # Sleep
+    "sleep_apnea_appliance": "appointment request",
+}
+
+
+def detect_library_dental_service(user_text: str) -> Optional[DentalService]:
+    """
+    Use Mia's master service library to recognize typed dental services.
+    Admin/office questions are excluded so insurance/payment/records do not become appointment leads.
+    """
+    matched_service = find_matching_service(user_text)
+
+    if not matched_service:
+        return None
+
+    if matched_service.category == "admin_other":
+        return None
+
+    return matched_service
+
+
+def detect_library_service_reason(user_text: str) -> Optional[str]:
+    """
+    Convert a matched master service into Mia's current legacy lead_reason bucket.
+    This lets us improve recognition without changing the database enum yet.
+    """
+    matched_service = detect_library_dental_service(user_text)
+
+    if not matched_service:
+        return None
+
+    return SERVICE_LIBRARY_TO_LEGACY_REASON.get(
+        matched_service.key,
+        "appointment request",
+    )
 
 
 # =========================================================
@@ -731,8 +834,10 @@ def looks_like_service_question(user_text: str) -> bool:
     if looks_like_pricing_request(user_text):
         return False
 
+    matched_service = detect_library_dental_service(user_text)
     service_reason = detect_service_selection(user_text) or detect_appointment_reason(user_text)
-    if not service_reason or service_reason == "appointment request":
+
+    if not matched_service and (not service_reason or service_reason == "appointment request"):
         return False
 
     service_question_phrases = [
@@ -756,6 +861,29 @@ def build_service_question_reply(user_text: str) -> str:
     """Answer service availability first, then offer scheduling without collecting name immediately."""
     t = _norm_text(user_text)
     service_reason = detect_service_selection(user_text) or detect_appointment_reason(user_text)
+
+    matched_service = detect_library_dental_service(user_text)
+
+    if matched_service:
+        service_label = matched_service.display_name.lower()
+
+        if matched_service.category in {
+            "cosmetic",
+            "orthodontic",
+            "implants_dentures",
+            "oral_surgery",
+            "periodontic",
+            "sleep",
+        }:
+            return (
+                f"Yes — the office can help with {service_label}. "
+                "Would you like to schedule a consultation?"
+            )
+
+        return (
+            f"Yes — the office can help with {service_label}. "
+            "Would you like to schedule an appointment?"
+        )
 
     if service_reason == "extraction/implant":
         if "implant" in t:
@@ -2155,6 +2283,11 @@ def extract_name(text_in: str) -> Optional[str]:
 
 def detect_appointment_reason(text_in: str) -> Optional[str]:
     t = (text_in or "").lower()
+
+    library_reason = detect_library_service_reason(text_in)
+    if library_reason:
+        return library_reason
+    
     if any(k in t for k in ["cleaning", "cleanup", "clean up", "clean-up", "checkup", "check-up", "routine", "exam"]):
         return "cleaning/checkup"
     if any(k in t for k in ["toothache", "tooth ache", "pain", "hurt", "swelling"]):
@@ -2308,6 +2441,11 @@ def map_reason_detail_to_enum(text_in: str) -> Optional[str]:
 # =========================================================
 def detect_service_selection(user_text: str) -> Optional[str]:
     t = (user_text or "").strip().lower()
+
+    library_reason = detect_library_service_reason(user_text)
+    if library_reason:
+        return library_reason
+    
     if "tooth pain" in t or "tooth hurts" in t or "toothache" in t:
         return "tooth pain"
 
@@ -4036,6 +4174,10 @@ def last_assistant_offered_scheduling_service(db: Session, conversation_id: uuid
     t = _norm_text(last_msg.content or "")
     if not t:
         return None
+    
+    library_reason = detect_library_service_reason(t)
+    if library_reason:
+        return library_reason
 
     # Keep these aligned with your 3.6 service confirmation text
     if "offer dental implants" in t or ("implants" in t and "schedule" in t):
@@ -6536,12 +6678,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     if service_reason_now:
         question_mode = False
 
+    matched_library_service = None
+
     if question_mode:
         reason = None
         service_reason = None
         np_flag = None
         email_opt_out = False
     else:
+        matched_library_service = detect_library_dental_service(user_text)
         reason = detect_appointment_reason(user_text)
         service_reason = service_reason_now
         np_flag = detect_new_patient_flag(user_text)
@@ -6670,6 +6815,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
             conversation.lead_reason_source_text = user_text[:120]
+            updated = True
+
+        if (
+        matched_library_service
+        and (getattr(conversation, "lead_reason", "") or "").strip()
+        and hasattr(conversation, "lead_reason_detail")
+        and not (getattr(conversation, "lead_reason_detail", "") or "").strip()
+    ):
+            setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
             updated = True
 
     asked_for_name = last_assistant_asked_for_name(db, conversation.id)
