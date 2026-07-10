@@ -6785,7 +6785,20 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             updated = True
 
         if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
-            conversation.lead_reason_source_text = (user_text or "")[:120]
+            source_value = (user_text or "")[:120]
+
+            if matched_library_service and accepted_schedule:
+                source_value = matched_library_service.display_name[:120]
+
+            conversation.lead_reason_source_text = source_value
+            updated = True
+
+        if (
+            matched_library_service
+            and hasattr(conversation, "lead_reason_detail")
+            and not (getattr(conversation, "lead_reason_detail", "") or "").strip()
+        ):
+            setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
             updated = True
 
     # Once a service is selected, force intake mode to stay active
