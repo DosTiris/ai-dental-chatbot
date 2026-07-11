@@ -383,7 +383,7 @@ def build_disabled_service_reply(service: DentalService) -> str:
 
     return (
         f"I’m not seeing {service_label} listed as a service this office currently offers. "
-        "The office team can still follow up to confirm. Would you like to leave your information?"
+        "You can contact the office directly to confirm, or I can help with another service."
     )
 
 def looks_like_disabled_service_request(user_text: str, disabled_service: Optional[DentalService]) -> bool:
