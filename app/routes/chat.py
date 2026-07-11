@@ -5850,7 +5850,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     question_mode = bool(asked_for_question)
 
     offered_service_reason = last_assistant_offered_scheduling_service(db, conversation.id)
-    accepted_schedule = bool(offered_service_reason) and user_accepted_scheduling(user_text)
+    service_offer_name = looks_like_name_only(user_text) if offered_service_reason else None
+
+    accepted_schedule = bool(offered_service_reason) and (
+        user_accepted_scheduling(user_text)
+        or bool(service_offer_name)
+    )
+
     offered_library_service = last_assistant_offered_library_service(db, conversation.id) if accepted_schedule else None
 
     service_reason_now = offered_service_reason if accepted_schedule else detect_service_selection(user_text)
@@ -6994,6 +7000,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     email = extract_email(user_text)
     phone = extract_phone(user_text)
     name = extract_name(user_text)
+
+    if not name and service_offer_name:
+        name = service_offer_name
 
     # If user replied with compact "name + phone" format, capture the leftover text as name
     if not name and phone:
