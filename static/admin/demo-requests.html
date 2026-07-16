@@ -1,0 +1,1158 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin - Demo Requests</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f6f8fb;
+      color: #111827;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      background: #fff;
+      border-right: 1px solid #e5e7eb;
+      padding: 24px 18px;
+    }
+
+    .brand {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 28px;
+    }
+
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .nav a {
+      text-decoration: none;
+      color: #374151;
+      padding: 10px 12px;
+      border-radius: 10px;
+      display: block;
+    }
+
+    .nav a.active {
+      background: #eef2ff;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+
+    .main {
+      padding: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+
+    .subtitle {
+      color: #6b7280;
+      margin-top: 6px;
+      margin-bottom: 22px;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+      margin-bottom: 20px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 200px 170px 170px auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      font-weight: 700;
+      font-size: 14px;
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+
+    select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+      background: #fff;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: #111827;
+      color: white;
+    }
+
+    #clearFiltersBtn {
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+    }
+
+    .muted {
+      color: #6b7280;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    .danger {
+      color: #b00020;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
+    .summary-row {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
+      margin: 18px 0;
+    }
+
+    .summary-card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .summary-number {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .summary-label {
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    @media (max-width: 1100px) {
+      .summary-row {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .summary-row {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .request-list {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .request-card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+
+    .request-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+    }
+
+    .request-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .request-sub {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 5px;
+      word-break: break-word;
+    }
+
+    .detail {
+      font-size: 14px;
+      margin-bottom: 7px;
+      line-height: 1.45;
+    }
+
+    .detail b {
+      color: #111827;
+    }
+
+    .notes-box {
+    width: 100%;
+    min-height: 80px;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    font-size: 14px;
+    font-family: Arial, sans-serif;
+    box-sizing: border-box;
+    margin-top: 6px;
+    resize: vertical;
+    }
+
+    .save-notes-btn {
+    margin-top: 8px;
+    background: #111827;
+    color: white;
+    padding: 8px 10px;
+    font-size: 13px;
+    }
+
+    .toggle-details-btn {
+      margin-top: 10px;
+      background: #f3f4f6;
+      color: #111827;
+      border: 1px solid #e5e7eb;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .archive-request-btn {
+      margin-top: 10px;
+      margin-left: 8px;
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .unarchive-request-btn {
+      margin-top: 10px;
+      margin-left: 8px;
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #bbf7d0;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .details-panel {
+      display: none;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px dashed #e5e7eb;
+    }
+
+    .details-panel.open {
+      display: block;
+    }
+
+    .badge {
+      display: inline-block;
+      background: #dcfce7;
+      color: #166534;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .status-select {
+    border: 1px solid #d1d5db;
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    cursor: pointer;
+    }
+
+    .status-new {
+    background: #dcfce7;
+    color: #166534;
+    }
+
+    .status-contacted {
+    background: #dbeafe;
+    color: #1d4ed8;
+    }
+
+    .status-demo_scheduled {
+    background: #ede9fe;
+    color: #6d28d9;
+    }
+
+    .status-closed {
+    background: #e5e7eb;
+    color: #374151;
+    }
+
+    .status-not_interested {
+    background: #fee2e2;
+    color: #b91c1c;
+    }
+
+    .empty {
+      color: #6b7280;
+      text-align: center;
+      padding: 30px;
+      border: 1px dashed #d1d5db;
+      border-radius: 14px;
+      background: #fafafa;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .request-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">DentalBot Admin</div>
+
+      <nav class="nav">
+        <a href="/static/admin/dashboard.html">Dashboard</a>
+        <a href="/static/admin/demo-requests.html" class="active">Demo Requests</a>
+        <a href="/static/admin/faqs.html">FAQs</a>
+      </nav>
+
+      <div class="muted" style="margin-top:32px;">
+        Internal dashboard for managing demo requests.
+      </div>
+    </aside>
+
+    <main class="main">
+      <h1>Demo Requests</h1>
+      <p class="subtitle">View new demo requests from the Dos Tiris website.</p>
+
+      <section class="card">
+        <div class="controls">
+          <div>
+            <label>Admin Key</label>
+            <input id="adminKey" type="text" placeholder="x-admin-key value" />
+          </div>
+
+          <div>
+            <label>Search</label>
+            <input id="searchInput" type="text" placeholder="Search name, practice, phone, email..." />
+          </div>
+
+          <div>
+            <label><b>Status Filter</b></label>
+            <select id="statusFilter">
+              <option value="all">All</option>
+              <option value="new">New</option>
+              <option value="contacted">Contacted</option>
+              <option value="demo_scheduled">Demo Scheduled</option>
+              <option value="closed">Closed</option>
+              <option value="not_interested">Not Interested</option>
+            </select>
+          </div>
+
+          <div>
+            <label><b>Date Filter</b></label>
+            <select id="dateFilter">
+              <option value="all">All</option>
+              <option value="today">Today</option>
+              <option value="7">Last 7 Days</option>
+              <option value="30">Last 30 Days</option>
+            </select>
+          </div>
+
+          <div>
+            <label><b>Archive Filter</b></label>
+            <select id="archiveFilter">
+              <option value="active">Active</option>
+              <option value="archived">Archived</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button id="loadBtn">Load Requests</button>
+            <button id="exportCsvBtn" type="button">Export CSV</button>
+            <button id="clearFiltersBtn" type="button">Clear Filters</button>
+          </div>
+        </div>
+
+        <div id="status" class="muted">Enter admin key, then click Load Requests.</div>
+        <div id="lastUpdated" class="muted">Last updated: Never</div>
+      </section>
+
+      <div class="summary-row" id="summaryRow">
+        <div class="summary-card">
+          <div class="summary-number" id="summaryShowing">0</div>
+          <div class="summary-label">Showing</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryNew">0</div>
+          <div class="summary-label">New</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryContacted">0</div>
+          <div class="summary-label">Contacted</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryDemoScheduled">0</div>
+          <div class="summary-label">Demo Scheduled</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryClosed">0</div>
+          <div class="summary-label">Closed</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="summary-number" id="summaryNotInterested">0</div>
+          <div class="summary-label">Not Interested</div>
+        </div>
+      </div>
+
+      <section id="requestList" class="request-list">
+        <div class="empty">No demo requests loaded yet.</div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const API_BASE = "";
+    let allRequests = [];
+
+    function $(id) {
+      return document.getElementById(id);
+    }
+
+    function escapeHtml(str) {
+      return String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function formatDate(value) {
+      if (!value) return "—";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return value;
+
+      return d.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    }
+
+    function formatInterest(value) {
+      const map = {
+        mia: "Mia Only",
+        website_mia: "Website + Mia",
+        not_sure: "Not Sure Yet"
+      };
+
+      return map[value] || value || "—";
+    }
+
+    function setStatus(message, isError = false) {
+      $("status").textContent = message;
+      $("status").className = isError ? "danger" : "muted";
+    }
+
+    function setLastUpdated() {
+      const now = new Date();
+
+      $("lastUpdated").textContent = "Last updated: " + now.toLocaleString([], {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    }
+
+    function getAdminKey() {
+      return ($("adminKey").value || "").trim();
+    }
+
+    function saveAdminKey() {
+      localStorage.setItem("adminKey", getAdminKey());
+    }
+
+    function loadAdminKey() {
+      $("adminKey").value = localStorage.getItem("adminKey") || "";
+    }
+
+    function getFilteredRequests() {
+      const query = ($("searchInput").value || "").trim();
+      const selectedStatus = $("statusFilter") ? $("statusFilter").value : "all";
+      const selectedDate = $("dateFilter") ? $("dateFilter").value : "all";
+
+      return allRequests.filter(item => {
+        const itemStatus = item.status || "new";
+
+        const matchesStatus =
+          selectedStatus === "all" || itemStatus === selectedStatus;
+
+        const matchesDate = matchesDateFilter(item, selectedDate);
+
+        return matchesStatus && matchesDate && matchesSearch(item, query);
+      });
+    }
+
+    function csvEscape(value) {
+      const str = String(value || "");
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+
+    function csvPhone(value) {
+      const digits = String(value || "").replace(/\D/g, "");
+
+      if (!digits) return "";
+
+      return `="${digits}"`;
+    }
+
+    function getExportFilename() {
+      const status = $("statusFilter") ? $("statusFilter").value : "all";
+      const date = $("dateFilter") ? $("dateFilter").value : "all";
+
+      const statusLabelMap = {
+        all: "all",
+        new: "new",
+        contacted: "contacted",
+        demo_scheduled: "demo-scheduled",
+        closed: "closed",
+        not_interested: "not-interested"
+      };
+
+      const dateLabelMap = {
+        all: "all",
+        today: "today",
+        "7": "last-7-days",
+        "30": "last-30-days"
+      };
+
+      const statusLabel = statusLabelMap[status] || "all";
+      const dateLabel = dateLabelMap[date] || "all";
+
+      return `demo-requests-${statusLabel}-${dateLabel}.csv`;
+    }
+
+    function matchesDateFilter(item, dateFilter) {
+      if (dateFilter === "all") return true;
+
+      if (!item.created_at) return false;
+
+      const createdDate = new Date(item.created_at);
+
+      if (Number.isNaN(createdDate.getTime())) {
+        return false;
+      }
+
+      const now = new Date();
+
+      if (dateFilter === "today") {
+        return (
+          createdDate.getFullYear() === now.getFullYear() &&
+          createdDate.getMonth() === now.getMonth() &&
+          createdDate.getDate() === now.getDate()
+        );
+      }
+
+      const days = Number(dateFilter);
+
+      if (!days) return true;
+
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+
+      return createdDate >= cutoff;
+    }
+
+    function matchesSearch(item, query) {
+      if (!query) return true;
+
+      const haystack = [
+        item.name,
+        item.practice_name,
+        item.email,
+        item.phone,
+        item.website,
+        item.interest,
+        item.message,
+        item.status,
+        item.notes_text,
+        item.notes
+        ].join(" ").toLowerCase();
+
+      return haystack.includes(query.toLowerCase());
+    }
+
+    function updateSummary(rows) {
+        const counts = {
+          showing: rows.length,
+          new: 0,
+          contacted: 0,
+          demo_scheduled: 0,
+          closed: 0,
+          not_interested: 0
+        };
+
+        rows.forEach(item => {
+          const status = item.status || "new";
+
+          if (counts[status] !== undefined) {
+            counts[status] += 1;
+          }
+        });
+
+        $("summaryShowing").textContent = String(counts.showing);
+        $("summaryNew").textContent = String(counts.new);
+        $("summaryContacted").textContent = String(counts.contacted);
+        $("summaryDemoScheduled").textContent = String(counts.demo_scheduled);
+        $("summaryClosed").textContent = String(counts.closed);
+        $("summaryNotInterested").textContent = String(counts.not_interested);
+      }
+
+    function clearFilters() {
+      if ($("searchInput")) {
+        $("searchInput").value = "";
+      }
+
+      if ($("statusFilter")) {
+        $("statusFilter").value = "all";
+      }
+
+      if ($("dateFilter")) {
+        $("dateFilter").value = "all";
+      }
+
+      if ($("archiveFilter")) {
+        $("archiveFilter").value = "active";
+      }
+
+      loadRequests();
+    }
+
+    function renderRequests() {
+      const list = $("requestList");
+      const rows = getFilteredRequests();
+
+      updateSummary(rows);
+
+      if (!rows.length) {
+        list.innerHTML = `<div class="empty">No demo requests match this search.</div>`;
+        return;
+      }
+
+      list.innerHTML = rows.map(item => `
+      
+        <div class="request-card">
+          <div class="request-grid">
+            <div>
+              <div class="request-title">${escapeHtml(item.practice_name || "Unnamed Practice")}</div>
+              <div class="request-sub">${escapeHtml(item.name || "No name provided")}</div>
+              <div class="request-sub">Received: ${escapeHtml(formatDate(item.created_at))}</div>
+            </div>
+
+            <div>
+              <div class="detail"><b>Phone:</b> ${escapeHtml(item.phone || "—")}</div>
+              <div class="detail"><b>Email:</b> ${escapeHtml(item.email || "—")}</div>
+              <div class="detail"><b>Website:</b> ${escapeHtml(item.website || "Not provided")}</div>
+            </div>
+
+            <div>
+              <select class="status-select status-${escapeHtml(item.status || "new")}" data-id="${escapeHtml(item.id)}">
+                <option value="new" ${(item.status || "new") === "new" ? "selected" : ""}>New</option>
+                <option value="contacted" ${item.status === "contacted" ? "selected" : ""}>Contacted</option>
+                <option value="demo_scheduled" ${item.status === "demo_scheduled" ? "selected" : ""}>Demo Scheduled</option>
+                <option value="closed" ${item.status === "closed" ? "selected" : ""}>Closed</option>
+                <option value="not_interested" ${item.status === "not_interested" ? "selected" : ""}>Not Interested</option>
+              </select>
+
+              <div class="detail"><b>Interest:</b> ${escapeHtml(formatInterest(item.interest))}</div>
+
+              <button class="toggle-details-btn" type="button" data-id="${escapeHtml(item.id)}">
+                View Details
+              </button>
+              ${item.archived ? `
+                <button class="unarchive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Unarchive
+                </button>
+              ` : `
+                <button class="archive-request-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Archive
+                </button>
+              `}
+
+              <div class="details-panel" data-id="${escapeHtml(item.id)}">
+                <div class="detail"><b>Message:</b> ${escapeHtml(item.message || "No message provided")}</div>
+                <div class="detail"><b>Notes:</b></div>
+
+                <div class="detail" style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:10px; margin-bottom:8px;">
+                  <b>Saved Note:</b> ${escapeHtml(item.notes_text || item.notes || "No note saved yet")}
+                </div>
+
+                <textarea class="notes-box" data-id="${escapeHtml(item.id)}"></textarea>
+
+                <button class="save-notes-btn" type="button" data-id="${escapeHtml(item.id)}">
+                  Save Notes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `).join("");
+
+      document.querySelectorAll(".notes-box").forEach(box => {
+        const item = allRequests.find(r => String(r.id) === String(box.dataset.id));
+
+        if (item) {
+          box.value = item.notes_text || item.notes || "";
+        }
+      });
+
+      document.querySelectorAll(".toggle-details-btn").forEach(button => {
+        button.addEventListener("click", () => {
+          const requestId = button.dataset.id;
+          const panel = document.querySelector(`.details-panel[data-id="${requestId}"]`);
+
+          if (!panel) return;
+
+          panel.classList.toggle("open");
+
+          button.textContent = panel.classList.contains("open")
+            ? "Hide Details"
+            : "View Details";
+        });
+      });
+
+      document.querySelectorAll(".archive-request-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+          const requestId = button.dataset.id;
+
+          const confirmed = confirm("Archive this demo request? It will be hidden from the active list.");
+
+          if (!confirmed) return;
+
+          try {
+            await archiveRequest(requestId);
+
+            allRequests = allRequests.filter(r => String(r.id) !== String(requestId));
+
+            renderRequests();
+
+            setStatus("Demo request archived.");
+          } catch (error) {
+            setStatus("Archive failed: " + error.message, true);
+          }
+        });
+      });
+
+      document.querySelectorAll(".unarchive-request-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+          const requestId = button.dataset.id;
+
+          const confirmed = confirm("Unarchive this demo request? It will return to the active list.");
+
+          if (!confirmed) return;
+
+          try {
+            await unarchiveRequest(requestId);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
+            if (item) {
+              item.archived = false;
+            }
+
+            const archiveFilter = $("archiveFilter") ? $("archiveFilter").value : "active";
+
+            if (archiveFilter === "archived") {
+              allRequests = allRequests.filter(r => String(r.id) !== String(requestId));
+            }
+
+            renderRequests();
+
+            setStatus("Demo request unarchived.");
+          } catch (error) {
+            setStatus("Unarchive failed: " + error.message, true);
+          }
+        });
+      });
+
+      document.querySelectorAll(".status-select").forEach(select => {
+        select.addEventListener("focus", () => {
+          select.dataset.previousValue = select.value;
+        });
+
+        select.addEventListener("change", async () => {
+          const requestId = select.dataset.id;
+          const newStatus = select.value;
+          const previousStatus = select.dataset.previousValue || "new";
+
+          if (newStatus === "closed" || newStatus === "not_interested") {
+            const label = newStatus === "closed" ? "Closed" : "Not Interested";
+
+            const confirmed = confirm(
+              `Are you sure you want to mark this demo request as ${label}?`
+            );
+
+            if (!confirmed) {
+              select.value = previousStatus;
+              select.className = `status-select status-${previousStatus}`;
+              return;
+            }
+          }
+
+          try {
+            await updateStatus(requestId, newStatus);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
+            if (item) {
+              item.status = newStatus;
+            }
+
+            select.dataset.previousValue = newStatus;
+            select.className = `status-select status-${newStatus}`;
+
+            setStatus("Status updated.");
+
+            renderRequests();
+          } catch (error) {
+            select.value = previousStatus;
+            select.className = `status-select status-${previousStatus}`;
+            setStatus("Status update failed: " + error.message, true);
+          }
+        });
+      });
+
+      document.querySelectorAll(".save-notes-btn").forEach(button => {
+        button.addEventListener("click", async () => {
+          const card = button.closest(".request-card");
+          const notesBox = card.querySelector(".notes-box");
+          const requestId = notesBox.dataset.id;
+
+          try {
+            const saved = await updateNotes(requestId, notesBox.value);
+
+            const item = allRequests.find(r => String(r.id) === String(requestId));
+
+            if (item) {
+              item.notes_text = saved.notes || "";
+              item.notes = saved.notes || "";
+            }
+
+            setStatus("Notes saved.");
+            } catch (error) {
+              setStatus("Notes save failed: " + error.message, true);
+            }
+        });
+      });
+    }
+
+    async function updateNotes(requestId, notes) {
+        const adminKey = getAdminKey();
+
+        const response = await fetch(`/admin/demo-requests/${requestId}/notes`, {
+            method: "POST",
+            headers: {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey
+            },
+            body: JSON.stringify({ notes })
+        });
+
+        const text = await response.text();
+        let data = null;
+
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch (e) {}
+
+        if (!response.ok) {
+            throw new Error(data?.detail || text || "Unable to save notes.");
+        }
+
+        return data;
+        }
+
+    async function archiveRequest(requestId) {
+      const adminKey = getAdminKey();
+
+      const response = await fetch(`/admin/demo-requests/${requestId}/archive`, {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey
+        }
+      });
+
+      const text = await response.text();
+      let data = null;
+
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {}
+
+      if (!response.ok) {
+        throw new Error(data?.detail || text || "Unable to archive request.");
+      }
+
+      return data;
+    }
+
+    async function unarchiveRequest(requestId) {
+      const adminKey = getAdminKey();
+
+      const response = await fetch(`/admin/demo-requests/${requestId}/unarchive`, {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "Content-Type": "application/json",
+          "x-admin-key": adminKey
+        }
+      });
+
+      const text = await response.text();
+      let data = null;
+
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (e) {}
+
+      if (!response.ok) {
+        throw new Error(data?.detail || text || "Unable to unarchive request.");
+      }
+
+      return data;
+    }
+
+    async function updateStatus(requestId, status) {
+        const adminKey = getAdminKey();
+
+        const response = await fetch(`/admin/demo-requests/${requestId}/status`, {
+            method: "POST",
+            headers: {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey
+            },
+            body: JSON.stringify({ status })
+        });
+
+        const text = await response.text();
+        let data = null;
+
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch (e) {}
+
+        if (!response.ok) {
+            throw new Error(data?.detail || text || "Unable to update status.");
+        }
+
+        return data;
+        }
+
+    function exportCsv() {
+      const rows = getFilteredRequests();
+
+      if (!rows.length) {
+        setStatus("No demo requests to export.", true);
+        return;
+      }
+
+      const headers = [
+        "Practice Name",
+        "Contact Name",
+        "Phone",
+        "Email",
+        "Website",
+        "Interest",
+        "Status",
+        "Message",
+        "Notes",
+        "Received"
+      ];
+
+      const csvRows = rows.map(item => [
+        item.practice_name || "",
+        item.name || "",
+        csvPhone(item.phone),
+        item.email || "",
+        item.website || "",
+        formatInterest(item.interest),
+        item.status || "new",
+        item.message || "",
+        item.notes_text || item.notes || "",
+        formatDate(item.created_at)
+      ]);
+
+      const csvContent = [
+        headers.map(csvEscape).join(","),
+        ...csvRows.map(row => row.map(csvEscape).join(","))
+      ].join("\n");
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = getExportFilename();
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      URL.revokeObjectURL(url);
+
+      setStatus(`Exported ${rows.length} demo requests.`);
+    }
+
+    async function loadRequests() {
+      const adminKey = getAdminKey();
+
+      if (!adminKey) {
+        setStatus("Enter admin key first.", true);
+        return;
+      }
+
+      try {
+        saveAdminKey();
+        setStatus("Loading demo requests...");
+
+        const archiveFilter = $("archiveFilter") ? $("archiveFilter").value : "active";
+
+        const response = await fetch(
+          API_BASE + "/admin/demo-requests?archive=" + encodeURIComponent(archiveFilter) + "&t=" + Date.now(),
+          {
+            method: "GET",
+            cache: "no-store",
+            headers: {
+              "accept": "application/json",
+              "Cache-Control": "no-cache",
+              "x-admin-key": adminKey
+            }
+          }
+        );
+
+        const text = await response.text();
+        let data = null;
+
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch (e) {
+          data = null;
+        }
+
+        if (!response.ok) {
+          throw new Error(data?.detail || text || "Failed to load demo requests.");
+        }
+
+        allRequests = data || [];
+
+        renderRequests();
+        setLastUpdated();
+        setStatus(`Loaded ${allRequests.length} demo requests.`);
+      } catch (error) {
+        setStatus("Load failed: " + error.message, true);
+      }
+    }
+
+    $("loadBtn").addEventListener("click", loadRequests);
+    $("exportCsvBtn").addEventListener("click", exportCsv);
+    $("clearFiltersBtn").addEventListener("click", clearFilters);
+    $("searchInput").addEventListener("input", renderRequests);
+
+    $("statusFilter")?.addEventListener("change", () => {
+      renderRequests();
+    });
+
+    $("dateFilter")?.addEventListener("change", () => {
+      renderRequests();
+    });
+
+    $("archiveFilter")?.addEventListener("change", () => {
+      loadRequests();
+    });
+
+    loadAdminKey();
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const statusFromUrl = urlParams.get("status");
+    const dateFromUrl = urlParams.get("date");
+    const archiveFromUrl = urlParams.get("archive");
+    const searchFromUrl = urlParams.get("search");
+
+   if (searchFromUrl && $("searchInput")) {
+      $("searchInput").value = searchFromUrl;
+    }
+
+    if (statusFromUrl && $("statusFilter")) {
+      $("statusFilter").value = statusFromUrl;
+    }
+
+    if (dateFromUrl && $("dateFilter")) {
+      $("dateFilter").value = dateFromUrl;
+}
+
+    if (archiveFromUrl && $("archiveFilter")) {
+      $("archiveFilter").value = archiveFromUrl;
+    }
+  </script>
+</body>
+</html>

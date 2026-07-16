@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Mia | AI Dental Receptionist</title>
+
+  <style>
+    :root {
+      --mia-primary: #2563eb;
+      --mia-secondary: #06b6d4;
+      --mia-accent: #22c55e;
+      --mia-chat-bg: #0f172a;
+      --mia-panel-bg: #111827;
+      --mia-bot-bubble: #374151;
+      --mia-user-bubble: #2563eb;
+      --mia-button-bg: #111827;
+      --mia-button-text: #e5e7eb;
+      --mia-border: #1e293b;
+      --mia-muted: #94a3b8;
+      --mia-text: #ffffff;
+      --mia-input-bg: #020617;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: transparent;
+      color: var(--mia-text);
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #chat {
+      max-width: 420px;
+      height: 100vh;
+      margin: auto;
+      display: flex;
+      flex-direction: column;
+      background:
+        radial-gradient(circle at 88% 0%, color-mix(in srgb, var(--mia-secondary) 22%, transparent), transparent 34%),
+        radial-gradient(circle at 8% 8%, color-mix(in srgb, var(--mia-primary) 20%, transparent), transparent 30%),
+        var(--mia-chat-bg);
+      position: relative;
+      overflow: hidden;
+      isolation: isolate;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      box-shadow: 0 24px 70px rgba(2, 6, 23, 0.34);
+      animation: miaShellIn 360ms cubic-bezier(.2,.8,.2,1) both;
+    }
+
+    #chat::before {
+      content: "";
+      position: absolute;
+      inset: -90px -90px auto auto;
+      width: 190px;
+      height: 190px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--mia-primary) 16%, transparent);
+      filter: blur(34px);
+      opacity: 0.9;
+      pointer-events: none;
+      z-index: 0;
+      animation: miaAmbientGlow 4.8s ease-in-out infinite alternate;
+    }
+
+    .chat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid var(--mia-border);
+      background: rgba(15, 23, 42, 0.76);
+      backdrop-filter: blur(14px);
+      position: relative;
+      z-index: 2;
+      animation: miaHeaderIn 420ms ease-out 80ms both;
+    }
+
+    .mia-header-identity {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+
+    .mia-avatar-wrap {
+      position: relative;
+      width: 44px;
+      height: 44px;
+      flex: 0 0 44px;
+    }
+
+    .mia-avatar-mark {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      color: #ffffff;
+      filter:
+        drop-shadow(0 8px 18px color-mix(in srgb, var(--mia-primary) 42%, transparent))
+        drop-shadow(0 0 8px color-mix(in srgb, var(--mia-secondary) 26%, transparent));
+      animation: miaAvatarGlow 3.2s ease-in-out infinite;
+    }
+
+    .mia-avatar-mark svg {
+      width: 35px;
+      height: 35px;
+      display: block;
+    }
+
+    .mia-online-dot {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      width: 12px;
+      height: 12px;
+      background: var(--mia-accent);
+      border: 2px solid var(--mia-chat-bg);
+      border-radius: 999px;
+      box-shadow:
+        0 0 0 2px color-mix(in srgb, var(--mia-accent) 22%, transparent),
+        0 0 10px color-mix(in srgb, var(--mia-accent) 70%, transparent);
+      animation: miaOnlinePulse 2.4s ease-in-out infinite;
+    }
+
+    .chat-header h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+    }
+
+    .chat-header p {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: var(--mia-muted);
+      line-height: 1.2;
+    }
+
+    .chat-header button {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid color-mix(in srgb, var(--mia-border) 72%, white);
+      color: #cbd5e1;
+      border-radius: 999px;
+      padding: 7px 11px;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+      white-space: nowrap;
+    }
+
+    .chat-header button:hover {
+      transform: translateY(-1px);
+      border-color: var(--mia-primary);
+      background: color-mix(in srgb, var(--mia-primary) 12%, transparent);
+    }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--mia-border);
+      position: relative;
+      z-index: 2;
+      opacity: 0;
+      transform: translateY(-8px);
+      pointer-events: none;
+      transition: opacity 300ms ease, transform 300ms ease;
+    }
+
+    .quick-actions.is-ready {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    .quick-actions button {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+
+    .quick-actions.is-ready button {
+      animation: miaQuickButtonIn 360ms cubic-bezier(.2,.8,.2,1) both;
+    }
+
+    .quick-actions.is-ready button:nth-child(2) { animation-delay: 45ms; }
+    .quick-actions.is-ready button:nth-child(3) { animation-delay: 90ms; }
+    .quick-actions.is-ready button:nth-child(4) { animation-delay: 135ms; }
+    .quick-actions.is-ready button:nth-child(5) { animation-delay: 180ms; }
+    .quick-actions.is-ready button:nth-child(6) { animation-delay: 225ms; }
+    .quick-actions.is-ready button:nth-child(7) { animation-delay: 270ms; }
+
+    .quick-actions button,
+    .quick-reply,
+    .booking-link-button {
+      background: color-mix(in srgb, var(--mia-button-bg) 88%, white);
+      color: var(--mia-button-text);
+      border: 1px solid color-mix(in srgb, var(--mia-border) 80%, white);
+      border-radius: 999px;
+      padding: 9px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+    }
+
+    .quick-actions button:hover,
+    .quick-reply:hover,
+    .booking-link-button:hover {
+      transform: translateY(-1px);
+      border-color: var(--mia-primary);
+      background: color-mix(in srgb, var(--mia-primary) 15%, var(--mia-button-bg));
+      box-shadow: 0 8px 22px color-mix(in srgb, var(--mia-primary) 16%, transparent);
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      padding-bottom: 90px;
+      scroll-behavior: smooth;
+      position: relative;
+      z-index: 1;
+    }
+
+    .msg {
+      margin: 10px 0;
+      padding: 11px 13px;
+      border-radius: 16px;
+      max-width: 84%;
+      line-height: 1.38;
+      font-size: 14px;
+      animation: miaMessageIn 240ms cubic-bezier(.2,.8,.2,1) both;
+      overflow-wrap: anywhere;
+      white-space: pre-line;
+      will-change: transform, opacity;
+    }
+
+    .msg.opening-message {
+      max-width: 88%;
+      border-color: color-mix(in srgb, var(--mia-primary) 28%, rgba(255, 255, 255, 0.06));
+      box-shadow: 0 14px 34px color-mix(in srgb, var(--mia-primary) 14%, transparent);
+    }
+
+    .msg.opening-message::after {
+      content: "";
+      display: block;
+      width: 42px;
+      height: 2px;
+      margin-top: 9px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--mia-primary), var(--mia-secondary));
+      opacity: 0.82;
+    }
+
+    .user {
+      color: white;
+      margin-left: auto;
+      background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
+      box-shadow: 0 10px 24px color-mix(in srgb, var(--mia-primary) 20%, transparent);
+    }
+
+    .bot {
+      background: color-mix(in srgb, var(--mia-bot-bubble) 94%, white);
+      color: #f8fafc;
+      margin-right: auto;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+
+    .typing {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 56px;
+    }
+
+    .typing span {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #cbd5e1;
+      display: inline-block;
+      opacity: 0.45;
+      animation: miaTyping 1s infinite ease-in-out;
+    }
+
+    .typing span:nth-child(2) { animation-delay: 120ms; }
+    .typing span:nth-child(3) { animation-delay: 240ms; }
+
+    .typing.opening-typing {
+      box-shadow: 0 12px 28px color-mix(in srgb, var(--mia-primary) 12%, transparent);
+    }
+
+    .typing-label {
+      font-style: normal;
+      font-size: 12px;
+      color: var(--mia-muted);
+      margin-right: 2px;
+    }
+
+    .quick-replies,
+    .booking-link-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 2px;
+      animation: miaMessageIn 210ms ease-out both;
+    }
+
+    .booking-link-button {
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
+      color: white;
+      border: none;
+    }
+
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.88);
+      border-top: 1px solid var(--mia-border);
+      position: sticky;
+      bottom: 0;
+      backdrop-filter: blur(10px);
+      z-index: 2;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition:
+        opacity 260ms ease,
+        transform 280ms cubic-bezier(.2,.8,.2,1);
+    }
+
+    .chat-input-row.is-ready {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+
+    input {
+      flex: 1;
+      min-width: 0;
+      padding: 12px 14px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--mia-border) 75%, white);
+      background: var(--mia-input-bg);
+      color: white;
+      outline: none;
+      font-size: 16px;
+      line-height: 1.2;
+      -webkit-appearance: none;
+      appearance: none;
+      transform: translateZ(0);
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    input:focus {
+      border-color: var(--mia-primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--mia-primary) 16%, transparent);
+    }
+
+    input:disabled,
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    input::placeholder { color: #64748b; }
+
+    #sendBtn {
+      padding: 12px 15px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      color: white;
+      background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
+      transition: transform 160ms ease, box-shadow 160ms ease;
+    }
+
+    #sendBtn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 24px color-mix(in srgb, var(--mia-primary) 24%, transparent);
+    }
+
+    .hidden { display: none; }
+
+    .sms-consent-card {
+      margin: 10px 0;
+      padding: 14px;
+      border: 1px solid color-mix(in srgb, var(--mia-border) 80%, white);
+      border-radius: 14px;
+      background: var(--mia-panel-bg);
+      color: #e5e7eb;
+      font-size: 13px;
+      line-height: 1.45;
+      animation: miaMessageIn 210ms ease-out both;
+    }
+
+    .sms-consent-card h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+      color: #ffffff;
+    }
+
+    .sms-consent-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 12px;
+      color: #e5e7eb;
+    }
+
+    .sms-consent-check input {
+      flex: 0 0 auto;
+      margin-top: 3px;
+      accent-color: var(--mia-primary);
+    }
+
+    .sms-consent-card button {
+      margin-top: 12px;
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 12px;
+      color: white;
+      background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
+      opacity: 0.55;
+      border: none;
+    }
+
+    .sms-consent-card button.enabled { opacity: 1; }
+
+    .consent-modal {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      z-index: 100000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .consent-box {
+      background: white;
+      max-width: 420px;
+      width: 100%;
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+      color: #111827;
+      animation: miaModalIn 220ms ease-out both;
+    }
+
+    .consent-box h2 {
+      margin: 0 0 10px;
+      font-size: 22px;
+      color: #111827;
+    }
+
+    .consent-box p {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #374151;
+    }
+
+    .consent-box .small {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #6b7280;
+    }
+
+    .consent-modal-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: #374151;
+      margin-top: 12px;
+    }
+
+    .consent-modal-check input {
+      flex: 0 0 auto;
+      margin-top: 2px;
+      accent-color: var(--mia-primary);
+    }
+
+    #agreeBtn {
+      width: 100%;
+      margin-top: 18px;
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 16px;
+      color: white;
+      background: linear-gradient(135deg, var(--mia-primary), var(--mia-secondary));
+      opacity: 1;
+    }
+
+    #agreeBtn.enabled { opacity: 1; }
+
+    @keyframes miaShellIn {
+      from { opacity: 0; transform: translateY(10px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes miaHeaderIn {
+      from { opacity: 0; transform: translateY(-7px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes miaMessageIn {
+      from { opacity: 0; transform: translateY(7px) scale(0.99); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes miaQuickButtonIn {
+      from { opacity: 0; transform: translateY(7px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes miaModalIn {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes miaTyping {
+      0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+      40% { opacity: 1; transform: translateY(-2px); }
+    }
+
+    @keyframes miaAvatarGlow {
+      0%, 100% { transform: translateY(0) scale(1); opacity: 0.96; }
+      50% { transform: translateY(-1px) scale(1.035); opacity: 1; }
+    }
+
+    @keyframes miaOnlinePulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.08); opacity: 0.9; }
+    }
+
+    @keyframes miaAmbientGlow {
+      from { transform: translate3d(0, 0, 0) scale(1); opacity: 0.72; }
+      to { transform: translate3d(-14px, 12px, 0) scale(1.08); opacity: 0.95; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 1ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 1ms !important;
+      }
+    }
+
+    @media (max-width: 640px) {
+      body { height: 100dvh; }
+
+      #chat {
+        max-width: none;
+        width: 100%;
+        height: 100dvh;
+        border: none;
+        box-shadow: none;
+        animation: miaMobileSheetIn 340ms cubic-bezier(.2,.8,.2,1) both;
+      }
+
+      .chat-header {
+        padding: 13px 13px 10px;
+        gap: 9px;
+      }
+
+      .mia-avatar-wrap,
+      .mia-avatar-mark {
+        width: 40px;
+        height: 40px;
+        flex-basis: 40px;
+      }
+
+      .mia-avatar-mark svg {
+        width: 32px;
+        height: 32px;
+      }
+
+      .chat-header h2 { font-size: 18px; }
+      .chat-header p { font-size: 11.5px; }
+      .chat-header button { padding: 7px 10px; font-size: 12px; }
+
+      .quick-actions {
+        flex-wrap: wrap;
+        overflow: visible;
+        gap: 7px;
+        padding: 10px 12px 11px;
+      }
+
+      .quick-actions button,
+      .quick-reply,
+      .booking-link-button {
+        flex: 0 1 auto;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+
+      #messages {
+        padding: 13px;
+        padding-bottom: calc(86px + env(safe-area-inset-bottom));
+      }
+
+      .msg {
+        max-width: 92%;
+        font-size: 14px;
+        line-height: 1.42;
+      }
+
+      .msg.opening-message { max-width: 94%; }
+
+      .chat-input-row {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 50;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      }
+
+      input {
+        min-width: 0;
+        padding: 12px 13px;
+        font-size: 16px !important;
+        line-height: 1.2;
+      }
+      #sendBtn { padding: 12px 14px; }
+    }
+
+    @keyframes miaMobileSheetIn {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="chat">
+    <div id="consentModal" class="consent-modal">
+      <div class="consent-box">
+        <h2>Before We Begin</h2>
+        <p>You can use Mia to ask questions or request an appointment.</p>
+        <p>If you choose to provide your phone number, Mia will share it with the dental office so the office can call you back about your request.</p>
+        <p class="small">Mia and Dos Tiris do not send SMS messages to patients. Any SMS notification from Dos Tiris is sent only to the dental office staff. For emergencies, please call the office directly or seek urgent care.</p>
+
+        <button id="agreeBtn" type="button" class="enabled">Continue to Mia</button>
+      </div>
+    </div>
+
+    <div class="chat-header">
+      <div class="mia-header-identity">
+        <div class="mia-avatar-wrap">
+          <span class="mia-avatar-mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64" role="img" focusable="false">
+              <path
+                d="M20.4 6.6c3.4 0 5.7 1.3 7.7 2.4 1.5.8 2.8 1.5 3.9 1.5s2.4-.7 3.9-1.5c2-1.1 4.3-2.4 7.7-2.4 7.4 0 12.3 6.2 12.3 14.2 0 5.6-2.3 10.6-4.5 15.4-1.7 3.8-3.4 7.4-4 11.1-1.1 6.8-3.2 10.1-6.2 10.1-3.2 0-4.1-3.6-5.1-7.3-1-3.8-2-7.7-4.1-7.7s-3.1 3.9-4.1 7.7c-1 3.7-1.9 7.3-5.1 7.3-3 0-5.1-3.3-6.2-10.1-.6-3.7-2.3-7.3-4-11.1-2.2-4.8-4.5-9.8-4.5-15.4 0-8 4.9-14.2 12.3-14.2Z"
+                fill="currentColor"
+              />
+              <path
+                d="M24 18.5c3.1 2 8.3 3.6 16 0"
+                fill="none"
+                stroke="var(--mia-secondary)"
+                stroke-width="3.2"
+                stroke-linecap="round"
+              />
+              <path
+                d="M49 9.5l1.6 4.1 4.1 1.6-4.1 1.6L49 20.9l-1.6-4.1-4.1-1.6 4.1-1.6L49 9.5Z"
+                fill="var(--mia-secondary)"
+              />
+            </svg>
+          </span>
+          <span class="mia-online-dot"></span>
+        </div>
+
+        <div>
+          <h2 id="miaHeaderTitle">Mia</h2>
+          <p id="miaHeaderSubtitle">AI Dental Receptionist</p>
+        </div>
+      </div>
+
+      <button type="button" onclick="startOver()">Start over</button>
+    </div>
+
+    <div id="main-menu" class="quick-actions">
+      <button type="button" onclick="sendQuickMessage('I need an appointment')">Book Appointment</button>
+      <button type="button" onclick="showServiceMenu()">Services</button>
+      <button type="button" onclick="sendQuickMessage('Do you take insurance?')">Insurance</button>
+      <button type="button" onclick="sendQuickMessage('What are your hours?')">Hours</button>
+      <button type="button" onclick="sendQuickMessage('Where are you located?')">Location</button>
+    </div>
+
+    <div id="service-menu" class="quick-actions hidden"></div>
+
+    <div id="messages"></div>
+
+    <div class="chat-input-row">
+      <input id="input" placeholder="Ask Mia something..." autocomplete="off" />
+      <button id="sendBtn" type="button" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <script>
+    const DEFAULT_CLIENT_KEY = "demo_clinic_key";
+    const DEFAULT_OPENING_MESSAGE = "Hi, I’m Mia — the AI dental receptionist for this office. I can help request an appointment, answer common questions, or check services, insurance, hours, and location. How can I help today?";
+    const DEFAULT_MOBILE_OPENING_MESSAGE = "Hi, I’m Mia — the office’s AI dental receptionist. I can help with appointments, services, insurance, hours, or location. How can I help today?";
+
+    const params = new URLSearchParams(window.location.search);
+    const clientKey = params.get("client_key") || DEFAULT_CLIENT_KEY;
+    const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+      ? window.location.origin
+      : "https://ai-dental-chatbot.onrender.com";
+
+    let conversationId = localStorage.getItem(`chat_conversation_id_${clientKey}`) || null;
+    let miaOpeningMessage = DEFAULT_OPENING_MESSAGE;
+    let miaMobileOpeningMessage = DEFAULT_MOBILE_OPENING_MESSAGE;
+    const DEFAULT_SERVICE_BUTTONS = [
+      { key: "cleaning_checkup", label: "Cleaning / Checkup", message: "I need a cleaning or checkup" },
+      { key: "tooth_pain", label: "Tooth Pain", message: "I have tooth pain" },
+      { key: "broken_tooth", label: "Broken Tooth / Filling", message: "I broke a tooth or filling" },
+      { key: "implants", label: "Implants / Extraction", message: "I am interested in implants or an extraction" },
+      { key: "teeth_whitening", label: "Cosmetic / Whitening", message: "I want whitening or cosmetic treatment" },
+      { key: "invisalign", label: "Braces / Invisalign", message: "I am interested in braces or Invisalign" },
+      { key: "other", label: "Other", message: "Other" }
+    ];
+
+    let serviceButtons = DEFAULT_SERVICE_BUTTONS;
+    let smsPhoneConsentAccepted = false;
+    let smsPhoneConsentChoiceMade = false;
+    let modalConsentAccepted = false;
+    let configLoaded = false;
+    let openingStarted = false;
+    let openingSequenceToken = 0;
+
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+    const inputRow = document.querySelector(".chat-input-row");
+
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const mobileQuery = window.matchMedia("(max-width: 640px)");
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, prefersReducedMotion ? 0 : ms));
+    }
+
+    function getOpeningMessage() {
+      if (mobileQuery.matches && miaMobileOpeningMessage) {
+        return miaMobileOpeningMessage;
+      }
+      return miaOpeningMessage;
+    }
+
+    function setCssVar(name, value) {
+      if (value) document.documentElement.style.setProperty(name, value);
+    }
+
+    function applyTheme(theme) {
+      if (!theme || typeof theme !== "object") return;
+      setCssVar("--mia-primary", theme.primary);
+      setCssVar("--mia-secondary", theme.secondary);
+      setCssVar("--mia-accent", theme.accent);
+      setCssVar("--mia-chat-bg", theme.chat_background);
+      setCssVar("--mia-panel-bg", theme.panel_background);
+      setCssVar("--mia-bot-bubble", theme.bot_bubble);
+      setCssVar("--mia-user-bubble", theme.user_bubble);
+      setCssVar("--mia-button-bg", theme.button_background);
+      setCssVar("--mia-button-text", theme.button_text);
+      setCssVar("--mia-border", theme.border);
+      setCssVar("--mia-muted", theme.muted_text);
+    }
+
+    function addMessage(role, text, options = {}) {
+      const message = document.createElement("div");
+      message.className = `msg ${role}${options.className ? ` ${options.className}` : ""}`;
+      message.textContent = text;
+      messagesEl.appendChild(message);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function setMenusReady(isReady) {
+      document.querySelectorAll(".quick-actions").forEach(menu => {
+        const shouldShowReady = isReady && !menu.classList.contains("hidden");
+        menu.classList.toggle("is-ready", shouldShowReady);
+      });
+    }
+
+    function setInputReady(isReady) {
+      if (inputRow) {
+        inputRow.classList.toggle("is-ready", isReady);
+      }
+
+      inputEl.disabled = !isReady;
+      sendBtn.disabled = !isReady;
+    }
+
+    function showMainMenu(isReady = true) {
+      const mainMenu = document.getElementById("main-menu");
+      const serviceMenu = document.getElementById("service-menu");
+
+      serviceMenu.classList.add("hidden");
+      serviceMenu.classList.remove("is-ready");
+      mainMenu.classList.remove("hidden");
+      mainMenu.classList.toggle("is-ready", isReady);
+    }
+
+    function showServiceMenu() {
+      const mainMenu = document.getElementById("main-menu");
+      const serviceMenu = document.getElementById("service-menu");
+
+      mainMenu.classList.add("hidden");
+      mainMenu.classList.remove("is-ready");
+      serviceMenu.classList.remove("hidden");
+      serviceMenu.classList.add("is-ready");
+    }
+
+    function getServiceReplyLabels() {
+      const buttonsToRender = Array.isArray(serviceButtons) && serviceButtons.length
+        ? serviceButtons
+        : DEFAULT_SERVICE_BUTTONS;
+
+      return buttonsToRender
+        .map(button => String(button.label || "").trim())
+        .filter(Boolean);
+    }
+
+    function renderServiceMenuButtons() {
+      const serviceMenu = document.getElementById("service-menu");
+      if (!serviceMenu) return;
+
+      serviceMenu.innerHTML = "";
+
+      const buttonsToRender = Array.isArray(serviceButtons) && serviceButtons.length
+        ? serviceButtons
+        : DEFAULT_SERVICE_BUTTONS;
+
+      buttonsToRender.forEach(item => {
+        const label = String(item.label || "").trim();
+        const message = String(item.message || label).trim();
+
+        if (!label || !message) return;
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.addEventListener("click", () => sendQuickMessage(message));
+        serviceMenu.appendChild(btn);
+      });
+
+      const backBtn = document.createElement("button");
+      backBtn.type = "button";
+      backBtn.textContent = "Back";
+      backBtn.addEventListener("click", () => showMainMenu());
+      serviceMenu.appendChild(backBtn);
+    }
+
+    function resetOpeningMessage() {
+      messagesEl.innerHTML = "";
+      showMainMenu(true);
+      setInputReady(true);
+      addMessage("bot", getOpeningMessage(), { className: "opening-message" });
+    }
+
+    async function playOpeningSequence(force = false) {
+      if (openingStarted && !force) return;
+
+      openingStarted = true;
+      const token = ++openingSequenceToken;
+
+      messagesEl.innerHTML = "";
+      showMainMenu(false);
+      setMenusReady(false);
+      setInputReady(false);
+
+      await sleep(mobileQuery.matches ? 160 : 220);
+      if (token !== openingSequenceToken) return;
+
+      showTyping({ opening: true });
+
+      await sleep(mobileQuery.matches ? 520 : 680);
+      if (token !== openingSequenceToken) return;
+
+      hideTyping();
+      addMessage("bot", getOpeningMessage(), { className: "opening-message" });
+
+      await sleep(mobileQuery.matches ? 180 : 240);
+      if (token !== openingSequenceToken) return;
+
+      setMenusReady(true);
+      setInputReady(true);
+      inputEl.placeholder = mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...";
+      if (!mobileQuery.matches) {
+        inputEl.focus();
+      }
+    }
+
+    function maybeStartOpeningSequence() {
+      if (openingStarted) return;
+      if (!modalConsentAccepted) return;
+      if (!configLoaded) return;
+      playOpeningSequence();
+    }
+
+    async function loadClientConfig() {
+      try {
+        const res = await fetch(`${API_BASE}/chat/config?client_key=${encodeURIComponent(clientKey)}`);
+        if (!res.ok) return;
+
+        const config = await res.json();
+        applyTheme(config.theme);
+
+        if (config.header_title) {
+          document.getElementById("miaHeaderTitle").textContent = config.header_title;
+        }
+        if (config.header_subtitle) {
+          document.getElementById("miaHeaderSubtitle").textContent = config.header_subtitle;
+        }
+        if (config.opening_message) {
+          miaOpeningMessage = config.opening_message;
+        }
+        if (config.mobile_opening_message) {
+          miaMobileOpeningMessage = config.mobile_opening_message;
+        }
+        if (Array.isArray(config.service_buttons) && config.service_buttons.length) {
+          serviceButtons = config.service_buttons;
+          renderServiceMenuButtons();
+        }
+      } catch (err) {
+        console.warn("Mia config could not be loaded", err);
+      } finally {
+        configLoaded = true;
+        maybeStartOpeningSequence();
+      }
+    }
+
+    function sendQuickMessage(message) {
+      showMainMenu(true);
+      inputEl.value = message;
+      sendMessage();
+    }
+
+    function clearActionRows() {
+      document.querySelectorAll(".quick-replies, .booking-link-row").forEach(el => el.remove());
+    }
+
+    function renderQuickReplies(options) {
+      clearActionRows();
+      const row = document.createElement("div");
+      row.className = "quick-replies";
+
+      options.forEach(option => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "quick-reply";
+        btn.textContent = option;
+        btn.addEventListener("click", () => selectQuickReply(option));
+        row.appendChild(btn);
+      });
+
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderBookingButton(url, label) {
+      if (!url) return;
+      const row = document.createElement("div");
+      row.className = "booking-link-row";
+
+      const link = document.createElement("a");
+      link.className = "booking-link-button";
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = label || "Book Online";
+
+      row.appendChild(link);
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function selectQuickReply(text) {
+      inputEl.value = text;
+      sendMessage();
+    }
+
+    function resetInputPlaceholder() {
+      inputEl.placeholder = mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...";
+    }
+
+    function removeSmsPhoneConsent() {
+      const card = document.getElementById("smsPhoneConsentCard");
+      if (card) card.remove();
+    }
+
+    function renderSmsPhoneConsent() {
+      removeSmsPhoneConsent();
+
+      const card = document.createElement("div");
+      card.id = "smsPhoneConsentCard";
+      card.className = "sms-consent-card";
+      card.innerHTML = `
+        <h3>Phone Follow-Up Notice</h3>
+        <div>
+          If you provide your phone number, Mia will send your request to the dental office so the office can call you back. Mia and Dos Tiris do not send SMS messages to patients.
+        </div>
+
+        <button id="smsPhoneConsentContinue" type="button" onclick="dismissSmsPhoneConsent()" class="enabled">
+          Got it
+        </button>
+      `;
+
+      messagesEl.appendChild(card);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      resetInputPlaceholder();
+      inputEl.focus();
+    }
+
+    function toggleSmsPhoneConsent() {
+      const checkbox = document.getElementById("smsPhoneConsentCheckbox");
+      const btn = document.getElementById("smsPhoneConsentContinue");
+      if (!checkbox || !btn) return;
+
+      smsPhoneConsentAccepted = checkbox.checked;
+      btn.textContent = "Got it";
+    }
+
+    function dismissSmsPhoneConsent() {
+      const checkbox = document.getElementById("smsPhoneConsentCheckbox");
+      smsPhoneConsentAccepted = !!(checkbox && checkbox.checked);
+      smsPhoneConsentChoiceMade = true;
+      removeSmsPhoneConsent();
+      resetInputPlaceholder();
+      inputEl.focus();
+    }
+
+    function setupModalConsent() {
+      const consentModal = document.getElementById("consentModal");
+      const agreeBtn = document.getElementById("agreeBtn");
+
+      agreeBtn.addEventListener("click", () => {
+        consentModal.style.display = "none";
+        modalConsentAccepted = true;
+        maybeStartOpeningSequence();
+      });
+    }
+
+    function showTyping(options = {}) {
+      if (document.getElementById("typingIndicator")) return;
+
+      const typing = document.createElement("div");
+      typing.id = "typingIndicator";
+      typing.className = `msg bot typing${options.opening ? " opening-typing" : ""}`;
+      typing.setAttribute("aria-label", "Mia is typing");
+      typing.innerHTML = options.opening
+        ? '<em class="typing-label">Typing…</em><span></span><span></span><span></span>'
+        : "<span></span><span></span><span></span>";
+      messagesEl.appendChild(typing);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function hideTyping() {
+      const typing = document.getElementById("typingIndicator");
+      if (typing) typing.remove();
+    }
+
+    async function sendMessage() {
+      const message = inputEl.value.trim();
+      if (!message) return;
+
+      clearActionRows();
+      addMessage("user", message);
+      inputEl.value = "";
+      showTyping();
+
+      try {
+        const res = await fetch(`${API_BASE}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: message,
+            client_key: clientKey,
+            conversation_id: conversationId
+          })
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.detail || "Request failed");
+        }
+
+        if (data.conversation_id) {
+          conversationId = data.conversation_id;
+          localStorage.setItem(`chat_conversation_id_${clientKey}`, conversationId);
+        }
+
+        const reply = data.response || data.reply || data.answer || data.message || data.bot_response || "I can help with appointments, services, insurance, hours, location, or pricing questions. What would you like help with?";
+
+        hideTyping();
+        addMessage("bot", reply);
+
+        // Mia does not send SMS messages to patients.
+        // Phone numbers are collected only so the dental office can call the patient back.
+        // Do not show an SMS consent card in the patient chat.
+        const replyText = String(reply || "").toLowerCase();
+
+        if (data.meta && data.meta.show_service_menu) {
+          renderQuickReplies(getServiceReplyLabels());
+        }
+
+        if (data.meta && data.meta.show_booking_button) {
+          renderBookingButton(data.meta.booking_url, data.meta.booking_cta_label);
+        }
+
+        if (data.meta && data.meta.disable_input) {
+          inputEl.disabled = true;
+          sendBtn.disabled = true;
+          inputEl.placeholder = "Please call the office directly.";
+        }
+      } catch (err) {
+        console.error(err);
+        hideTyping();
+        addMessage("bot", "I’m having trouble connecting right now. Please call the office directly or try again in a moment.");
+      }
+    }
+
+    function startOver() {
+      conversationId = null;
+      localStorage.removeItem(`chat_conversation_id_${clientKey}`);
+
+      smsPhoneConsentAccepted = false;
+      smsPhoneConsentChoiceMade = false;
+      removeSmsPhoneConsent();
+      clearActionRows();
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      resetInputPlaceholder();
+
+      inputEl.value = "";
+      openingStarted = false;
+      playOpeningSequence(true);
+    }
+
+    inputEl.addEventListener("keydown", function(e) {
+      if (e.key === "Enter") sendMessage();
+    });
+
+    setupModalConsent();
+    renderServiceMenuButtons();
+    loadClientConfig();
+  </script>
+</body>
+</html>

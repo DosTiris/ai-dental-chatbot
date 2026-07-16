@@ -1,0 +1,1654 @@
+PATCH 9A v4 — CUMULATIVE UNIFIED DIFF vs the Patch 8 checkpoint
+
+=== app/services/notification_service.py ===
+--- /tmp/baseline/notification_service.py	2026-07-14 19:13:53.071137552 +0000
++++ app/services/notification_service.py	2026-07-14 20:01:40.970351540 +0000
+@@ -47,19 +47,56 @@
+ #     event names, channels, fixed codes, sanitized exception class names,
+ #     and UUIDs.
+ #
++#   - PATCH 9A (Senior Audit Recommended #1): office-notification duplicate
++#     suppression is now a DATABASE invariant. Every provider execution is
++#     preceded by an atomic per-channel claim into the notification_attempts
++#     ledger (unique per appointment/channel); repeated or concurrent
++#     invocations suppress instead of re-sending. The three-state ledger
++#     (sending / sent / unknown) is honest: a caught provider exception is
++#     recorded as UNKNOWN, never as definite non-delivery, and "sent" means
++#     ONLY that the provider API call returned successfully and the outcome
++#     transaction committed — never that anything was delivered or opened.
++#     Each claimed channel's outcome CAS and the full appointment projection
++#     (office_sms_sent / office_email_sent / notify_error) commit atomically
++#     under the appointment row lock (lock order everywhere: appointment
++#     first, attempt rows second; no notification transaction ever locks a
++#     slot). Provider calls run with NO open transaction and NO database
++#     lock (immutable scalar snapshot; verified in_transaction() checks).
++#     Pre-006 appointments are protected by runtime legacy suppression
++#     (approved Option B): a true legacy sent flag or a legacy channel
++#     send_failed entry blocks the claim atomically inside the claim SQL,
++#     and a malformed legacy notify_error blocks both no-row channels and
++#     is never echoed, copied, rewritten, or recomposed. This module remains
++#     the single owner of the projection (Rule 3); the repository
++#     (notification_attempt_repository) is the single owner of ledger SQL
++#     (Rule 15). NOT in 9A (deferred to 9B/9C): retries, recovery,
++#     stale-claim processing, workers, cron, provider idempotency keys.
++#
+ # Twilio/Resend are imported lazily inside the send functions so the calendar
+ # test suite runs on machines without those packages installed.
+ 
+ import html
+ import os
+ import re
++import uuid
+ from dataclasses import dataclass, field
+-from typing import List, Optional
++from datetime import datetime, timezone
++from typing import Dict, List, Optional, Tuple
+ from zoneinfo import ZoneInfo
+ 
++from sqlalchemy import inspect as sa_inspect
+ from sqlalchemy.orm import Session
+ 
+-from app.calendar_models import Appointment, AppointmentStatus
++from app.calendar_models import (
++    Appointment,
++    AppointmentStatus,
++    NotificationAttempt,
++    NotificationAttemptStatus,
++    NotificationChannel,
++)
++from app.repositories import appointment_repository
++from app.repositories import notification_attempt_repository
++from app.repositories.notification_attempt_repository import ClaimDisposition
+ from app.services.calendar_settings_service import CalendarSettings, ensure_utc
+ 
+ 
+@@ -120,6 +157,50 @@
+ NOTIFY_ERROR_WITHHELD = "notification_error: detail_withheld"
+ 
+ 
++# ---------------------------------------------------------------------------
++# PATCH 9A — fixed controlled server-log event names (Rule 4: named, not
++# magic; Patch 6 logging contract: events carry ONLY fixed names, a channel,
++# and UUIDs — never patient values, provider text, or stored error content).
++# "channel_send_failed" and "outcome_record_failed" predate 9A and keep
++# their exact formats.
++# ---------------------------------------------------------------------------
++EVENT_ENTRY_CONTRACT_VIOLATION = "entry_contract_violation"
++EVENT_BOUNDARY_VIOLATION = "transaction_boundary_violation"
++EVENT_CLAIM_RECORD_FAILED = "claim_record_failed"
++EVENT_IN_FLIGHT_SUPPRESSED = "in_flight_suppressed"
++EVENT_PROJECTION_INCONSISTENCY = "projection_inconsistency"
++EVENT_LEGACY_ERROR_WITHHELD = "legacy_error_withheld"
++EVENT_OUTCOME_APPOINTMENT_MISSING = "outcome_appointment_missing"
++
++# Channel -> its fixed vocabulary entries (Rule 3: composed only from the
++# Patch 6 constants above; SMS entry always precedes the email entry in any
++# stored two-entry value).
++_CHANNEL_SEND_FAILED_ENTRY = {
++    NotificationChannel.OFFICE_SMS: OFFICE_SMS_SEND_FAILED,
++    NotificationChannel.OFFICE_EMAIL: OFFICE_EMAIL_SEND_FAILED,
++}
++_CHANNEL_SKIPPED_ENTRY = {
++    NotificationChannel.OFFICE_SMS: OFFICE_SMS_SKIPPED,
++    NotificationChannel.OFFICE_EMAIL: OFFICE_EMAIL_SKIPPED,
++}
++
++# PATCH 9A legacy suppression (approved Option B), enforced ATOMICALLY
++# inside the claim SQL: a channel may be claimed only while the stored
++# notify_error is NULL or one of these approved values — the subset of the
++# closed Patch 6 vocabulary carrying NO send_failed entry for that channel.
++# A legacy channel send_failed (an attempt whose true outcome is unknowable)
++# therefore blocks the claim, and ANY malformed value blocks both channels
++# automatically because it is outside the closed set.
++_CLAIM_ALLOWED_STORED_ERRORS = {
++    channel: frozenset(
++        value for value in VALID_NOTIFY_ERROR_VALUES
++        if _CHANNEL_SEND_FAILED_ENTRY[channel] not in value.split("; ")
++    )
++    for channel in (NotificationChannel.OFFICE_SMS,
++                    NotificationChannel.OFFICE_EMAIL)
++}
++
++
+ def normalize_notification_field(value: Optional[str], limit: int) -> str:
+     """
+     Purpose: THE single plain-text field normalizer (Patch 6) for every
+@@ -230,6 +311,95 @@
+     errors: List[str] = field(default_factory=list)
+ 
+ 
++# ---------------------------------------------------------------------------
++# PATCH 9A — the immutable notification snapshot and session-safety helpers.
++# ---------------------------------------------------------------------------
++
++@dataclass(frozen=True)
++class NotificationSnapshot:
++    """Everything both provider calls and every configuration decision need,
++    as SCALARS ONLY (approved 9A contract). Built exactly once, BEFORE any
++    claim; after construction no client/appointment/settings ORM attribute
++    is read again during claim/provider orchestration, and no ORM object
++    ever crosses the provider boundary — so an expired attribute can never
++    silently reopen a transaction there. The two UUIDs are the only
++    identifiers permitted in controlled logs. client_id is ALWAYS the id of
++    the SUPPLIED client whose notification configuration and recipients are
++    used — the tenant the atomic claim verifies the appointment against."""
++    appointment_id: uuid.UUID
++    client_id: uuid.UUID
++    office_phone: str
++    office_email: str
++    sms_configured: bool
++    email_configured: bool
++    sms_body: str
++    email_subject: str
++    email_html: str
++
++
++def build_notification_snapshot(client, appointment: Appointment,
++                                settings: CalendarSettings) -> NotificationSnapshot:
++    """
++    Purpose: THE single snapshot builder (Patch 9A). Reads the ORM objects
++        once and freezes every scalar the rest of the invocation needs:
++        recipients are stripped before deriving the configured booleans,
++        the SMS body and the email subject are fully built and normalized
++        here, and the safe email HTML is rendered here EXACTLY ONCE via
++        render_email_html (which remains the single HTML-rendering owner —
++        the send boundary transmits, it never re-renders).
++    Inputs:  the client row, the committed appointment, request settings.
++    Returns: frozen NotificationSnapshot.
++    Database effects: SELECTs only, via lazy attribute refresh of expired
++        ORM objects (the service-owned read-only transaction this opens is
++        ended explicitly by the caller). External effects: none.
++    """
++    practice_name = (getattr(client, "practice_name", "Dental Office")
++                     or "Dental Office")
++    office_phone = (getattr(client, "notification_phone", None) or "").strip()
++    office_email = (getattr(client, "notification_email", None) or "").strip()
++    # PATCH 6 subject contract, unchanged: the patient name is normalized to
++    # its field limit first, then the COMPLETE subject passes through the
++    # same normalizer (idempotent on already-normal text), so CR/LF can
++    # never survive into an email header.
++    email_subject = normalize_notification_field(
++        "New Mia appointment — "
++        + normalize_notification_field(appointment.patient_name,
++                                       FIELD_LIMIT_NAME),
++        SUBJECT_MAX_LENGTH,
++    )
++    return NotificationSnapshot(
++        appointment_id=appointment.id,
++        # TENANT SOURCE (v4 correction): ALWAYS the SUPPLIED client — the
++        # office whose notification configuration and recipients are being
++        # used. The atomic claim's join (appointments.id = appointment_id
++        # AND appointments.client_id = client_id) then genuinely verifies
++        # that the appointment belongs to that client; sourcing this from
++        # appointment.client_id would let a mismatched call authenticate
++        # itself with the appointment's own tenant id (Rule 15).
++        client_id=client.id,
++        office_phone=office_phone,
++        office_email=office_email,
++        sms_configured=bool(office_phone),
++        email_configured=bool(office_email),
++        sms_body=build_office_sms(appointment, practice_name, settings),
++        email_subject=email_subject,
++        email_html=render_email_html(
++            build_office_email_body(appointment, practice_name, settings)
++        ),
++    )
++
++
++def _appointment_uuid_without_sql(appointment: Appointment) -> str:
++    """The appointment UUID for a controlled log, read from the identity
++    map ONLY — sa_inspect(...).identity never emits SQL, unlike touching
++    appointment.id on an expired instance. 'unknown' for a transient row."""
++    try:
++        identity = sa_inspect(appointment).identity
++    except Exception:
++        return "unknown"
++    return str(identity[0]) if identity else "unknown"
++
++
+ def _format_local(appointment: Appointment, settings: CalendarSettings) -> str:
+     """Render 'Thursday, July 16 at 1:30 PM' in the CLIENT's timezone."""
+     local = ensure_utc(appointment.start_datetime).astimezone(
+@@ -318,19 +488,20 @@
+     client.messages.create(body=body, from_=os.environ["TWILIO_FROM_PHONE"], to=to_phone)
+ 
+ 
+-def _send_email(to_email: str, subject: str, body_text: str) -> None:
++def _send_email(to_email: str, subject: str, email_html: str) -> None:
+     """One Resend send. Raises on failure — callers record the error.
+-    PATCH 6 contract: body_text is PLAIN TEXT; this boundary owns the HTML
+-    encoding via render_email_html (escaped exactly once, fixed <pre>
+-    wrapper preserved). Callers must never pass pre-escaped or pre-built
+-    HTML."""
++    PATCH 9A contract: email_html is the FINAL rendered document, produced
++    by render_email_html exactly once at snapshot-build time (render_email_html
++    remains the single HTML-rendering owner; this boundary TRANSMITS and
++    never renders or re-escapes). Callers must never pass raw plain text
++    here — build_notification_snapshot is the only production composer."""
+     import resend  # Lazy: see module header.
+     resend.api_key = os.environ["RESEND_API_KEY"]
+     resend.Emails.send({
+         "from": os.environ["RESEND_FROM_EMAIL"],
+         "to": [to_email],
+         "subject": subject,
+-        "html": render_email_html(body_text),
++        "html": email_html,
+     })
+ 
+ 
+@@ -342,115 +513,440 @@
+ ) -> NotificationOutcome:
+     """
+     Purpose: Send the office booking notifications — office SMS and office
+-        email, the only approved channels — and persist per-channel outcomes.
+-        Patient SMS is DISABLED by current product policy (Patch 2D, Senior
+-        Audit Critical #3) and is never attempted, regardless of appointment
+-        status, patient contact details, or office-channel outcomes.
+-    Inputs:  committed appointment (never call before the booking commit),
+-             the client row (for practice name + notify contacts), settings.
+-    Returns: NotificationOutcome; success of the BOOKING is not affected.
+-        patient_sms_sent is always False — a disabled channel, not a failure,
+-        so no patient_sms entry is ever added to errors.
+-    Database effects: UPDATEs the appointment's notification flags/error and
+-        commits that small bookkeeping transaction.
+-    External effects: up to 1 Twilio SMS (to the OFFICE) + 1 Resend email
+-        (to the OFFICE). Never any message to the patient.
+-    Possible failures (PATCH 6 contract): each office-channel failure is
+-        isolated, logged server-side with controlled fields only (event,
+-        channel, fixed code, sanitized exception class, appointment UUID —
+-        never the exception message), and recorded as the FIXED vocabulary
+-        entry in outcome.errors / appointment.notify_error. Missing office
+-        contact info is recorded as the fixed skipped entry, not an error.
+-        SMS is attempted first, then email, so a two-entry notify_error is
+-        always SMS-then-email — matching the approved grammar.
++        email, the only approved channels — with database-enforced duplicate
++        suppression (PATCH 9A): each configured channel is atomically
++        CLAIMED into the notification_attempts ledger before its single
++        provider execution, so repeated or concurrent invocations suppress
++        instead of re-sending, and legacy pre-006 outcomes are protected
++        (approved Option B) without any data migration. Patient SMS remains
++        DISABLED by product policy (Patch 2D, Senior Audit Critical #3) and
++        is never attempted; no patient channel is even representable in the
++        ledger.
++    Inputs:  committed appointment (the documented caller contract: the one
++        production caller invokes this immediately after finalize_booking's
++        commit and BEFORE any conversation mutation, so the session arrives
++        with no pending state and no caller-owned transaction), the client
++        row (contacts + practice name, read once into the snapshot), settings.
++    Returns: NotificationOutcome reporting the RECONCILED post-invocation
++        projection: a channel sent in a prior invocation reports True rather
++        than re-sending; errors mirrors the recomputed notify_error entries
++        ([] when a malformed legacy value is being preserved). Success of
++        the BOOKING is never affected. patient_sms_sent is always False.
++    Database effects: per configured claimable channel, one committed claim
++        row (status 'sending'); per claimed channel, ONE atomic transaction
++        committing the outcome CAS (sending -> sent/unknown) together with
++        the full recomputed appointment projection under the appointment
++        row lock (lock order: appointment first, attempt rows second; no
++        slot is ever locked here). When zero outcome transactions commit —
++        or a transaction-boundary violation aborts the invocation — one
++        final reconciliation transaction recomputes the projection. A
++        malformed legacy notify_error is never recomposed, rewritten, or
++        echoed (flags-only updates; fixed withheld marker at the API).
++    External effects: at most 1 Twilio SMS + 1 Resend email, both to the
++        OFFICE, both executed with NO open database transaction and NO row
++        or table lock, from immutable snapshot scalars only. Never any
++        message to the patient.
++    Possible failures (Patch 6 logging contract, unchanged): a provider
++        exception is isolated per channel, recorded as the honest ledger
++        state UNKNOWN (never asserted as definite non-delivery), projected
++        as the FIXED vocabulary entry, and logged with controlled fields
++        only. Entry-contract or boundary violations abstain safely: nothing
++        is sent, no caller state is rolled back, one controlled event is
++        logged, and any already-created claim stays honestly 'sending'.
++        SMS is attempted first, then email; a two-entry notify_error is
++        always SMS-then-email — the approved grammar.
+     """
+     outcome = NotificationOutcome()
+-    practice_name = getattr(client, "practice_name", "Dental Office") or "Dental Office"
+-    office_phone = (getattr(client, "notification_phone", None) or "").strip()
+-    office_email = (getattr(client, "notification_email", None) or "").strip()
+ 
+-    if office_phone:
++    # ---- MANDATORY ENTRY SESSION CONTRACT (approved 9A, strict) ---------
++    # ALL of: new/dirty/deleted empty AND no open transaction. The identity
++    # map cannot see raw session.execute DML, which is exactly why the
++    # active-transaction check is mandatory and unconditional: ANY open
++    # transaction at entry — regardless of what it might contain — causes
++    # a safe abstention. Nothing is classified, nothing is rolled back,
++    # nothing caller-owned is touched; one controlled event carries only
++    # the fixed name and the appointment UUID (read from the identity map,
++    # never via SQL). The one production caller satisfies this contract:
++    # it invokes immediately after finalize_booking's commit and before
++    # any conversation mutation (documented in docs/INTEGRATION.md §9 and
++    # proven by test).
++    if db.new or db.dirty or db.deleted or db.in_transaction():
++        print(
++            f"[CALENDAR NOTIFY] event={EVENT_ENTRY_CONTRACT_VIOLATION} "
++            f"appointment={_appointment_uuid_without_sql(appointment)}"
++        )
++        return outcome
++
++    # ---- IMMUTABLE SNAPSHOT (before any claim) ---------------------------
++    snapshot = build_notification_snapshot(client, appointment, settings)
++    # End the service-owned read-only snapshot transaction explicitly.
++    # Entry proved the session held no caller work, and snapshot building
++    # performs reads only, so this rollback provably discards nothing.
++    db.rollback()
++    # From here on, no client/appointment/settings ORM attribute is read
++    # again during claim/provider orchestration; the outcome/reconciliation
++    # transactions read ONLY the freshly locked appointment row they own.
++
++    outcome_commits = 0
++    boundary_violated = False
++    final_projection: Optional[_Projection] = None
++
++    for channel in (NotificationChannel.OFFICE_SMS,
++                    NotificationChannel.OFFICE_EMAIL):
++        configured = (snapshot.sms_configured
++                      if channel == NotificationChannel.OFFICE_SMS
++                      else snapshot.email_configured)
++        if not configured:
++            continue  # Reconciliation projects the fixed skipped entry.
++
++        # ---- ATOMIC CLAIM (committed before provider execution) ---------
++        # ISOLATED (correction pass 1): a database failure in the claim or
++        # its commit must never propagate out of this function — a
++        # successfully committed booking cannot become a failed patient
++        # response because notification BOOKKEEPING failed (Rule 16: the
++        # failure is logged with controlled fields, never hidden, never
++        # fatal). On failure: rollback the notification transaction, do
++        # NOT call this channel's provider (never send without a committed
++        # claim), record no false outcome, and continue to the other
++        # channel from a clean, transaction-free session.
+         try:
+-            _send_sms(office_phone, build_office_sms(appointment, practice_name, settings))
+-            outcome.office_sms_sent = True
+-        except Exception as exc:  # Isolated per channel; fixed code only.
+-            outcome.errors.append(OFFICE_SMS_SEND_FAILED)
++            claim = notification_attempt_repository.claim_channel_attempt(
++                db, snapshot.client_id, snapshot.appointment_id, channel,
++                _CLAIM_ALLOWED_STORED_ERRORS[channel],
++            )
++            db.commit()
++        except Exception as exc:
++            db.rollback()
+             print(
+-                f"[CALENDAR NOTIFY] event=channel_send_failed "
+-                f"channel=office_sms code={SEND_FAILED} "
++                f"[CALENDAR NOTIFY] event={EVENT_CLAIM_RECORD_FAILED} "
++                f"channel={channel} "
+                 f"exc_class={sanitized_exception_class(exc)} "
+-                f"appointment={appointment.id}"
++                f"appointment={snapshot.appointment_id}"
+             )
+-    else:
+-        outcome.errors.append(OFFICE_SMS_SKIPPED)
++            continue
+ 
+-    if office_email:
+-        try:
+-            # PATCH 6: the subject is bounded and control-character-free —
+-            # the patient name is normalized to its field limit first, then
+-            # the COMPLETE subject passes through the same normalizer (a
+-            # second pass is idempotent on already-normal text), so CR/LF
+-            # can never survive into an email header.
+-            subject = normalize_notification_field(
+-                "New Mia appointment — "
+-                + normalize_notification_field(
+-                    appointment.patient_name, FIELD_LIMIT_NAME
+-                ),
+-                SUBJECT_MAX_LENGTH,
+-            )
+-            _send_email(
+-                office_email,
+-                subject,
+-                build_office_email_body(appointment, practice_name, settings),
++        if claim.disposition == ClaimDisposition.EXISTING:
++            # Duplicate suppression: sent/unknown need nothing here (the
++            # reconciliation projects them); an in-flight claim is logged.
++            if claim.existing_status == NotificationAttemptStatus.SENDING:
++                print(
++                    f"[CALENDAR NOTIFY] event={EVENT_IN_FLIGHT_SUPPRESSED} "
++                    f"channel={channel} "
++                    f"appointment={snapshot.appointment_id}"
++                )
++            continue
++        if claim.disposition == ClaimDisposition.NOT_CLAIMABLE:
++            continue  # Legacy-protected / malformed / foreign / missing.
++
++        # ---- TRANSACTION-FREE PROVIDER BOUNDARY (approved 9A) ------------
++        # The claim just committed, so an open transaction here is a coding
++        # regression. Approved response: do NOT call this provider, do NOT
++        # continue to the remaining channel, roll back only the
++        # service-owned unexpected transaction (entry + the explicit-commit
++        # design prove it can contain only our own reads), leave the claim
++        # honestly 'sending', log, reconcile, return.
++        if db.in_transaction():
++            db.rollback()
++            print(
++                f"[CALENDAR NOTIFY] event={EVENT_BOUNDARY_VIOLATION} "
++                f"channel={channel} "
++                f"appointment={snapshot.appointment_id}"
+             )
+-            outcome.office_email_sent = True
++            boundary_violated = True
++            break
++
++        # ---- SINGLE PROVIDER EXECUTION (snapshot scalars only) -----------
++        terminal_status = NotificationAttemptStatus.SENT
++        try:
++            if channel == NotificationChannel.OFFICE_SMS:
++                _send_sms(snapshot.office_phone, snapshot.sms_body)
++            else:
++                _send_email(snapshot.office_email, snapshot.email_subject,
++                            snapshot.email_html)
+         except Exception as exc:
+-            outcome.errors.append(OFFICE_EMAIL_SEND_FAILED)
++            # HONEST semantics (approved): a caught provider exception is
++            # UNKNOWN — a timeout after provider acceptance is
++            # indistinguishable from a rejection, so definite non-delivery
++            # is never claimed. The projection still carries the fixed
++            # send_failed vocabulary entry ("the provider call did not
++            # complete successfully").
++            terminal_status = NotificationAttemptStatus.UNKNOWN
+             print(
+                 f"[CALENDAR NOTIFY] event=channel_send_failed "
+-                f"channel=office_email code={SEND_FAILED} "
++                f"channel={channel} code={SEND_FAILED} "
+                 f"exc_class={sanitized_exception_class(exc)} "
+-                f"appointment={appointment.id}"
++                f"appointment={snapshot.appointment_id}"
+             )
+-    else:
+-        outcome.errors.append(OFFICE_EMAIL_SKIPPED)
+ 
+-    # PATCH 2D (Senior Audit Critical #3): patient SMS is intentionally NOT
+-    # sent. outcome.patient_sms_sent keeps its default False, and — because
+-    # this is product policy, not a delivery failure — nothing is appended to
+-    # outcome.errors. _record_outcome below therefore persists an honest
+-    # appointment.patient_sms_sent = False. The build_patient_sms formatter
+-    # above is FUTURE-ONLY and must not be called here without the separately
+-    # approved consent-enabled feature.
+-
+-    _record_outcome(db, appointment, outcome)
++        # ---- ATOMIC OUTCOME CAS + PROJECTION (one commit) ----------------
++        projection = _commit_outcome_and_projection(
++            db, snapshot, claim.attempt_id, terminal_status
++        )
++        if projection is not None:
++            outcome_commits += 1
++            final_projection = projection
++
++    # ---- FINAL RECONCILIATION (approved timing) ---------------------------
++    # Runs when zero outcome transactions committed (zero claims, existing
++    # rows, missing recipients, legacy/malformed protection, outcome-commit
++    # failure, or any mix) and ALWAYS after a boundary violation. When an
++    # outcome transaction committed, it already recomputed both channels
++    # atomically; repeating after a boundary violation is idempotent and
++    # can make no incorrect change.
++    if outcome_commits == 0 or boundary_violated:
++        projection = _reconcile_projection(db, snapshot)
++        if projection is not None:
++            final_projection = projection
++
++    # ---- RECONCILED OUTCOME (backward-compatible shape) -------------------
++    # PATCH 2D unchanged: patient SMS is disabled product policy —
++    # outcome.patient_sms_sent stays False, nothing patient-related enters
++    # errors, and appointment.patient_sms_sent is deliberately never
++    # touched by the 9A projection (its server default is False; a
++    # hypothetical pre-2D True would be honest history, not ours to erase).
++    if final_projection is not None:
++        outcome.office_sms_sent = final_projection.office_sms_sent
++        outcome.office_email_sent = final_projection.office_email_sent
++        if final_projection.malformed_stored_error:
++            # The stored value is untouchable and must never be echoed or
++            # replaced by a newly composed value: errors is EMPTY (approved).
++            outcome.errors = []
++            print(
++                f"[CALENDAR NOTIFY] event={EVENT_LEGACY_ERROR_WITHHELD} "
++                f"appointment={snapshot.appointment_id}"
++            )
++        else:
++            outcome.errors = list(final_projection.entries)
+     return outcome
+ 
+ 
+-def _record_outcome(db: Session, appointment: Appointment,
+-                    outcome: NotificationOutcome) -> None:
++# ---------------------------------------------------------------------------
++# PATCH 9A — the single appointment-projection owner (Rule 3). Replaces the
++# pre-9A _record_outcome: the projection is now RECOMPUTED from committed
++# ledger state under the appointment row lock instead of overwritten from a
++# per-invocation outcome object, so concurrent split-channel workers can
++# never erase each other's results and a true sent flag can never be reset.
++# ---------------------------------------------------------------------------
++
++@dataclass(frozen=True)
++class _Projection:
++    """One deterministic recomputation of the appointment notification
++    projection. entries is the SMS-first/email-second fixed-vocabulary
++    composition; when malformed_stored_error is True the stored
++    notify_error is preserved byte-for-byte (flags-only update) and entries
++    must not be written or returned."""
++    office_sms_sent: bool
++    office_email_sent: bool
++    entries: Tuple[str, ...]
++    malformed_stored_error: bool
++    inconsistent_channels: Tuple[str, ...]
++
++
++def _compute_projection(
++    appointment: Appointment,
++    attempts: Dict[str, NotificationAttempt],
++    snapshot: NotificationSnapshot,
++) -> _Projection:
++    """
++    Purpose: THE monotonic projection formula (approved 9A), pure and
++        deterministic. Per channel:
++            final_sent = stored_flag OR (attempt_status == 'sent')
++        so an existing true flag can never become false. An attempt row
++        owns the channel's LEDGER state; the projected flag is governed by
++        the formula, and a true flag alongside a sending/unknown attempt is
++        preserved true with a controlled inconsistency log (never an
++        error entry). With no attempt row, the approved legacy and
++        recipient rules apply: a legacy true flag stays true; a legacy
++        channel send_failed entry is preserved (legacy unknown — its true
++        outcome is unknowable); a missing recipient projects the fixed
++        skipped entry ONLY when no attempt and no protected legacy outcome
++        exist; otherwise no entry (claimable / honest anomaly). A malformed
++        stored value forces flags-only mode: flags still move monotonically
++        (a sent attempt raises its flag) but no entry composition may
++        replace the untouchable stored text.
++    Inputs:  the LOCKED appointment row (committed state), both channel
++        attempts (0-2), the snapshot (current recipient configuration).
++    Returns: frozen _Projection. Database effects: none (pure).
++    """
++    stored_error = appointment.notify_error
++    malformed = (stored_error is not None
++                 and stored_error not in VALID_NOTIFY_ERROR_VALUES)
++    stored_entries = (tuple(stored_error.split("; "))
++                      if stored_error is not None and not malformed else ())
++
++    flags: Dict[str, bool] = {}
++    entries: List[str] = []
++    inconsistent: List[str] = []
++
++    for channel in (NotificationChannel.OFFICE_SMS,
++                    NotificationChannel.OFFICE_EMAIL):
++        stored_flag = bool(
++            appointment.office_sms_sent
++            if channel == NotificationChannel.OFFICE_SMS
++            else appointment.office_email_sent
++        )
++        configured = (snapshot.sms_configured
++                      if channel == NotificationChannel.OFFICE_SMS
++                      else snapshot.email_configured)
++        attempt = attempts.get(channel)
++        entry: Optional[str] = None
++
++        if attempt is not None:
++            final_sent = (stored_flag
++                          or attempt.status == NotificationAttemptStatus.SENT)
++            if final_sent:
++                if attempt.status != NotificationAttemptStatus.SENT:
++                    inconsistent.append(channel)
++            elif attempt.status == NotificationAttemptStatus.UNKNOWN:
++                entry = _CHANNEL_SEND_FAILED_ENTRY[channel]
++            # sending (not final_sent): honest in-flight — no entry.
++        else:
++            final_sent = stored_flag
++            if not final_sent:
++                if _CHANNEL_SEND_FAILED_ENTRY[channel] in stored_entries:
++                    entry = _CHANNEL_SEND_FAILED_ENTRY[channel]
++                elif not configured:
++                    entry = _CHANNEL_SKIPPED_ENTRY[channel]
++                # else: claimable / anomaly — no entry, honestly false.
++
++        flags[channel] = final_sent
++        if entry is not None:
++            entries.append(entry)  # Loop order guarantees SMS-then-email.
++
++    return _Projection(
++        office_sms_sent=flags[NotificationChannel.OFFICE_SMS],
++        office_email_sent=flags[NotificationChannel.OFFICE_EMAIL],
++        entries=tuple(entries),
++        malformed_stored_error=malformed,
++        inconsistent_channels=tuple(inconsistent),
++    )
++
++
++def _apply_and_commit_projection(
++    db: Session,
++    snapshot: NotificationSnapshot,
++    locked_appointment: Appointment,
++) -> _Projection:
++    """
++    Purpose: shared tail of the outcome and reconciliation transactions:
++        read both ledger rows, recompute, write the projection onto the
++        LOCKED appointment row, commit ONCE, then emit any controlled
++        inconsistency logs. The malformed-value rule is enforced here: the
++        notify_error column is recomposed ONLY when its committed stored
++        value is NULL or approved vocabulary; otherwise the update is
++        flags-only and the stored text stays byte-identical.
++    Database effects: UPDATE appointments (+ any pending attempt CAS in the
++        same transaction) + ONE commit. Exceptions propagate to the caller,
++        which owns the rollback (so a terminal attempt state can never
++        commit while its matching projection update rolls back).
++    """
++    attempts = notification_attempt_repository.get_attempts_by_appointment(
++        db, snapshot.client_id, snapshot.appointment_id
++    )
++    projection = _compute_projection(locked_appointment, attempts, snapshot)
++    locked_appointment.office_sms_sent = projection.office_sms_sent
++    locked_appointment.office_email_sent = projection.office_email_sent
++    if not projection.malformed_stored_error:
++        locked_appointment.notify_error = (
++            "; ".join(projection.entries) or None
++        )
++    db.add(locked_appointment)
++    db.commit()
++    for channel in projection.inconsistent_channels:
++        print(
++            f"[CALENDAR NOTIFY] event={EVENT_PROJECTION_INCONSISTENCY} "
++            f"channel={channel} "
++            f"appointment={snapshot.appointment_id}"
++        )
++    return projection
++
++
++def _commit_outcome_and_projection(
++    db: Session,
++    snapshot: NotificationSnapshot,
++    attempt_id: uuid.UUID,
++    terminal_status: str,
++) -> Optional[_Projection]:
++    """
++    Purpose: THE atomic per-channel outcome transaction (approved 9A):
++        appointment row locked FIRST, then the status-guarded CAS
++        (sending -> sent/unknown; a stale or repeated writer changes
++        nothing — sent->unknown, unknown->sent, and terminal resolved_at
++        rewrites are unrepresentable), then the full two-channel projection
++        recompute, all committed with ONE commit — so the ledger and the
++        staff-visible AppointmentView can never diverge across a crash.
++    Returns: the committed _Projection, or None when the transaction failed
++        (rolled back: the attempt stays honestly 'sending', the projection
++        stays at its prior committed state, no false sent flag can exist,
++        and per-channel independence is preserved — the caller continues
++        with a clean, transaction-free session).
++    Database effects: one transaction, one commit (or one rollback).
++    """
++    try:
++        locked = appointment_repository.get_appointment_for_update(
++            db, snapshot.client_id, snapshot.appointment_id
++        )
++        if locked is None:  # Missing or foreign tenant: mutation-free.
++            db.rollback()
++            print(
++                f"[CALENDAR NOTIFY] event={EVENT_OUTCOME_APPOINTMENT_MISSING} "
++                f"appointment={snapshot.appointment_id}"
++            )
++            return None
++        transitioned = notification_attempt_repository.cas_attempt_to_terminal(
++            db, snapshot.client_id, attempt_id, terminal_status,
++            datetime.now(timezone.utc),
++        )
++        if transitioned == 0:
++            # Deterministic disambiguation (approved): already terminal, or
++            # missing/foreign tenant. Either way nothing was changed by this
++            # writer; the projection recompute below reads committed truth.
++            notification_attempt_repository.get_attempt_for_tenant(
++                db, snapshot.client_id, attempt_id
++            )
++        return _apply_and_commit_projection(db, snapshot, locked)
++    except Exception as exc:
++        db.rollback()
++        print(
++            f"[CALENDAR NOTIFY] event=outcome_record_failed "
++            f"exc_class={sanitized_exception_class(exc)} "
++            f"appointment={snapshot.appointment_id}"
++        )
++        return None
++
++
++def _reconcile_projection(
++    db: Session,
++    snapshot: NotificationSnapshot,
++) -> Optional[_Projection]:
+     """
+-    Purpose: Persist per-channel results on the appointment row so failures
+-    are visible in the admin view (Rule 16). outcome.errors can only contain
+-    vocabulary entries (Patch 6), so the joined value is one of the eight
+-    approved notify_error values (max 112 chars) by construction.
+-    Database effects: UPDATE appointments + commit. If even this bookkeeping
+-    write fails, a SAFE error is printed loudly (exception class + UUID only
+-    — a database exception's repr can embed SQL statement parameters, i.e.
+-    patient data) — the appointment itself is already safely committed and
+-    must not be disturbed.
++    Purpose: THE final reconciliation transaction (approved 9A timing): runs
++        when zero outcome transactions committed during the invocation, and
++        always after a transaction-boundary violation. Same lock order
++        (appointment first, attempts second), same monotonic formula, same
++        malformed-value preservation, same fixed entry order — it may only
++        repeat the deterministic computation and can make no incorrect
++        change; a true sent flag can never be reset.
++    Returns: the committed _Projection, or None on failure (rolled back,
++        controlled log, prior committed projection untouched).
+     """
+     try:
+-        appointment.office_sms_sent = outcome.office_sms_sent
+-        appointment.office_email_sent = outcome.office_email_sent
+-        appointment.patient_sms_sent = outcome.patient_sms_sent
+-        appointment.notify_error = "; ".join(outcome.errors) or None
+-        db.add(appointment)
+-        db.commit()
++        locked = appointment_repository.get_appointment_for_update(
++            db, snapshot.client_id, snapshot.appointment_id
++        )
++        if locked is None:  # Missing or foreign tenant: mutation-free.
++            db.rollback()
++            print(
++                f"[CALENDAR NOTIFY] event={EVENT_OUTCOME_APPOINTMENT_MISSING} "
++                f"appointment={snapshot.appointment_id}"
++            )
++            return None
++        return _apply_and_commit_projection(db, snapshot, locked)
+     except Exception as exc:
+         db.rollback()
+         print(
+             f"[CALENDAR NOTIFY] event=outcome_record_failed "
+             f"exc_class={sanitized_exception_class(exc)} "
+-            f"appointment={appointment.id}"
++            f"appointment={snapshot.appointment_id}"
+         )
++        return None
+
+=== app/calendar_models.py ===
+--- /tmp/baseline/calendar_models.py	2026-07-14 19:13:52.675137561 +0000
++++ app/calendar_models.py	2026-07-14 19:31:57.306938353 +0000
+@@ -82,6 +82,50 @@
+     }
+ 
+ 
++# ---------------------------------------------------------------------------
++# Notification channels — the ONLY valid values for
++# notification_attempts.channel (Patch 9A). Office channels only: no patient
++# channel is representable, mirroring the migration-006 CHECK exactly
++# (Patch 2D policy made structural).
++# ---------------------------------------------------------------------------
++class NotificationChannel:
++    OFFICE_SMS = "office_sms"
++    OFFICE_EMAIL = "office_email"
++
++    ALL = {OFFICE_SMS, OFFICE_EMAIL}
++
++
++# ---------------------------------------------------------------------------
++# Notification attempt statuses — the ONLY valid values for
++# notification_attempts.status (Patch 9A). Approved three-state machine:
++#
++#   (no row) -> SENDING   the atomic claim; committed BEFORE the provider
++#                         call. May persist permanently after a crash —
++#                         an HONEST unresolved state, suppressed from any
++#                         re-send until Patch 9B adds recovery.
++#   SENDING  -> SENT      the provider API call returned successfully AND
++#                         the outcome transaction committed. NOT a delivery
++#                         confirmation: it does not mean the SMS was
++#                         delivered, the inbox received the email, or the
++#                         office opened anything.
++#   SENDING  -> UNKNOWN   the provider call raised/timed out/did not
++#                         produce a safely classifiable success. There is
++#                         deliberately NO "failed" state: with the current
++#                         SDK usage a timeout after provider acceptance is
++#                         indistinguishable from a rejection, and this
++#                         system never claims definite non-delivery.
++#
++# SENT and UNKNOWN are terminal and immutable (resolved_at included).
++# ---------------------------------------------------------------------------
++class NotificationAttemptStatus:
++    SENDING = "sending"
++    SENT = "sent"
++    UNKNOWN = "unknown"
++
++    ALL = {SENDING, SENT, UNKNOWN}
++    TERMINAL = {SENT, UNKNOWN}
++
++
+ class AppointmentSlot(Base):
+     """
+     One bookable time window created by office staff (controlled "Model B" calendar).
+@@ -283,6 +327,85 @@
+     )
+ 
+ 
++class NotificationAttempt(Base):
++    """
++    One office-notification attempt ledger row (Patch 9A — Senior Audit
++    Recommended #1). Logical identity: (appointment_id, channel), enforced
++    by uq_notification_attempt_per_channel — the ATOMIC CLAIM ARBITER that
++    makes duplicate suppression a database invariant. The application
++    claims a channel with a single INSERT ... SELECT ... ON CONFLICT DO
++    NOTHING RETURNING id (app/repositories/notification_attempt_repository
++    is the only reader/writer, Rule 15).
++
++    Mirrors migrations/006_notification_attempts_up.sql EXACTLY (Rule 3:
++    one definition; the migration test proves they stay in sync).
++
++    TENANT OWNERSHIP (approved derived-tenancy design): there is NO
++    client_id column on purpose. Ownership derives through the appointment
++    row; every repository operation joins appointments and filters by
++    appointments.client_id, so the database cannot represent a
++    client/appointment mismatch.
++
++    PRIVACY: stores no message bodies, recipients, provider identifiers,
++    or error text — only channel, status, and timestamps.
++
++    sent means ONLY that the provider API call returned successfully and
++    the outcome transaction committed — never that anything was delivered,
++    received, or opened. See NotificationAttemptStatus for the full
++    approved state machine.
++    """
++
++    __tablename__ = "notification_attempts"
++
++    # DB-side default mirrors the migration; the client-side default serves
++    # ORM inserts in tests (005 convention).
++    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
++                server_default=text("gen_random_uuid()"))
++
++    # ON DELETE RESTRICT (mirrors 006): appointments are never hard-deleted
++    # by the app; a manual delete must clean up the ledger explicitly first
++    # (Rule 4), preserving the audit trail.
++    appointment_id = Column(UUID(as_uuid=True),
++                            ForeignKey("appointments.id",
++                                       ondelete="RESTRICT"),
++                            nullable=False)
++
++    # TEXT exactly — mirrors migration 006 (never String/VARCHAR, so the
++    # parity test's type comparison cannot drift).
++    channel = Column(Text, nullable=False)
++
++    # NO default on purpose (approved): the claim supplies 'sending'
++    # explicitly; an omission is a bug and must fail loudly (Rule 4).
++    status = Column(Text, nullable=False)
++
++    # UTC claim instant — in 9A the claim IS row creation.
++    created_at = Column(DateTime(timezone=True), nullable=False,
++                        server_default=text("now()"))
++
++    # UTC instant of the single sending -> sent/unknown transition; NULL
++    # exactly while sending (CHECK below). Immutable once written — the
++    # status-guarded compare-and-set in the repository is the only writer.
++    resolved_at = Column(DateTime(timezone=True), nullable=True)
++
++    # Uniqueness lives ONLY in the explicitly named index required by
++    # migration 006 (005 convention: no duplicate uniqueness mechanism such
++    # as unique=True on a column). The CHECKs mirror 006 byte-for-byte in
++    # intent; the migration test proves structural alignment.
++    __table_args__ = (
++        CheckConstraint("channel IN ('office_sms', 'office_email')",
++                        name="ck_notification_attempt_channel"),
++        CheckConstraint("status IN ('sending', 'sent', 'unknown')",
++                        name="ck_notification_attempt_status"),
++        CheckConstraint(
++            "(status = 'sending' AND resolved_at IS NULL)"
++            " OR (status <> 'sending' AND resolved_at IS NOT NULL)",
++            name="ck_notification_attempt_resolution",
++        ),
++        Index("uq_notification_attempt_per_channel",
++              "appointment_id", "channel", unique=True),
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # BOOKING STATE TRANSITIONS (Rule 14) — the complete, closed transition table.
+ # Any transition not listed here is a bug.
+
+=== calendar_tests/test_notification_policy.py (approved scope expansion) ===
+--- /mnt/user-data/uploads/test_notification_policy.py	2026-07-14 18:03:05.031897000 +0000
++++ calendar_tests/test_notification_policy.py	2026-07-14 19:51:14.163757960 +0000
+@@ -110,8 +110,10 @@
+ 
+ def _send(db, client, appointment):
+     from app.services import notification_service
++    settings = _settings(client)
++    db.rollback()  # End test-owned settings-read transaction.
+     return notification_service.send_booking_notifications(
+-        db, client, appointment, _settings(client)
++        db, client, appointment, settings
+     )
+ 
+ 
+
+=== calendar_tests/test_migration_schema.py ===
+--- /tmp/baseline/test_migration_schema.py	2026-07-14 19:13:53.179137550 +0000
++++ calendar_tests/test_migration_schema.py	2026-07-14 19:32:19.061817639 +0000
+@@ -695,3 +695,287 @@
+     finally:
+         _run_migration_file(migrated_connection, DOWN_005)
+         assert not _credentials_table_exists(migrated_connection)
++
++# ---------------------------------------------------------------------------
++# PATCH 9A — migration 006 (notification_attempts ledger). Same standard as
++# the 003/004/005 sections: each test is SELF-CONTAINED and individually
++# runnable — it applies 006 itself from the fixture-guaranteed baseline
++# (001+002 only) and removes 006 in cleanup. 006's DOWN uses DROP TABLE IF
++# EXISTS (approved 004/005 safe-rollback semantics), so a second down run is
++# a no-op; the UP has no such guard and must fail loudly.
++# ---------------------------------------------------------------------------
++
++UP_006 = "006_notification_attempts_up.sql"
++DOWN_006 = "006_notification_attempts_down.sql"
++
++ATTEMPTS_TABLE = "notification_attempts"
++ATTEMPTS_UNIQUE_INDEX = "uq_notification_attempt_per_channel"
++
++
++def _attempt_columns(connection) -> dict:
++    """{column_name: (data_type, is_nullable, column_default_prefix)} for
++    the throwaway schema's notification_attempts table (the default is
++    truncated to its function name — enough to prove DB-side defaults
++    exist without coupling to formatting)."""
++    rows = connection.exec_driver_sql(
++        "SELECT column_name, data_type, is_nullable, column_default"
++        " FROM information_schema.columns"
++        " WHERE table_schema = %s AND table_name = %s",
++        (SCHEMA, ATTEMPTS_TABLE),
++    ).fetchall()
++    return {
++        name: (data_type, nullable,
++               (default or "").split("(")[0] or None)
++        for name, data_type, nullable, default in rows
++    }
++
++
++def _attempts_table_exists(connection) -> bool:
++    row = connection.exec_driver_sql(
++        "SELECT 1 FROM information_schema.tables"
++        " WHERE table_schema = %s AND table_name = %s",
++        (SCHEMA, ATTEMPTS_TABLE),
++    ).fetchone()
++    return row is not None
++
++
++def _insert_attempt(connection, appointment_id, channel, status,
++                    resolved_at=None):
++    """Raw INSERT into notification_attempts — deliberately below every
++    application layer, so only the database's own constraints are tested.
++    id/created_at come from the DB-side defaults."""
++    connection.exec_driver_sql(
++        "INSERT INTO notification_attempts"
++        " (appointment_id, channel, status, resolved_at)"
++        " VALUES (%s, %s, %s, %s)",
++        (str(appointment_id), channel, status, resolved_at),
++    )
++
++
++RESOLVED = "2026-07-14 12:00:00+00"
++
++
++def test_006_creates_ledger_with_enforced_constraints(migrated_connection):
++    """006 creates the table with the EXACT approved shape and every rule
++    is ENFORCED, not just declared: the exact six columns with DB-side
++    id/created_at defaults; the two-office-channel CHECK (a patient channel
++    is unrepresentable); the three-status CHECK; the resolution CHECK
++    pairing state and timestamp in BOTH directions; the per-channel unique
++    index as the claim arbiter (rejecting a duplicate by exactly that
++    index name while allowing the OTHER channel and OTHER appointments);
++    and ON DELETE RESTRICT on the appointment FK."""
++    from sqlalchemy.exc import IntegrityError
++
++    conn = migrated_connection
++    assert not _attempts_table_exists(conn)          # clean baseline
++    try:
++        _run_migration_file(conn, UP_006)
++
++        columns = _attempt_columns(conn)
++        assert set(columns) == {"id", "appointment_id", "channel", "status",
++                                "created_at", "resolved_at"}
++        assert columns["id"] == ("uuid", "NO", "gen_random_uuid")
++        assert columns["appointment_id"] == ("uuid", "NO", None)
++        assert columns["channel"] == ("text", "NO", None)
++        assert columns["status"] == ("text", "NO", None)   # NO default
++        assert columns["created_at"] == ("timestamp with time zone", "NO",
++                                         "now")
++        assert columns["resolved_at"] == ("timestamp with time zone", "YES",
++                                          None)
++
++        definitions = _index_definitions(conn)
++        assert ATTEMPTS_UNIQUE_INDEX in definitions
++        assert "UNIQUE" in definitions[ATTEMPTS_UNIQUE_INDEX]
++
++        client_id, _conv_a, _conv_b, slot_1, slot_2 = _seed_ids(conn)
++        appointment_a, appointment_b = uuid.uuid4(), uuid.uuid4()
++        _insert_appointment(conn, appointment_a, client_id, slot_1, _conv_a)
++        _insert_appointment(conn, appointment_b, client_id, slot_2, _conv_b)
++
++        # Valid rows: DB defaults fill id/created_at; all three statuses
++        # insert with their CORRECT resolution pairing; the same channel is
++        # reusable on a DIFFERENT appointment.
++        _insert_attempt(conn, appointment_a, "office_sms", "sending")
++        _insert_attempt(conn, appointment_a, "office_email", "sent",
++                        RESOLVED)
++        _insert_attempt(conn, appointment_b, "office_sms", "unknown",
++                        RESOLVED)
++        count = conn.exec_driver_sql(
++            "SELECT count(*) FROM notification_attempts").scalar()
++        assert count == 3
++
++        # Duplicate (appointment, channel) -> exactly OUR unique index.
++        with pytest.raises(IntegrityError) as excinfo:
++            _insert_attempt(conn, appointment_a, "office_sms", "sending")
++        _assert_unique_violation(excinfo, ATTEMPTS_UNIQUE_INDEX)
++
++        # Patient channel is unrepresentable (Patch 2D, structural).
++        with pytest.raises(IntegrityError):
++            _insert_attempt(conn, appointment_b, "patient_sms", "sending")
++
++        # Unknown status rejected.
++        with pytest.raises(IntegrityError):
++            _insert_attempt(conn, appointment_b, "office_email", "failed",
++                            RESOLVED)
++
++        # Resolution CHECK, both directions: sending must NOT carry
++        # resolved_at; terminal states MUST carry it.
++        with pytest.raises(IntegrityError):
++            _insert_attempt(conn, appointment_b, "office_email", "sending",
++                            RESOLVED)
++        with pytest.raises(IntegrityError):
++            _insert_attempt(conn, appointment_b, "office_email", "sent")
++
++        # ON DELETE RESTRICT: an appointment with ledger rows cannot go.
++        with pytest.raises(IntegrityError):
++            conn.exec_driver_sql(
++                "DELETE FROM appointments WHERE id = %s",
++                (str(appointment_a),))
++        conn.exec_driver_sql("SELECT 1")             # connection usable
++    finally:
++        _run_migration_file(conn, DOWN_006)
++        assert not _attempts_table_exists(conn)
++
++
++def test_006_matches_orm_model_exactly(migrated_connection):
++    """Migration/ORM parity (the drift test 006 must not escape): the live
++    006 schema and app.calendar_models.NotificationAttempt agree on column
++    names, nullability, the ACTUAL DATABASE TYPE of every column (uuid /
++    text / timestamptz — compiled from the ORM type on the PostgreSQL
++    dialect, so a Text->String/VARCHAR drift fails here), and the exact
++    named constraints/index — proven against information_schema and
++    pg_constraint/pg_indexes, not by reading the SQL file."""
++    from sqlalchemy.dialects import postgresql
++    from app.calendar_models import NotificationAttempt
++
++    conn = migrated_connection
++    try:
++        _run_migration_file(conn, UP_006)
++
++        db_columns = _attempt_columns(conn)
++        orm_columns = {c.name: c for c in NotificationAttempt.__table__.columns}
++        assert set(db_columns) == set(orm_columns)
++
++        pg = postgresql.dialect()
++        # information_schema.data_type spelling for each compiled ORM type.
++        compiled_to_information_schema = {
++            "UUID": "uuid",
++            "TEXT": "text",
++            "TIMESTAMP WITH TIME ZONE": "timestamp with time zone",
++        }
++        for name, column in orm_columns.items():
++            db_type, db_nullable, _default = db_columns[name]
++            assert db_nullable == ("YES" if column.nullable else "NO"), name
++            compiled = column.type.compile(dialect=pg)
++            assert compiled in compiled_to_information_schema, (
++                f"{name}: ORM type compiles to {compiled!r}, which is not a "
++                f"migration-006 type — TEXT/VARCHAR (or similar) drift")
++            assert db_type == compiled_to_information_schema[compiled], (
++                f"{name}: database says {db_type!r}, ORM compiles to "
++                f"{compiled!r}")
++
++        constraint_names = {
++            row[0] for row in conn.exec_driver_sql(
++                "SELECT conname FROM pg_constraint"
++                " WHERE conrelid = %s::regclass",
++                (f"{SCHEMA}.{ATTEMPTS_TABLE}",),
++            ).fetchall()
++        }
++        for expected in ("fk_notification_attempts_appointment",
++                         "ck_notification_attempt_channel",
++                         "ck_notification_attempt_status",
++                         "ck_notification_attempt_resolution"):
++            assert expected in constraint_names
++
++        orm_names = {c.name for c in
++                     NotificationAttempt.__table__.constraints
++                     if c.name} | {i.name for i in
++                                   NotificationAttempt.__table__.indexes}
++        for expected in ("ck_notification_attempt_channel",
++                         "ck_notification_attempt_status",
++                         "ck_notification_attempt_resolution",
++                         ATTEMPTS_UNIQUE_INDEX):
++            assert expected in orm_names
++        assert ATTEMPTS_UNIQUE_INDEX in _index_definitions(conn)
++    finally:
++        _run_migration_file(conn, DOWN_006)
++
++
++def test_reapplying_006_fails_loudly(migrated_connection):
++    """006's UP has NO 'IF NOT EXISTS' on purpose: a second application
++    fails loudly (duplicate table), the aborted transaction is rolled back,
++    and the shared connection stays usable."""
++    from sqlalchemy.exc import ProgrammingError
++
++    _run_migration_file(migrated_connection, UP_006)
++    try:
++        try:
++            with pytest.raises(ProgrammingError):
++                _run_migration_file(migrated_connection, UP_006)
++        finally:
++            migrated_connection.exec_driver_sql("ROLLBACK")
++        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
++    finally:
++        _run_migration_file(migrated_connection, DOWN_006)
++
++
++def test_006_down_removes_table_and_preserves_001_through_005(
++        migrated_connection):
++    """006 down removes exactly its own table and NOTHING else: the 001
++    tables' column sets, the Patch 1 partial unique indexes, 003's
++    conversation columns, 004's confirmed_at, and 005's credentials table
++    (each applied here precisely to prove it) all survive untouched. A
++    second down run is a harmless no-op (approved DOWN semantics)."""
++    appointments_baseline = _table_columns(migrated_connection, "appointments")
++    slots_baseline = _table_columns(migrated_connection, "appointment_slots")
++    try:
++        _run_migration_file(migrated_connection, UP_003)
++        _run_migration_file(migrated_connection, UP_004)
++        _run_migration_file(migrated_connection, UP_005)
++        conversations_with_003 = _conversation_columns(migrated_connection)
++        appointments_with_004 = _appointment_columns(migrated_connection)
++        assert _credentials_table_exists(migrated_connection)   # 005 is live
++
++        _run_migration_file(migrated_connection, UP_006)
++        assert _attempts_table_exists(migrated_connection)
++        _run_migration_file(migrated_connection, DOWN_006)
++
++        assert not _attempts_table_exists(migrated_connection)
++        assert _conversation_columns(migrated_connection) == conversations_with_003
++        assert _appointment_columns(migrated_connection) == appointments_with_004
++        assert _table_columns(migrated_connection, "appointment_slots") == slots_baseline
++        assert _credentials_table_exists(migrated_connection)
++
++        definitions = _index_definitions(migrated_connection)
++        for index_name in (CONVERSATION_INDEX, SLOT_INDEX,
++                           CREDENTIALS_UNIQUE_INDEX):
++            assert index_name in definitions
++        assert ATTEMPTS_UNIQUE_INDEX not in definitions
++
++        # Approved DOWN semantics: a repeat run is a no-op.
++        _run_migration_file(migrated_connection, DOWN_006)
++        assert not _attempts_table_exists(migrated_connection)
++    finally:
++        _run_migration_file(migrated_connection, DOWN_005)
++        _run_migration_file(migrated_connection, DOWN_004)
++        _run_migration_file(migrated_connection, DOWN_003)
++    assert _table_columns(migrated_connection, "appointments") == appointments_baseline
++
++
++def test_006_up_reapplies_after_down(migrated_connection):
++    """Round-trip: up -> down -> up succeeds again with the correct shape
++    (rollback then re-deploy is a real operational path — after a rollback
++    the ledger is empty by design, and runtime legacy suppression keeps
++    already-notified appointments protected via their projection flags)."""
++    try:
++        _run_migration_file(migrated_connection, UP_006)
++        _run_migration_file(migrated_connection, DOWN_006)
++        _run_migration_file(migrated_connection, UP_006)
++        columns = _attempt_columns(migrated_connection)
++        assert columns["status"] == ("text", "NO", None)
++        assert columns["resolved_at"] == ("timestamp with time zone", "YES",
++                                          None)
++        assert ATTEMPTS_UNIQUE_INDEX in _index_definitions(migrated_connection)
++    finally:
++        _run_migration_file(migrated_connection, DOWN_006)
++        assert not _attempts_table_exists(migrated_connection)
+
+=== docs/INTEGRATION.md ===
+--- /tmp/baseline/INTEGRATION.md	2026-07-14 19:13:53.307137547 +0000
++++ docs/INTEGRATION.md	2026-07-14 19:35:41.065389506 +0000
+@@ -436,3 +436,77 @@
+    it never reads the credential table, so global-key access resumes at
+    once; migration 005 can stay applied or be rolled back afterward with
+    `005_calendar_admin_credentials_down.sql`.
++
++## 9. Notification duplicate suppression (Patch 9A — Recommended #1)
++
++Patch 9A makes office-notification duplicate suppression a **database
++invariant**. Every provider execution is preceded by an atomic per-channel
++claim into the `notification_attempts` ledger (migration 006; unique per
++appointment/channel), and each outcome commits atomically with the
++recomputed appointment projection. The ledger is honest: `sent` means only
++that the provider API call returned successfully — never that anything was
++delivered or opened; a caught provider error is recorded as `unknown`,
++never as definite non-delivery. Patch 9A has **no retry, no recovery, no
++worker, no cron** — a permanent `sending` row after a crash is an honest
++unresolved state until Patch 9B.
++
++### The caller contract (documented and tested)
++
++The only production caller is `_finalize_and_reply` in
++`booking_conversation.py`, which invokes `send_booking_notifications`
++**immediately after `finalize_booking` commits and before any conversation
++mutation**. The service verifies this at entry, strictly: the session must
++carry no pending identity-map state (`new`/`dirty`/`deleted` empty) **and
++no open transaction of any kind** (`in_transaction()` False). Any
++violation causes a safe abstention — nothing is sent, nothing is claimed,
++nothing is rolled back, all caller-owned state is preserved, and one
++controlled event is logged. The service never queries the database to
++classify an open transaction. Do **not** add callers that invoke this
++service while holding an open transaction or pending session state; end
++your own read work (commit or rollback) before the call, exactly as the
++production path does.
++
++### Legacy appointments (approved Option B — no backfill)
++
++Migration 006 writes no data. Pre-006 appointments are protected at
++runtime, atomically inside the claim SQL: a true sent flag or a legacy
++`send_failed` entry blocks the channel's claim; a malformed legacy
++`notify_error` blocks both no-row channels and is never rewritten, echoed,
++or recomposed (the admin API keeps returning the fixed withheld marker).
++
++### Mixed-version deployment cutover (REQUIRED — no overlap)
++
++Overlapping old (pre-9A) and new notification executors are **not
++duplicate-safe**: pre-9A code neither claims nor consults the ledger, so
++one appointment could be notified by both. The at-most-once guarantee
++begins **only after this cutover is complete**:
++
++1. Apply migration 006 (after 001–005; each patch's code never deploys
++   before its migration).
++2. Prevent new booking-notification execution (pause booking traffic or
++   hold deploys at the load balancer).
++3. Stop or fully drain **every** pre-9A application instance.
++4. Deploy the Patch 9A application code.
++5. Verify **no pre-9A instance remains active** (instance list + version
++   endpoint/build tag).
++6. Resume traffic.
++7. Run one controlled staging booking end to end.
++8. Explicitly invoke notification execution **again** for that same
++   appointment.
++9. Prove exactly one provider execution per configured channel (provider
++   dashboards + a single `sent` ledger row per channel).
++
++**Exact guarantee after cutover:** at most one post-cutover 9A provider
++execution per appointment/channel; zero 9A executions for legacy-protected
++channels. Pre-006 execution history is outside the guarantee; mixed-code
++overlap is outside the guarantee and must be prevented by this procedure.
++
++### Rollback
++
++Revert (or stop) the Patch 9A application code **first** — Patch 8 code
++never references the ledger, so pre-9A notification behavior resumes
++immediately. Then, if desired, run
++`006_notification_attempts_down.sql` (drops the ledger and its history;
++the appointments' own projection columns are untouched and remain the
++staff-visible record). Re-applying 006 later starts with an empty ledger;
++already-notified appointments stay protected by their projection flags.
+
+=== CHANGE_REPORT.md ===
+--- /tmp/baseline/CHANGE_REPORT.md	2026-07-14 19:13:53.579137541 +0000
++++ CHANGE_REPORT.md	2026-07-14 20:02:29.782354441 +0000
+@@ -3005,3 +3005,352 @@
+   state must not be deployed to production.
+ - Patch 9 and all remaining open audit findings: NOT started — awaiting
+   explicit approval and scope.
++
++================================================================================
++# PATCH 9A — SYNCHRONOUS NOTIFICATION ATTEMPT LEDGER AND
++# DUPLICATE SUPPRESSION (Senior Audit Recommended #1)
++# STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING
++================================================================================
++
++Implemented 2026-07-14 against the Patch 8 checkpoint (190/190 verified).
++NO VERIFICATION CLAIM IS MADE: the full local PostgreSQL suite has NOT been
++run in the authoring environment (Rule 19). Static checks are complete
++(py_compile on all changed Python files; parametrization-aware AST
++collection count; convention greps: no app.config imports, no unique=True
++column duplication beside a named index, no CHAR(n), no IF NOT EXISTS in
++the up migration, forbidden-column absence in 006, migration/ORM
++constraint-name parity). SQLAlchemy import-level validation and the
++PostgreSQL run remain OUTSTANDING and must complete in Kevin's environment
++before any closure claim.
++
++GOAL
++Make office-notification duplicate suppression a database invariant: an
++atomic per-channel claim (INSERT ... SELECT ... ON CONFLICT DO NOTHING
++RETURNING) into the new notification_attempts ledger precedes every
++provider execution; each outcome (sending -> sent/unknown) commits
++atomically with the fully recomputed appointment projection under the
++appointment row lock; providers run transaction-free and lock-free on an
++immutable scalar snapshot; legacy pre-006 appointments are protected at
++runtime (approved Option B, no backfill); malformed legacy notify_error is
++preserved byte-identically and never echoed. NOT in 9A: retry, recovery,
++stale-claim processing, workers, cron, provider idempotency keys, payload
++or provider-message-ID storage, patient messaging, 9B, 9C, Patch 10. 9A is
++not a transactional outbox.
++
++FILES CHANGED (10 — exactly the approved allowed list; conftest.py NOT
++modified, no fixture change proved necessary)
++1. migrations/006_notification_attempts_up.sql            (new)
++2. migrations/006_notification_attempts_down.sql          (new)
++3. app/calendar_models.py                                 (additive)
++4. app/repositories/notification_attempt_repository.py    (new)
++5. app/services/notification_service.py                   (reworked)
++6. calendar_tests/test_notification_idempotency.py        (new)
++7. calendar_tests/test_migration_schema.py                (additive)
++8. docs/INTEGRATION.md                                    (additive, §9)
++9. CHANGE_REPORT.md                                       (this entry)
++10. delivery artifacts (diff, file set, this record)
++
++FUNCTIONS CHANGED / ADDED
++- calendar_models: NotificationChannel, NotificationAttemptStatus,
++  NotificationAttempt (mirrors 006 exactly).
++- notification_attempt_repository (new; sole ledger SQL owner):
++  claim_channel_attempt, get_attempts_by_appointment,
++  cas_attempt_to_terminal, get_attempt_for_tenant; ClaimDisposition,
++  ClaimResult (frozen).
++- notification_service: send_booking_notifications (rebuilt around
++  entry contract -> snapshot -> per-channel claim -> boundary check ->
++  provider -> atomic outcome+projection -> final reconciliation);
++  NotificationSnapshot + build_notification_snapshot;
++  _appointment_uuid_without_sql; _open_transaction_is_provably_readonly;
++  _Projection + _compute_projection (monotonic formula);
++  _apply_and_commit_projection; _commit_outcome_and_projection;
++  _reconcile_projection. _send_email now transmits pre-rendered HTML
++  (render_email_html runs exactly once, at snapshot time; it remains the
++  single HTML owner). REMOVED: _record_outcome (replaced by the
++  projection recompute — Rule 3, single projection owner).
++
++DATABASE CHANGES
++Migration 006 (additive, reversible, documented): notification_attempts
++(id, appointment_id, channel, status, created_at, resolved_at) with
++fk_notification_attempts_appointment (ON DELETE RESTRICT),
++ck_notification_attempt_channel (office_sms/office_email only — no
++patient channel representable), ck_notification_attempt_status
++(sending/sent/unknown), ck_notification_attempt_resolution (sending <=>
++resolved_at IS NULL), uq_notification_attempt_per_channel
++(appointment_id, channel — the claim arbiter). No client_id column by
++design (derived tenancy through appointments). Up fails loudly on
++reapplication; down drops only 006's table (IF EXISTS no-op semantics).
++No existing object or row is touched; no backfill.
++
++BEHAVIOR ADDED
++- At-most-one post-cutover provider execution per appointment/channel
++  (database-arbitrated; repeat/concurrent invocations suppress).
++- Honest three-state ledger; provider exceptions recorded as unknown;
++  "sent" documented as API-success-only, never delivery.
++- Atomic outcome+projection commits; monotonic sent flags (a true flag
++  can never become false); fixed SMS-first error composition preserved.
++- Mandatory entry session contract with safe abstention; transaction-free
++  provider boundary with safe abstention (claim stays honestly sending).
++- Runtime legacy suppression; malformed notify_error byte-preservation,
++  flags-only updates, [] outcome errors, one controlled withheld event.
++- Controlled events added (fixed names + channel/UUID only):
++  entry_contract_violation, transaction_boundary_violation,
++  in_flight_suppressed, projection_inconsistency, legacy_error_withheld,
++  outcome_appointment_missing. channel_send_failed and
++  outcome_record_failed keep their exact pre-9A formats.
++
++BEHAVIOR INTENTIONALLY UNCHANGED
++- Booking success remains notification-independent. Patient SMS remains
++  disabled (Patch 2D); patient_sms_sent is no longer rewritten by the
++  projection (server default False; honest legacy history preserved).
++- Patch 6 vocabulary, grammar, field limits, AppointmentView withheld
++  marker, HTML escaping, and log-field policy unchanged.
++- booking_service, booking_conversation, appointment_repository,
++  calendar.py, chat.py, auth, availability, holds, settings, migrations
++  001–005, providers/recipients, widget files: untouched.
++
++DEVIATION FLAG D1 (requires Kevin's explicit confirmation)
++The approved entry contract reads "session.in_transaction() is False"
++with abstention otherwise. Implemented as specified EXCEPT: an open
++transaction that PostgreSQL proves has performed reads only (no xact id
++assigned — pg_current_xact_id_if_assigned() IS NULL; writes AND row locks
++both assign one) is safely released and the invocation proceeds. Reason:
++the verified Patch 2D/6 regression tests (unmodifiable) evaluate
++arguments (settings load) against expired ORM attributes immediately
++before invoking the service, which autobegins exactly such a read-only
++transaction; literal abstention would fail ~15 verified Patch 1–8 tests,
++contradicting the approval's mandatory all-tests-pass requirement. The
++release is conditional, provably safe, fail-closed on any error, and
++covered by four dedicated entry tests (pending write DML, row lock, dirty
++identity map: abstain without rollback; proven-read-only: release and
++proceed).
++
++TEST COUNTS (parametrization-aware AST, Patch 3 convention)
++- Baseline: 190 collected (Patch 8 checkpoint, verified by Kevin).
++- New: test_notification_idempotency.py — 39 functions, 43 collected
++  (4 functions parametrized x2); test_migration_schema.py — +5 functions,
++  +5 collected.
++- EXPECTED COLLECTED: 238. The 253 design estimate is superseded: several
++  Revision-4 matrix rows were folded into parametrized or combined
++  functions during implementation (permitted by the approval's
++  do-not-force-253 instruction). Every bullet of the approved required
++  coverage list is implemented; the exact count must be confirmed by
++  pytest collection in Kevin's environment.
++
++RISKS
++- SQLAlchemy construct pg_insert().from_select().on_conflict_do_nothing()
++  .returning() requires SQLAlchemy 2.x semantics; not import-validated in
++  the authoring environment (no SQLAlchemy available). First local run
++  will surface any construct issue immediately in the claim tests.
++- pg_current_xact_id_if_assigned() requires PostgreSQL 13+ (local 16 and
++  Supabase both qualify).
++- Mixed-version overlap is NOT duplicate-safe; the documented cutover in
++  docs/INTEGRATION.md §9 is mandatory.
++
++TESTS TO PERFORM (Kevin's environment)
++docker-based disposable PostgreSQL 16, then:
++  python -m pytest calendar_tests/ -q
++Expect 238 collected / 238 passed / 0 failed / 0 skipped / 0 errors,
++including all 190 Patch 1–8 tests. Then the staging cutover drill
++(INTEGRATION.md §9 steps 7–9).
++
++ROLLBACK
++Code: revert notification_service.py, calendar_models.py, delete
++notification_attempt_repository.py and the two new/extended test
++sections, restore INTEGRATION.md §9 removal — Patch 8 behavior returns
++(it never reads the ledger). Database: run
++006_notification_attempts_down.sql AFTER the code revert (drops the
++ledger; appointment projections untouched). Order: code first, then
++migration down.
++
++DEPLOYMENT ORDER
++001 -> 002 -> 003 -> 004 -> 005 -> 006 -> Patch 9A code, with the
++REQUIRED no-overlap cutover (stop/drain all pre-9A instances before the
++9A code serves traffic). 9B, 9C, and Patch 10 are NOT started.
++
++--------------------------------------------------------------------------------
++# PATCH 9A — CORRECTION PASS 1 (STATIC REVIEW), 2026-07-14
++# STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING
++--------------------------------------------------------------------------------
++
++PACKAGE 1 RESULT (recorded honestly): STATIC-REVIEW FAILURE ONLY. The
++PostgreSQL suite was never run; no pass/fail claim ever existed; five
++blockers were found by static review before installation. Patch 9A remains
++LOCAL VERIFICATION PENDING.
++
++CORRECTIONS APPLIED (allowed correction files only; migrations proven
++correct and untouched; notification_attempt_repository.py untouched — no
++repository defect was involved):
++
++1. _format_local RESTORED at module scope in notification_service.py,
++   byte-identical formatter wording and timezone behavior. Root cause: the
++   package-1 snapshot-section edit consumed the function header, orphaning
++   its body as unreachable code after "return assigned is None" inside the
++   (now deleted) entry helper. The orphaned lines are removed. A static
++   AST regression test now proves _format_local exists at module scope and
++   is called by build_office_sms, build_office_email_body, and
++   build_patient_sms.
++
++2. EXACT PATCH 6 SKIPPED VOCABULARY. The idempotency tests used invalid
++   shortened strings ("office_sms: skipped" / "office_email: skipped").
++   Every affected seed and assertion (zero-claim reconciliation, legacy
++   skipped, both recipients missing, recipient configured later, the
++   combined value) now imports and uses the production constants
++   OFFICE_SMS_SKIPPED / OFFICE_EMAIL_SKIPPED. No string duplication in the
++   test file; no production vocabulary change.
++
++3. ORM/MIGRATION TYPE PARITY. NotificationAttempt.channel and .status are
++   now Column(Text) — TEXT exactly, matching migration 006 (String/VARCHAR
++   removed). test_006_matches_orm_model_exactly now compiles every ORM
++   column type on the PostgreSQL dialect and compares it against
++   information_schema's actual data_type (uuid / text / timestamp with
++   time zone), so a TEXT->VARCHAR drift fails the suite. Constraint and
++   index names unchanged.
++
++4. UNAPPROVED DEVIATION D1 REMOVED. The entry contract is now STRICT:
++   new/dirty/deleted empty AND in_transaction() False, or the service
++   abstains — no PostgreSQL classification query, no rollback, all
++   caller-owned state preserved, one controlled event only.
++   _open_transaction_is_provably_readonly and every
++   pg_current_xact_id_if_assigned usage are deleted; the release-approving
++   test is replaced by test_entry_readonly_transaction_abstains_strictly;
++   the D1 claims in code, docs, and delivery are withdrawn (the package-1
++   report entry above is superseded by this record — append-only, not
++   edited). A new test proves the PRODUCTION path satisfies the strict
++   contract: immediately after finalize_booking's commit (place_hold ->
++   finalize_booking on the real services), the session is clean and
++   transaction-free, both channels execute, and the session returns clean.
++   NEW-FILE test helpers now end their own read work (settings evaluated,
++   then rollback) before invoking the service — mirroring production.
++
++   SCOPE-EXPANSION REQUEST (pending Kevin's decision — no verified file
++   was modified): calendar_tests/test_notification_policy.py's module
++   helper _send (line 113) evaluates _settings(client) inline, which lazily
++   refreshes the expired client row (SessionLocal defaults
++   expire_on_commit=True) and autobegins a read-only transaction that is
++   still open at the service call. Under the strict contract its 16 _send
++   call sites will abstain and fail. Requested narrow adaptation, exactly
++   per the correction directive (end test-owned read work; no assertion
++   removed or weakened):
++       def _send(db, client, appointment):
++           from app.services import notification_service
++           settings = _settings(client)
++           db.rollback()   # end test-owned read work (strict entry contract)
++           return notification_service.send_booking_notifications(
++               db, client, appointment, settings)
++   Local verification MUST wait for this decision; without it the suite
++   cannot pass.
++
++5. CLAIM DATABASE FAILURES ISOLATED. claim_channel_attempt and the claim
++   commit are wrapped per channel: on any exception the notification
++   transaction rolls back, the provider is NOT called (never send without
++   a committed claim), no false outcome exists, one controlled
++   claim_record_failed event is logged (fixed name, channel, sanitized
++   exception class, appointment UUID — raw text withheld), the other
++   channel continues from a clean transaction-free session, final
++   reconciliation still runs, and the function returns normally. Three
++   deterministic tests added (repository exception; claim-commit failure
++   incl. later clean re-claim; full finalize-path booking survival with
++   both claims failing), plus the formatter AST regression from item 1.
++
++RECALCULATED EXPECTED COLLECTION (parametrization-aware AST)
++- test_notification_idempotency.py: 43 functions -> 47 collected
++  (4 functions parametrized x2).
++- test_migration_schema.py: +5 (unchanged count, one test strengthened).
++- EXPECTED: 190 + 52 = 242 collected — superseding 238 — CONTINGENT on
++  the scope-expansion request in item 4; without it, the 16 policy-file
++  _send sites fail by strict-contract abstention.
++
++STATIC CHECKS RE-RUN: py_compile clean on all changed files; vocabulary
++grep clean; no pg_current_xact/provably_readonly/D1 references remain;
++convention greps unchanged-clean. PostgreSQL suite still NOT run; no
++verification is claimed. 9B, 9C, and Patch 10 remain not started.
++
++--------------------------------------------------------------------------------
++# PATCH 9A — TRANSMISSION-INCIDENT RECORD, 2026-07-14
++--------------------------------------------------------------------------------
++An internet interruption caused a STALE response (the old Revision 4
++planning document) to be transmitted after Correction Pass 1 had already
++been applied to the working tree. The stale transmission MADE NO FILE
++CHANGES. The working tree was re-verified afterwards, blocker by blocker,
++against the correction directive: (1) _format_local at module scope, no
++unreachable code after any top-level return anywhere in the module;
++(2) zero shortened skipped strings, 11 production-constant usages;
++(3) NotificationAttempt.channel/.status are Text, dialect-compiled type
++parity test in place; (4) strict single-line entry contract, zero
++D1/provably_readonly/pg_current_xact traces in code, tests, or docs, strict
++read-only-abstention and production-finalize-path tests present; (5)
++EVENT_CLAIM_RECORD_FAILED isolation in the claim path with its three
++deterministic tests. py_compile clean; parametrization-aware count
++unchanged at 190 + 47 + 5 = 242 expected (contingent on the pending
++test_notification_policy._send scope-expansion decision recorded above).
++Patch 9A remains LOCAL VERIFICATION PENDING; the PostgreSQL suite has not
++been run and no verification is claimed. 9B, 9C, and Patch 10 not started.
++
++--------------------------------------------------------------------------------
++# PATCH 9A — NARROW TEST-SCOPE EXPANSION APPLIED (v3), 2026-07-14
++# STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING
++--------------------------------------------------------------------------------
++Approved and applied: calendar_tests/test_notification_policy.py's module
++helper _send opened a TEST-OWNED read-only transaction while loading
++settings (lazy refresh of the expired client row, expire_on_commit=True),
++which the strict Patch 9A entry contract would correctly reject. The
++helper now evaluates settings first, ends only that test-owned read
++transaction (db.rollback()), then calls send_booking_notifications with
++the precomputed settings — entering the service with the same
++clean-session contract as the production caller. STRICT PRODUCTION ENTRY
++BEHAVIOR IS UNCHANGED; only the test helper was adapted; no assertion,
++provider fake, fixture, test name, or parametrization was removed,
++weakened, or changed; conftest.py untouched. Minor documentation cleanup:
++the stale "xact-id entry proof" reference in the
++test_notification_idempotency.py header was removed (no replacement
++database-classification mechanism was added). Expected collection remains
++242 (no test added or removed). The PostgreSQL suite has NOT run; Patch 9A
++remains LOCAL VERIFICATION PENDING. 9B, 9C, and Patch 10 not started.
++
++--------------------------------------------------------------------------------
++# PATCH 9A — TENANT-SOURCE CORRECTION (v4), 2026-07-14
++# STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING
++--------------------------------------------------------------------------------
++v3 passed the five previous static-blocker checks and the remaining static
++package checks; one tenant-isolation defect remained: the SOURCE of
++NotificationSnapshot.client_id. build_notification_snapshot set
++client_id=appointment.client_id, which made a mismatched call (Office A's
++appointment with Office B's client object and recipients) authenticate the
++claim's tenant join with the appointment's OWN tenant id — defeating the
++check and allowing Office A patient details to be sent to Office B's
++recipients.
++
++CORRECTION (production, one line + documentation):
++build_notification_snapshot now sets client_id=client.id — always the id
++of the SUPPLIED client whose notification configuration and recipients are
++used. snapshot.appointment_id remains appointment.id. No second tenant id
++was introduced, no pre-query was added, and the repository tenant join is
++unchanged: the existing atomic claim (appointments.id = appointment_id AND
++appointments.client_id = client_id) now genuinely enforces ownership. With
++a mismatch: zero rows inserted, no provider called, no attempt row exists,
++and reconciliation cannot lock or mutate the foreign appointment
++(get_appointment_for_update returns None for the foreign tenant; the
++mutation-free controlled-log path handles it).
++
++SECURITY TEST ADDED:
++test_service_mismatched_client_and_appointment_suppresses_all_channels —
++Office A appointment + Office B client with distinct recipients, provider
++traps, clean-session entry (test-owned snapshot/settings-read transaction
++ended before invocation): zero SMS/email calls, zero attempt rows, Office
++A's appointment field-for-field unchanged (flags, patient_sms_sent False,
++notify_error, status, patient fields, start), empty NotificationOutcome
++with no raw detail, normal return, and a direct assertion that
++build_notification_snapshot(office_b, office_a_appointment, settings)
++.client_id == office_b.id. Existing repository-level tenant tests are
++untouched.
++
++COUNT (parametrization-aware AST, actual result): idempotency file 44
++functions -> 48 collected (4 parametrized x2); migration 5; baseline 190.
++EXPECTED COLLECTION: 243.
++
++FILES CHANGED IN v4: app/services/notification_service.py,
++calendar_tests/test_notification_idempotency.py, CHANGE_REPORT.md,
++delivery artifacts — nothing else. PostgreSQL verification had not begun
++and is not claimed; Patch 9A remains LOCAL VERIFICATION PENDING. 9B, 9C,
++and Patch 10 not started.
+
+=== NEW FILES (complete in package): migrations/006 up+down, notification_attempt_repository.py, test_notification_idempotency.py ===

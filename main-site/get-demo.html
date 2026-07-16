@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Book a Demo | Dos Tiris</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/logos/favicon-32.png?v=5">
+    <link rel="icon" type="image/png" sizes="192x192" href="assets/logos/favicon-192.png?v=5">
+    <link rel="apple-touch-icon" href="assets/logos/favicon-192.png?v=5">
+    <link rel="shortcut icon" href="assets/logos/favicon.ico?v=5">
+
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body class="demo-page">
+
+    <section class="demo-form-section">
+        <div class="demo-form-container">
+
+            <a href="index.html" class="back-home">← Return to Home</a>
+
+            <div class="section-heading">
+                <span class="section-badge">Book a Demo</span>
+                <h1>See Mia in Action</h1>
+                <p>Tell us a little about your practice and we’ll follow up with you.</p>
+            </div>
+
+            <form class="demo-form" id="demoRequestForm">
+
+                <label>
+                    Your Name
+                    <input type="text" name="name" required>
+                </label>
+
+                <label>
+                    Practice Name
+                    <input type="text" name="practice_name" required>
+                </label>
+
+                <label>
+                    Email Address
+                    <input type="email" name="email" required>
+                </label>
+
+                <label>
+                    Phone Number
+                    <input
+                        type="tel"
+                        name="phone"
+                        required
+                        minlength="10"
+                        maxlength="14"
+                        pattern="[\d\s\-\(\)]{10,14}"
+                        title="Please enter a valid 10-digit phone number."
+                        placeholder="516-555-1234"
+                    />
+                </label>
+
+                <label for="website">Current Website (optional)</label>
+                <input
+                    type="text"
+                    id="website"
+                    name="website"
+                    placeholder="example.com or leave blank"
+                />
+
+                <label>
+                    What are you interested in?
+                    <select name="interest" required>
+                        <option value="">Select an option</option>
+                        <option value="mia">Mia Only</option>
+                        <option value="website_mia">Website + Mia</option>
+                        <option value="not_sure">Not Sure Yet</option>
+                    </select>
+                </label>
+
+                <label>
+                    Message
+                    <textarea name="message" rows="5" placeholder="Tell us what you're looking for..."></textarea>
+                </label>
+
+                <p class="form-consent">
+                    By submitting this form, you agree to be contacted by Dos Tiris LLC regarding your request.
+                    Message frequency may vary. Message and data rates may apply. Reply STOP to opt out.
+                    Reply HELP for assistance. Consent is not a condition of purchase.
+                </p>
+
+                <button type="submit" class="btn-primary demo-submit">
+                    Submit Demo Request
+                </button>
+
+            </form>
+
+        </div>
+    </section>
+<script src="js/main.js"></script>
+
+
+</body>
+</html>

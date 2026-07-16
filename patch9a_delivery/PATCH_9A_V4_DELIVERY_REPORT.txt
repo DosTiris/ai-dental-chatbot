@@ -1,0 +1,43 @@
+PATCH 9A v4 — DELIVERY REPORT (2026-07-14)
+STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING (PostgreSQL suite not run;
+no verification claimed). 9B, 9C, Patch 10 not started.
+
+COMPLETE DROP-IN PACKAGE — ALL TEN PROJECT FILES:
+ 1. migrations/006_notification_attempts_up.sql
+ 2. migrations/006_notification_attempts_down.sql
+ 3. app/calendar_models.py
+ 4. app/repositories/notification_attempt_repository.py
+ 5. app/services/notification_service.py
+ 6. calendar_tests/test_notification_idempotency.py
+ 7. calendar_tests/test_notification_policy.py   (approved scope expansion)
+ 8. calendar_tests/test_migration_schema.py
+ 9. docs/INTEGRATION.md
+10. CHANGE_REPORT.md
+Artifacts: PATCH_9A_UNIFIED_DIFF.txt (cumulative vs Patch 8),
+PATCH_9A_V3_SCOPE_EXPANSION_DIFF.txt (v2 -> v3),
+PATCH_9A_CORRECTION_DIFF.txt (v1 -> v2), this report.
+
+V3 CHANGE (test-only): test_notification_policy._send evaluates settings
+first, ends only that test-owned read transaction, then invokes the
+service with precomputed settings — the exact approved shape. Proven: the
+file diff is those four lines only; AST function sets identical; assert
+statements 110 before / 110 after. No production file changed in v3.
+Header cleanup: stale "xact-id entry proof" reference removed from
+test_notification_idempotency.py; no database-classification mechanism
+added.
+
+EXPECTED COLLECTION: 243 (190 baseline + 48 idempotency [44 functions,
+4 parametrized x2] + 5 migration). Unchanged by v3.
+
+STATIC CHECKS (v3): py_compile clean on both touched test files; all v2
+blocker verifications remain as recorded in CHANGE_REPORT.md.
+
+NEXT STEP (on Kevin's go): disposable PostgreSQL 16, then
+  python -m pytest calendar_tests/ -q
+expecting 243 collected / 243 passed / 0 failed / 0 skipped / 0 errors,
+followed by the INTEGRATION.md §9 staging cutover drill (steps 7–9).
+
+V4 CHANGE: NotificationSnapshot.client_id now sourced from the SUPPLIED
+client (client.id), restoring genuine tenant enforcement in the atomic
+claim join; one security test added (mismatched client/appointment
+suppresses all channels, foreign row untouched). v3 artifacts superseded.

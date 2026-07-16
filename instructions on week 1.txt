@@ -1,0 +1,19 @@
+how to run it locally
+pip install fastapi uvicorn openai pydantic
+
+
+set your OpenAI Key
+setx OPENAI_API_KEY "your_key_here"
+
+
+run the server
+uvicorn main:app --reload
+
+then open
+http://127.0.0.1:8000/docs
+
+Test/chat with:
+{
+  "message": "I need a dental appointment",
+  "client_key": "demo_clinic_key"
+}
