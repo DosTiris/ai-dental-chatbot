@@ -728,7 +728,7 @@
     const clientKey = params.get("client_key") || DEFAULT_CLIENT_KEY;
     const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
       ? window.location.origin
-      : "https://ai-dental-chatbot.onrender.com";
+      : "https://ai-dental-chatbot-staging.onrender.com";
 
     let conversationId = localStorage.getItem(`chat_conversation_id_${clientKey}`) || null;
     let miaOpeningMessage = DEFAULT_OPENING_MESSAGE;
