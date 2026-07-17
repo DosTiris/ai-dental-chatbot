@@ -4892,6 +4892,12 @@ EMERGENCY_TRIGGERS = [
     "won t stop bleeding",
     "wont stop bleeding",
     "uncontrolled bleeding",
+    "can t stop bleeding",
+    "cant stop bleeding",
+    "cannot stop bleeding",
+    "bleeding won t stop",
+    "bleeding wont stop",
+    "bleeding will not stop",
     "blood everywhere",
     "bleeding everywhere",
     "bleeding a lot",
@@ -4939,6 +4945,75 @@ def looks_like_emergency(text: str) -> bool:
     if any(p in t for p in breathing_terms):
         return True
 
+    if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
+        p in t for p in ["swallow", "breathe", "breathing"]
+    ):
+        return True
+
+    return False
+
+
+LIFE_THREATENING_TRIGGERS = [
+    # Airway — breathing
+    "can t breathe",
+    "cant breathe",
+    "cannot breathe",
+    "trouble breathing",
+    "difficulty breathing",
+    # Airway — swallowing
+    "can t swallow",
+    "cant swallow",
+    "cannot swallow",
+    "trouble swallowing",
+    "difficulty swallowing",
+    # Uncontrolled bleeding
+    "uncontrolled bleeding",
+    "won t stop bleeding",
+    "wont stop bleeding",
+    "can t stop bleeding",
+    "cant stop bleeding",
+    "cannot stop bleeding",
+    "bleeding won t stop",
+    "bleeding wont stop",
+    "bleeding will not stop",
+    "blood everywhere",
+    "bleeding everywhere",
+    # Rapidly worsening swelling
+    "rapidly worsening swelling",
+    "worsening swelling",
+]
+
+def looks_like_life_threatening_emergency(text: str) -> bool:
+    """
+    Purpose: Decide whether a message describes a LIFE-THREATENING (911-tier)
+             symptom — trouble breathing, trouble swallowing, uncontrolled
+             bleeding, or rapidly worsening swelling — as opposed to a dental
+             emergency the office can handle by phone (severe pain,
+             knocked-out tooth). A True result means the emergency safety
+             instruction must be the ENTIRE reply: no intake or contact
+             question may be appended to the same message.
+             (EMERGENCY INTERRUPTION PATCH — staging regression where the
+             emergency-contact phone question was appended to the 911
+             instruction while normal intake was waiting for a phone number.)
+    Inputs:  the raw patient message text.
+    Returns: True only for the closed LIFE_THREATENING_TRIGGERS list above,
+             or for facial swelling combined with any airway complaint
+             (e.g. "my face is swelling and I'm having trouble breathing").
+    Database effects: none.
+    External effects: none.
+    Possible failures: none — empty or None input returns False.
+    """
+    t = _norm_text(text)
+    if not t:
+        return False
+
+    if any(k in t for k in LIFE_THREATENING_TRIGGERS):
+        return True
+
+    # Facial swelling combined with any airway complaint is treated as
+    # life-threatening even when no exact trigger phrase matched. This is
+    # the same combination rule looks_like_emergency already uses, so the
+    # two classifiers can never disagree on this pattern.
     if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
         p in t for p in ["swallow", "breathe", "breathing"]
     ):
@@ -6739,7 +6814,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "please call 911 or go to the ER now.\n\n"
                 f"Our office number is {office_phone}."
             )
-            next_prompt = _next_emergency_prompt(conversation)
+            # EMERGENCY INTERRUPTION PATCH: same rule as the main
+            # emergency routing block — a life-threatening symptom
+            # suppresses the contact question in this reply.
+            if looks_like_life_threatening_emergency(user_text):
+                next_prompt = None
+            else:
+                next_prompt = _next_emergency_prompt(conversation)
         else:
             next_prompt = None
 
@@ -6798,7 +6879,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             f"Our office number is {office_phone}."
         )
 
-        next_prompt = _next_emergency_prompt(conversation)
+        # EMERGENCY INTERRUPTION PATCH: same rule as the main emergency
+        # routing block — a life-threatening symptom suppresses the contact
+        # question so the safety instruction stands alone in this reply.
+        if looks_like_life_threatening_emergency(user_text):
+            next_prompt = None
+        else:
+            next_prompt = _next_emergency_prompt(conversation)
 
         if next_prompt:
             reply_text = f"{reply_text}\n\n{next_prompt}"
@@ -6960,7 +7047,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if accepts_walkins:
                     reply_text += "\n\nWalk-ins may be available, but please call first so we can direct you."
 
-            reply_text += "\n\n" + _next_emergency_prompt(conversation)
+            # EMERGENCY INTERRUPTION PATCH: a life-threatening symptom
+            # (trouble breathing/swallowing, uncontrolled bleeding, rapidly
+            # worsening swelling) must end the reply at the 911/ER
+            # instruction — no intake or contact question in the same
+            # message. Dental emergencies WITHOUT a life-threatening symptom
+            # (severe pain, knocked-out tooth) keep the existing contact
+            # prompt so the office can still reach the patient quickly.
+            if not looks_like_life_threatening_emergency(user_text):
+                reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()

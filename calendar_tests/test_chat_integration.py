@@ -1206,3 +1206,200 @@ def test_emergency_followup_logs_controlled_fields_only(db, fakes, capsys):
     # The actual lead values never appear in server output:
     assert "Kevin" not in out
     assert "516-555-1234" not in out
+
+
+# ===========================================================================
+# 12. EMERGENCY INTERRUPTION PATCH — life-threatening symptoms end the reply
+#
+# Staging regression: mid-intake (waiting for the phone number), the patient
+# reported facial swelling + trouble breathing. Mia gave the correct 911/ER
+# instruction but appended the emergency-contact phone question to the SAME
+# message. Life-threatening symptoms (trouble breathing/swallowing,
+# uncontrolled bleeding, rapidly worsening swelling) must now interrupt all
+# intake with a standalone safety instruction — no question of any kind in
+# that response. Dental emergencies WITHOUT a life-threatening symptom keep
+# the existing contact prompt (distinct tier preserved).
+# ===========================================================================
+
+LIFE_THREATENING_MESSAGE = "My face is swelling and I'm having trouble breathing."
+
+# Any of these fragments in a life-threatening reply means an intake or
+# contact question leaked into the same message.
+INTAKE_QUESTION_FRAGMENTS = [
+    "first name",
+    "your name",
+    "phone number",
+    "email",
+    "day would work",
+    "day/time works",
+    "morning or afternoon",
+    "new or returning",
+    "what's going on",
+    "what\u2019s going on",
+]
+
+
+def _assert_standalone_emergency_reply(resp):
+    """The 911/ER instruction must be the entire patient-facing reply:
+    no question mark, no intake-field or contact prompt, emergency meta
+    intact. (The default emergency wording contains no '?', so any '?'
+    proves an appended question.)"""
+    assert "call 911" in resp.reply
+    assert "?" not in resp.reply
+    low = resp.reply.lower()
+    for fragment in INTAKE_QUESTION_FRAGMENTS:
+        assert fragment not in low, f"intake question leaked into emergency reply: {fragment!r}"
+    assert resp.meta.get("emergency_mode") is True
+
+
+# One override set per normal-intake stage: each seeds a conversation whose
+# NEXT expected intake answer is that stage's field.
+INTAKE_STAGE_OVERRIDES = {
+    # Waiting for the appointment reason (nothing captured yet).
+    "reason": dict(lead_reason=None, lead_name=None, lead_phone=None,
+                   lead_time_window=None, lead_email_opt_out=False),
+    # Waiting for the patient's name.
+    "name": dict(lead_name=None, lead_phone=None,
+                 lead_time_window=None, lead_email_opt_out=False),
+    # Waiting for the phone number — the observed staging regression stage.
+    "phone": dict(lead_phone=None, lead_time_window=None,
+                  lead_email_opt_out=False),
+    # Waiting for the email (opt-out not yet chosen).
+    "email": dict(lead_time_window=None, lead_email_opt_out=False),
+    # Waiting for the preferred day/time window.
+    "time_window": dict(lead_time_window=None),
+    # Waiting for new-vs-returning (make_conversation default shape).
+    "patient_type": dict(),
+}
+
+
+@pytest.mark.parametrize("stage", sorted(INTAKE_STAGE_OVERRIDES))
+def test_life_threatening_interrupts_every_intake_stage(db, fakes, stage):
+    """At EVERY normal intake stage, a life-threatening message ends the
+    reply at the safety instruction: no question, no appointment."""
+    client = make_client(db, office_hours=OPEN_ALL_WEEK_HOURS)
+    conversation = make_conversation(db, client, **INTAKE_STAGE_OVERRIDES[stage])
+
+    resp = send(db, client, conversation, LIFE_THREATENING_MESSAGE)
+
+    _assert_standalone_emergency_reply(resp)
+    # An emergency turn must never create an appointment.
+    assert (
+            db.query(Appointment)
+            .filter(Appointment.conversation_id == conversation.id)
+            .count()
+            == 0
+        )
+
+
+LIFE_THREATENING_VARIANTS = [
+    "I'm having trouble breathing",
+    "I can't swallow and my mouth hurts",
+    "I have uncontrolled bleeding from my mouth",
+    "I have rapidly worsening swelling in my face",
+    # Correction pass: normalized uncontrolled-bleeding phrasings added to
+    # BOTH trigger lists. Each message below normalizes to contain exactly
+    # one of the six new phrases.
+    "My mouth can't stop bleeding",
+    "I cant stop bleeding from my gums",
+    "I cannot stop bleeding after my extraction",
+    "The bleeding won't stop",
+    "my bleeding wont stop",
+    "The bleeding will not stop",
+]
+
+
+@pytest.mark.parametrize("message", LIFE_THREATENING_VARIANTS)
+def test_life_threatening_variants_get_standalone_reply(db, fakes, message):
+    """Each of the four life-threatening categories (breathing, swallowing,
+    uncontrolled bleeding, rapidly worsening swelling) suppresses the
+    contact question regardless of which emergency guard handles it."""
+    client = make_client(db)
+    conversation = make_conversation(db, client, lead_phone=None,
+                                     lead_time_window=None,
+                                     lead_email_opt_out=False)
+
+    resp = send(db, client, conversation, message)
+
+    _assert_standalone_emergency_reply(resp)
+
+
+def test_observed_phone_stage_regression_fixed(db, fakes):
+    """The exact staging flow: the previous assistant turn was the normal
+    intake phone question; the patient then reported facial swelling +
+    trouble breathing. The reply must be the standalone 911 instruction —
+    previously the emergency-contact phone question was appended."""
+    client = make_client(db)
+    conversation = make_conversation(db, client, lead_phone=None,
+                                     lead_time_window=None,
+                                     lead_email_opt_out=False)
+    db.add(Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content="Thanks \u2014 what\u2019s the best phone number to reach you?",
+    ))
+    db.commit()
+
+    resp = send(db, client, conversation, LIFE_THREATENING_MESSAGE)
+
+    assert resp.meta.get("mode") == "emergency_booking_mode"
+    _assert_standalone_emergency_reply(resp)
+
+
+def test_life_threatening_mid_booking_interrupts_without_question(db, fakes):
+    """Mid-Calendar-dialog: the existing same-request cleanup (hold released,
+    state reset) is preserved AND the reply now carries no question."""
+    client = make_client(db, calendar_enabled=True)
+    conversation = make_conversation(db, client, lead_status="completed")
+    slot = seed_active_confirmation(db, client, conversation)
+
+    resp = send(db, client, conversation, LIFE_THREATENING_MESSAGE)
+
+    _assert_standalone_emergency_reply(resp)
+    assert (conversation.booking_state or "none") == BookingState.NONE
+    assert conversation.booking_selected_slot_id is None
+    slot_row = refreshed_slot(db, slot.id)
+    assert slot_row.status == SlotStatus.AVAILABLE
+    assert slot_row.held_by_conversation_id is None
+    assert (
+            db.query(Appointment)
+            .filter(Appointment.conversation_id == conversation.id)
+            .count()
+            == 0
+        )
+
+
+def test_dental_emergency_without_life_threat_keeps_contact_prompt(db, fakes):
+    """Distinct-tier confirmation: 'severe pain' reaches the emergency
+    routing tier, but with no life-threatening symptom the emergency
+    contact question is still asked (behavior intentionally unchanged)."""
+    client = make_client(db)
+    conversation = make_conversation(db, client, lead_reason=None,
+                                     lead_name=None, lead_phone=None,
+                                     lead_time_window=None,
+                                     lead_email_opt_out=False)
+
+    resp = send(db, client, conversation, "I'm in severe pain, it's a dental emergency")
+
+    assert resp.meta.get("emergency_mode") is True
+    assert "call 911" in resp.reply
+    # Name is missing, so the emergency contact chain asks for it.
+    assert "first name" in resp.reply.lower()
+
+
+def test_affirmative_after_standalone_emergency_still_offers_contact_capture(db, fakes):
+    """Intentionally unchanged: on the NEXT turn, an explicit patient
+    affirmative after the emergency instruction resumes the emergency
+    contact capture. Only same-message resumption was removed."""
+    client = make_client(db)
+    conversation = make_conversation(db, client, lead_phone=None,
+                                     lead_time_window=None,
+                                     lead_email_opt_out=False)
+
+    first = send(db, client, conversation, LIFE_THREATENING_MESSAGE)
+    assert "?" not in first.reply  # standalone instruction, per this patch
+
+    resp = send(db, client, conversation, "ok")
+
+    assert resp.meta.get("mode") == "emergency_intake_continue"
+    assert "phone number" in resp.reply.lower()
