@@ -15,12 +15,36 @@
       --panel-height: min(720px, calc(100vh - 112px));
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; min-height: 100%; background: #eef4f5; font-family: Arial, Helvetica, sans-serif; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background-color: #eef4f5;
+      background-image: url("/demo-sites/iryami-dental/iryami-side-background.png");
+      background-position: center top;
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
     body { overflow-x: hidden; }
-    #website-stage { position: relative; width: 100%; min-height: 100vh; background: #eef4f5; }
+    #website-stage {
+      position: relative;
+      width: 100%;
+      min-height: 100vh;
+      background: transparent;
+    }
     #site-screenshot {
-      display: block; width: 100%; height: auto; min-height: 100vh;
-      object-fit: cover; object-position: top center; background: white;
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: min(900px, 100%);
+      height: auto;
+      min-height: 0;
+      margin: 0 auto;
+      object-fit: contain;
+      object-position: top center;
+      background: white;
     }
     #live-site-fallback { display: none; position: fixed; inset: 0; background: white; z-index: 0; }
     #live-site-fallback iframe { width: 100%; height: 100%; border: 0; }
@@ -78,7 +102,7 @@
 </head>
 <body>
   <main id="website-stage" aria-label="Valley Stream DDS website preview">
-    <img id="site-screenshot" src="/demo-sites/iryami-dental/valley-stream-dds-homepage-full.png"
+    <img id="site-screenshot" src="/demo-sites/iryami-dental/valley-stream-dds-homepage-center.png"
          alt="Full-page preview of the Valley Stream DDS website">
   </main>
 
