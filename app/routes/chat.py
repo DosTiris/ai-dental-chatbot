@@ -4592,6 +4592,12 @@ EMERGENCY_TRIGGERS = [
     "tooth fell out",
     "won t stop bleeding",
     "wont stop bleeding",
+    "can t stop bleeding",
+    "cant stop bleeding",
+    "cannot stop bleeding",
+    "bleeding won t stop",
+    "bleeding wont stop",
+    "bleeding will not stop",
     "uncontrolled bleeding",
     "blood everywhere",
     "bleeding everywhere",
@@ -4638,6 +4644,76 @@ def looks_like_emergency(text: str) -> bool:
         return True
 
     if any(p in t for p in breathing_terms):
+        return True
+
+    if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
+        p in t for p in ["swallow", "breathe", "breathing"]
+    ):
+        return True
+
+    return False
+
+
+def looks_like_life_threatening_emergency(text: str) -> bool:
+    """
+    Narrow 911-tier classifier.
+
+    True only when the CURRENT message indicates trouble breathing,
+    trouble swallowing, uncontrolled bleeding, or rapidly/worsening
+    swelling (including the existing swelling + breathing/swallowing
+    combination heuristic).
+
+    Used ONLY to suppress the same-response emergency intake prompt so
+    the 911/ER safety instruction stands alone. It does not replace
+    looks_like_emergency(), does not change lead flags, and does not
+    affect next-turn emergency continuation.
+    """
+    t = _norm_text(text)
+    if not t:
+        return False
+
+    breathing_terms = [
+        "can t breathe",
+        "cant breathe",
+        "cannot breathe",
+        "trouble breathing",
+        "difficulty breathing",
+    ]
+
+    swallowing_terms = [
+        "can t swallow",
+        "cant swallow",
+        "cannot swallow",
+        "trouble swallowing",
+        "difficulty swallowing",
+    ]
+
+    uncontrolled_bleeding_terms = [
+        "uncontrolled bleeding",
+        "won t stop bleeding",
+        "wont stop bleeding",
+        "can t stop bleeding",
+        "cant stop bleeding",
+        "cannot stop bleeding",
+        "bleeding won t stop",
+        "bleeding wont stop",
+        "bleeding will not stop",
+        "blood everywhere",
+        "bleeding everywhere",
+    ]
+
+    swelling_terms = [
+        "rapidly worsening swelling",
+        "worsening swelling",
+    ]
+
+    if any(p in t for p in breathing_terms):
+        return True
+    if any(p in t for p in swallowing_terms):
+        return True
+    if any(p in t for p in uncontrolled_bleeding_terms):
+        return True
+    if any(p in t for p in swelling_terms):
         return True
 
     if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
@@ -6373,7 +6449,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "please call 911 or go to the ER now.\n\n"
                 f"Our office number is {office_phone}."
             )
-            next_prompt = _next_emergency_prompt(conversation)
+            if looks_like_life_threatening_emergency(user_text):
+                next_prompt = None
+            else:
+                next_prompt = _next_emergency_prompt(conversation)
         else:
             next_prompt = None
 
@@ -6420,7 +6499,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             f"Our office number is {office_phone}."
         )
 
-        next_prompt = _next_emergency_prompt(conversation)
+        if looks_like_life_threatening_emergency(user_text):
+            next_prompt = None
+        else:
+            next_prompt = _next_emergency_prompt(conversation)
 
         if next_prompt:
             reply_text = f"{reply_text}\n\n{next_prompt}"
@@ -6570,7 +6652,8 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if accepts_walkins:
                     reply_text += "\n\nWalk-ins may be available, but please call first so we can direct you."
 
-            reply_text += "\n\n" + _next_emergency_prompt(conversation)
+            if not looks_like_life_threatening_emergency(user_text):
+                reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
