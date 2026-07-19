@@ -4658,15 +4658,28 @@ def looks_like_life_threatening_emergency(text: str) -> bool:
     """
     Narrow 911-tier classifier.
 
-    True only when the CURRENT message indicates trouble breathing,
-    trouble swallowing, uncontrolled bleeding, or rapidly/worsening
-    swelling (including the existing swelling + breathing/swallowing
-    combination heuristic).
+    Distinguishes immediate 911-tier messages from ordinary dental
+    emergencies. True only when the CURRENT message indicates trouble
+    breathing, trouble swallowing, uncontrolled bleeding, or
+    rapidly/worsening swelling (including the existing swelling +
+    breathing/swallowing combination heuristic).
 
-    Used ONLY to suppress the same-response emergency intake prompt so
-    the 911/ER safety instruction stands alone. It does not replace
-    looks_like_emergency(), does not change lead flags, and does not
-    affect next-turn emergency continuation.
+    When True, the three emergency response paths (dangerous dental
+    self-treatment guard, urgent trauma/bleeding safety guard, and
+    emergency_booking_mode):
+      * suppress the same-response emergency intake prompt so the
+        911/ER safety instruction stands alone, and
+      * persistently close the conversation by setting its final_closed
+        flag, so every later turn on that
+        conversation is intercepted by the existing top-level
+        final_closed guard (Start Over is required to begin a new
+        conversation).
+
+    It does not replace the broad looks_like_emergency() classifier,
+    and it does not change normal non-life-threatening emergency
+    intake behavior (severe pain, knocked-out tooth, dental trauma
+    without airway danger or uncontrolled bleeding continue their
+    existing emergency contact flow).
     """
     t = _norm_text(text)
     if not t:
@@ -6459,6 +6472,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         if next_prompt and "?" not in reply_text:
             reply_text = f"{reply_text}\n\n{next_prompt}"
 
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -6473,6 +6496,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now" if is_true_emergency else "Call Office",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 
@@ -6507,6 +6531,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         if next_prompt:
             reply_text = f"{reply_text}\n\n{next_prompt}"
 
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -6521,6 +6555,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 
@@ -6655,6 +6690,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             if not looks_like_life_threatening_emergency(user_text):
                 reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -6669,6 +6714,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 

@@ -282,14 +282,23 @@ def assistant_msg(conversation, content):
     return FakeMessage(conversation_id=conversation.id, role="assistant", content=content)
 
 
-def run_chat(user_text, conversation=None, messages=None, client=None):
+def run_chat(user_text, conversation=None, messages=None, client=None, db=None):
     """Invoke the real chat() endpoint function against the fake session.
 
-    Returns (response, db, notify_spy, lock_spy).
+    Pass db= to reuse one session across turns (multi-turn persistence:
+    message history and conversation state accumulate exactly as they
+    would across real requests hitting the same conversation row).
+
+    Returns (response, db, notify_spy, lock_spy). notify_spy.completed_lead
+    is the spy on notify_office_of_completed_lead.
     """
-    client = client or FakeClient()
-    conversation = conversation if conversation is not None else FakeConversation()
-    db = FakeDB(client, conversation, messages)
+    if db is not None:
+        client = db.client
+        conversation = db.conversation
+    else:
+        client = client or FakeClient()
+        conversation = conversation if conversation is not None else FakeConversation()
+        db = FakeDB(client, conversation, messages)
     req = SimpleNamespace(
         message=user_text,
         client_key="test-key",
@@ -298,9 +307,12 @@ def run_chat(user_text, conversation=None, messages=None, client=None):
     )
     request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
     with mock.patch.object(chat_mod, "mark_completed_and_notify_office") as notify_spy, \
+         mock.patch.object(chat_mod, "notify_office_of_completed_lead") as completed_lead_spy, \
          mock.patch.object(chat_mod, "notify_office_of_lock") as lock_spy:
         notify_spy.return_value = (False, False, None, None)
+        completed_lead_spy.return_value = (False, False, None, None)
         resp = chat_mod.chat(req, request, db)
+    notify_spy.completed_lead = completed_lead_spy
     return resp, db, notify_spy, lock_spy
 
 
@@ -748,9 +760,22 @@ class TestPatchStructuralSupplement(unittest.TestCase):
         with open(chat_mod.__file__, "r", encoding="utf-8", newline="") as f:
             cls.src = f.read()
 
-    def test_exactly_three_gate_references_at_append_sites(self):
-        gates = self.src.count("looks_like_life_threatening_emergency(user_text)")
-        self.assertEqual(gates, 3)
+    def test_gate_and_persistent_stop_reference_counts(self):
+        # 3 same-response prompt gates (patch 1, unchanged)
+        # + 3 persistent-stop computations (persistent-stop correction)
+        refs = self.src.count("looks_like_life_threatening_emergency(user_text)")
+        self.assertEqual(refs, 6)
+
+    def test_exactly_four_final_closed_set_sites(self):
+        # 1 pre-existing post-completion polite close + 3 new life-threatening stops
+        self.assertEqual(self.src.count("conversation.final_closed = True"), 4)
+
+    def test_top_level_final_closed_guard_unchanged(self):
+        self.assertIn('if bool(getattr(conversation, "final_closed", False)):', self.src)
+        self.assertIn(
+            "This conversation has ended. Please tap Start Over to begin a new request.",
+            self.src,
+        )
 
     def test_emergency_booking_mode_append_is_gated(self):
         self.assertIn(
@@ -780,6 +805,199 @@ class TestPatchStructuralSupplement(unittest.TestCase):
         self.assertIn('def _next_emergency_prompt(conversation) -> str:', self.src)
         self.assertIn('return "To help quickly, what\u2019s your first name?"', self.src)
         self.assertIn('return "Thanks \u2014 what\u2019s the best phone number to reach you right now?"', self.src)
+
+
+
+# ===========================================================================
+# PERSISTENT EMERGENCY STOP (correction) — multi-turn regression coverage
+# ===========================================================================
+
+FINAL_CLOSED_REPLY = "This conversation has ended. Please tap Start Over to begin a new request."
+
+
+class TestFullBrowserSequencePersistentStop(unittest.TestCase):
+    """Reproduces the complete observed browser sequence end to end."""
+
+    LT = "My face is swelling and I\u2019m having trouble breathing."
+
+    def _assert_closed_turn(self, resp, notify_spy):
+        self.assertEqual(resp.meta.get("mode"), "final_closed")
+        self.assertEqual(resp.reply, FINAL_CLOSED_REPLY)
+        for frag in INTAKE_FRAGMENTS:
+            self.assertNotIn(frag, resp.reply)
+        notify_spy.assert_not_called()
+        notify_spy.completed_lead.assert_not_called()
+
+    def test_complete_observed_browser_sequence(self):
+        conv = FakeConversation()
+        db = FakeDB(FakeClient(), conv)
+
+        # 1) begin cleaning/checkup intake
+        _, _, n1, _ = run_chat("I'd like to schedule a cleaning", db=db)
+        n1.assert_not_called()
+
+        # 2) capture name Kevin; reach phone stage
+        resp2, _, n2, _ = run_chat("Kevin", db=db)
+        self.assertEqual(conv.lead_name, "Kevin")
+        self.assertIn("best phone number", resp2.reply)
+        n2.assert_not_called()
+
+        # 3) life-threatening message at phone stage
+        resp3, _, n3, _ = run_chat(self.LT, db=db)
+        self.assertEqual(resp3.meta.get("mode"), "emergency_booking_mode")
+        assert_standalone_safety_reply(self, resp3)
+        self.assertTrue(bool(conv.final_closed))
+        self.assertIs(resp3.meta.get("disable_input"), True)
+        self.assertTrue(resp3.meta.get("show_start_over"))
+        self.assertTrue(resp3.meta.get("show_call_button"))
+        n3.assert_not_called()
+        n3.completed_lead.assert_not_called()
+
+        email_opt_out_before = getattr(conv, "lead_email_opt_out", None)
+        priority_before = getattr(conv, "lead_is_priority", None)
+
+        # 4-7) every later turn hits the top-level final_closed guard
+        for later in ["Do you take insurance?", "516-777-7777", "sp", "asap"]:
+            with self.subTest(later=later):
+                resp, _, nspy, _ = run_chat(later, db=db)
+                self._assert_closed_turn(resp, nspy)
+                self.assertEqual(conv.lead_name, "Kevin")
+                self.assertIsNone(conv.lead_phone)
+                self.assertEqual(getattr(conv, "lead_email_opt_out", None), email_opt_out_before)
+                self.assertEqual(getattr(conv, "lead_is_priority", None), priority_before)
+                self.assertNotEqual((conv.lead_status or "").lower(), "completed")
+
+
+class TestPersistentClosureFromEveryStage(unittest.TestCase):
+    LT = "My face is swelling and I\u2019m having trouble breathing."
+
+    def test_every_stage_closes_and_stays_closed(self):
+        for stage, conv, last_q in _stage_fixtures():
+            with self.subTest(stage=stage):
+                db = FakeDB(FakeClient(), conv, [assistant_msg(conv, last_q)])
+                snapshot = {
+                    "lead_name": conv.lead_name,
+                    "lead_phone": conv.lead_phone,
+                    "lead_email": conv.lead_email,
+                    "lead_reason": conv.lead_reason,
+                    "lead_time_window": conv.lead_time_window,
+                }
+
+                resp, _, nspy, _ = run_chat(self.LT, db=db)
+                self.assertTrue(bool(conv.final_closed), f"not closed at stage {stage}")
+                self.assertIs(resp.meta.get("disable_input"), True)
+
+                follow, _, nspy2, _ = run_chat("Do you take insurance?", db=db)
+                self.assertEqual(follow.meta.get("mode"), "final_closed")
+                self.assertEqual(follow.reply, FINAL_CLOSED_REPLY)
+
+                nspy.assert_not_called()
+                nspy.completed_lead.assert_not_called()
+                nspy2.assert_not_called()
+                nspy2.completed_lead.assert_not_called()
+                for field, value in snapshot.items():
+                    self.assertEqual(getattr(conv, field), value,
+                                     f"{field} changed at stage {stage}")
+
+
+class TestPersistentClosurePerCategoryAndVariant(unittest.TestCase):
+    def test_each_life_threatening_category_closes(self):
+        for category, message in TestEachLifeThreateningCategoryInterrupts.CATEGORY_MESSAGES.items():
+            with self.subTest(category=category):
+                conv = FakeConversation()
+                db = FakeDB(FakeClient(), conv)
+                resp, _, nspy, _ = run_chat(message, db=db)
+                self.assertTrue(bool(conv.final_closed))
+                self.assertIs(resp.meta.get("disable_input"), True)
+                self.assertNotIn("?", resp.reply)
+                follow, _, _, _ = run_chat("ok", db=db)
+                self.assertEqual(follow.meta.get("mode"), "final_closed")
+                nspy.assert_not_called()
+
+    def test_each_new_bleeding_variant_closes(self):
+        for phrase in NEW_BLEEDING_VARIANTS:
+            with self.subTest(phrase=phrase):
+                conv = FakeConversation()
+                db = FakeDB(FakeClient(), conv)
+                resp, _, nspy, _ = run_chat(f"my mouth is {phrase}", db=db)
+                self.assertTrue(bool(conv.final_closed))
+                self.assertIs(resp.meta.get("disable_input"), True)
+                follow, _, _, _ = run_chat("Do you take insurance?", db=db)
+                self.assertEqual(follow.meta.get("mode"), "final_closed")
+                nspy.assert_not_called()
+
+
+class TestAffirmativeAfterStopHitsGuard(unittest.TestCase):
+    def test_yes_or_ok_after_stop_does_not_activate_emergency_intake_continue(self):
+        for word in ["yes", "ok"]:
+            with self.subTest(word=word):
+                conv = FakeConversation()
+                conv.is_lead = True
+                conv.lead_reason = "tooth pain"
+                conv.lead_name = "Kevin"
+                db = FakeDB(FakeClient(), conv,
+                            [assistant_msg(conv, "Thanks \u2014 what\u2019s the best phone number to reach you?")])
+                run_chat("My face is swelling and I\u2019m having trouble breathing.", db=db)
+                self.assertTrue(bool(conv.final_closed))
+
+                resp, _, nspy, _ = run_chat(word, db=db)
+                self.assertEqual(resp.meta.get("mode"), "final_closed")
+                self.assertNotEqual(resp.meta.get("mode"), "emergency_intake_continue")
+                self.assertEqual(resp.reply, FINAL_CLOSED_REPLY)
+                self.assertIsNone(conv.lead_phone)
+                nspy.assert_not_called()
+
+
+class TestNonLifeThreateningEmergenciesNotClosed(unittest.TestCase):
+    def test_normal_emergencies_do_not_close_conversation(self):
+        for text in [
+            "I have severe pain in my tooth",
+            "My tooth got knocked out",
+            "I fell and hit my mouth and broke my tooth",
+        ]:
+            with self.subTest(text=text):
+                conv = FakeConversation()
+                db = FakeDB(FakeClient(), conv)
+                resp, _, _, _ = run_chat(text, db=db)
+                self.assertFalse(bool(getattr(conv, "final_closed", False)))
+                self.assertNotIn("disable_input", resp.meta)
+                self.assertIn("To help quickly, what\u2019s your first name?", resp.reply)
+
+    def test_normal_emergency_next_turn_remains_open_and_unchanged(self):
+        # PRE-EXISTING LIVE BEHAVIOR (verified byte-identical against the
+        # original unpatched chat.py): after a knocked-out-tooth emergency
+        # reply, a bare name routes through the intake-mode gate to
+        # service_offer_clarification. Both patches must preserve this
+        # exactly; the key regression assertions are that the conversation
+        # is NOT closed and next-turn interaction still functions.
+        conv = FakeConversation()
+        db = FakeDB(FakeClient(), conv)
+        run_chat("My tooth got knocked out", db=db)
+        self.assertFalse(bool(getattr(conv, "final_closed", False)))
+
+        resp2, _, _, _ = run_chat("Kevin", db=db)
+        self.assertFalse(bool(getattr(conv, "final_closed", False)))
+        self.assertNotEqual(resp2.meta.get("mode"), "final_closed")
+        self.assertEqual(resp2.meta.get("mode"), "service_offer_clarification")
+
+    def test_normal_emergency_affirmative_next_turn_still_continues(self):
+        # The dedicated affirmative-continuation path must stay open and
+        # functional for normal (non-life-threatening) emergencies.
+        conv = FakeConversation()
+        during, _ = chat_mod.get_emergency_defaults()
+        db = FakeDB(FakeClient(), conv, [assistant_msg(conv, during)])
+        resp, _, _, _ = run_chat("yes", db=db)
+        self.assertEqual(resp.meta.get("mode"), "emergency_intake_continue")
+        self.assertFalse(bool(getattr(conv, "final_closed", False)))
+        self.assertEqual(resp.reply, "To help quickly, what\u2019s your first name?")
+
+    def test_urgent_but_not_911_still_not_closed(self):
+        conv = FakeConversation()
+        db = FakeDB(FakeClient(), conv)
+        resp, _, _, _ = run_chat("I need an appointment asap for tooth pain", db=db)
+        self.assertEqual(resp.meta.get("mode"), "urgent_priority_lead")
+        self.assertFalse(bool(getattr(conv, "final_closed", False)))
+        self.assertNotIn("disable_input", resp.meta)
 
 
 if __name__ == "__main__":
