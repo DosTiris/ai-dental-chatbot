@@ -997,6 +997,39 @@
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
+    // Approved hosts for the manually verified "Open in Google Maps" link.
+    // Mirrors the backend get_verified_maps_url() rules exactly: hosts mapped
+    // to true accept any HTTPS path; hosts mapped to "/maps" accept only
+    // paths beginning with /maps. goo.gl is not approved. Defense-in-depth:
+    // the backend only sends validated HTTPS Google Maps links, and the
+    // widget re-checks before rendering. The button reuses the existing
+    // external-link renderer (new tab + rel="noopener noreferrer") and never
+    // redirects automatically.
+    const APPROVED_MAP_HOSTS = {
+      "maps.app.goo.gl": true,
+      "maps.google.com": true,
+      "www.google.com": "/maps",
+      "google.com": "/maps"
+    };
+
+    function renderMapActionButton(action) {
+      if (!action || typeof action.url !== "string" || !action.url) return;
+      let parsed;
+      try {
+        parsed = new URL(action.url);
+      } catch (e) {
+        return;
+      }
+      if (parsed.protocol !== "https:") return;
+      const rule = APPROVED_MAP_HOSTS[(parsed.hostname || "").toLowerCase()];
+      if (rule === undefined) return;
+      if (rule !== true) {
+        const path = (parsed.pathname || "").toLowerCase();
+        if (path !== rule && !path.startsWith(rule + "/")) return;
+      }
+      renderBookingButton(action.url, action.label || "Open in Google Maps");
+    }
+
     function selectQuickReply(text) {
       inputEl.value = text;
       sendMessage();
@@ -1128,6 +1161,10 @@
 
         if (data.meta && data.meta.show_booking_button) {
           renderBookingButton(data.meta.booking_url, data.meta.booking_cta_label);
+        }
+
+        if (data.meta && data.meta.map_action) {
+          renderMapActionButton(data.meta.map_action);
         }
 
         if (data.meta && data.meta.disable_input) {
