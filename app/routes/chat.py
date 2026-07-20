@@ -727,22 +727,17 @@ def should_capture_before_booking_link(
         return True
 
     # hybrid
-    is_urgent = bool(getattr(conversation, "lead_is_priority", False)) or looks_like_urgent_but_not_er(user_text)
-    is_emergency = bool(getattr(conversation, "lead_is_emergency", False)) or looks_like_emergency(user_text)
-    effective_reason = service_reason or getattr(conversation, "lead_reason", None)
+    # Hybrid mode must always capture the patient's name and a valid phone
+    # number before the external booking link is shown, regardless of the
+    # service reason. ("direct" above intentionally skips capture, and
+    # "capture_first" keeps its own behavior.)
+    return True
 
-    is_high_value = is_high_value_service(effective_reason)
-    is_routine = is_routine_service(effective_reason)
-    is_after_hours = bool(getattr(conversation, "lead_is_outside_hours", False)) or is_currently_after_hours_for_client(client)
-
-    return (
-        is_urgent
-        or is_emergency
-        or is_high_value
-        or is_routine
-    )
-
-def next_booking_capture_prompt(conversation: Conversation, service_reason: Optional[str] = None) -> Optional[str]:
+def next_booking_capture_prompt(
+    conversation: Conversation,
+    service_reason: Optional[str] = None,
+    booking_mode: Optional[str] = None,
+) -> Optional[str]:
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
 
@@ -751,9 +746,19 @@ def next_booking_capture_prompt(conversation: Conversation, service_reason: Opti
         "lead_name=", repr(conversation.lead_name),
         "lead_phone=", repr(conversation.lead_phone),
         "service_reason=", repr(service_reason),
+        "booking_mode=", repr(booking_mode),
         "has_name=", has_name,
         "has_phone=", has_phone,
     )
+
+    # 🔥 HYBRID → ALWAYS NAME FIRST, THEN PHONE, ONE QUESTION AT A TIME.
+    # The external booking link may only be shown once both are captured.
+    if booking_mode == "hybrid":
+        if not has_name:
+            return "Before I send you to online booking, what’s your first name?"
+        if not has_phone:
+            return "Before I send you to online booking, what’s the best phone number to reach you?"
+        return None
 
     # 🔥 ROUTINE SERVICES → PHONE ONLY
     if is_routine_service(service_reason):
@@ -778,6 +783,58 @@ def build_booking_handoff_reply(client: Client, conversation: Conversation, serv
     if service_reason in {"extraction/implant", "orthodontics", "crown", "cosmetic/whitening"}:
         return "You can book your consultation online here."
     return "You can book your appointment online here."
+
+
+def conversation_is_hybrid_post_handoff(client: Client, conversation: Conversation) -> bool:
+    """
+    True once a hybrid conversation has finished its booking capture:
+    name + phone stored, office notified, and the external booking link
+    already displayed (booking_link_sent).
+
+    In this state intake is FINISHED. Follow-up messages must be treated as
+    ordinary questions (FAQ / info / ending guards keep working), intake must
+    never resume, the link must never be re-sent, and the conversation must
+    not be auto-closed. Conversations already marked "completed" or
+    final-closed keep their existing dedicated handling.
+    """
+    return (
+        get_booking_mode(client) == "hybrid"
+        and has_external_booking(client)
+        and bool(getattr(conversation, "booking_link_sent", False))
+        and bool((getattr(conversation, "lead_name", None) or "").strip())
+        and bool((getattr(conversation, "lead_phone", None) or "").strip())
+        and (getattr(conversation, "lead_status", "") or "").strip().lower() != "completed"
+        and not bool(getattr(conversation, "final_closed", False))
+    )
+
+
+def build_hybrid_post_handoff_reply(conversation: Conversation, office_phone: str = "") -> str:
+    """
+    Deterministic reply for follow-ups after the hybrid booking handoff
+    (e.g. "I don't see any times", "the link isn't working", "please have
+    the office call me", or a repeated booking request).
+
+    States that the office already has the captured info and can follow up.
+    Never re-asks intake questions, never repeats the booking link, and
+    never triggers a notification.
+    """
+    name = (getattr(conversation, "lead_name", None) or "").strip()
+    name_part = f", {name}" if name else ""
+
+    reply = (
+        f"No problem{name_part} — the office already has your name and phone number, "
+        "and the team can follow up with you directly to help schedule."
+    )
+
+    office_phone = (office_phone or "").strip()
+    if office_phone:
+        reply += f" You can also call the office at {office_phone}."
+
+    reply += (
+        "\n\nIf you have any other questions about hours, location, insurance, "
+        "or services, I’m happy to help."
+    )
+    return reply
 
 
 def build_booking_handoff_meta(client: Client, service_reason: Optional[str]) -> dict:
@@ -4408,6 +4465,49 @@ def last_assistant_asked_for_name(db: Session, conversation_id: uuid.UUID) -> bo
     ]
     return any(p in t for p in name_prompts)
 
+
+def last_assistant_asked_intake_question(db: Session, conversation_id: uuid.UUID) -> bool:
+    """
+    True only when the most recent assistant message asked one of the intake
+    questions (reason, name, phone, email, time window, new/returning, or a
+    pre-booking capture question).
+
+    Standalone FAQ answers must only resume a question that is actually
+    pending — they must never start intake automatically by appending the
+    generic reason-for-visit question.
+    """
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+
+    intake_markers = [
+        "what brings you in",
+        "briefly tell me what you need help with",
+        "your first name",
+        "may i have your name",
+        "what s your name",
+        "phone number to reach you",
+        "what s your phone number",
+        "an email for confirmation",
+        "what s your email",
+        "day time window works best",
+        "what day time works",
+        "which weekday works best",
+        "do you prefer morning or afternoon",
+        "new or returning patient",
+        "before i send you to online booking",
+    ]
+    return any(p in t for p in intake_markers)
+
 def last_assistant_was_emergency_prompt(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
         db.query(Message)
@@ -5724,6 +5824,23 @@ def build_priority_handoff_reply(conversation: Conversation) -> str:
 def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_prefix = f"{name}, " if name else ""
+
+    # Active hybrid pre-booking capture resumes its own name/phone questions
+    # (in that order) instead of the full intake sequence. Hybrid intake is
+    # only name + phone, then the booking link — never email/time/new-patient.
+    if (
+        has_external_booking(client)
+        and get_booking_mode(client) == "hybrid"
+        and not bool(getattr(conversation, "booking_link_sent", False))
+        and bool((getattr(conversation, "lead_reason", "") or "").strip())
+    ):
+        hybrid_prompt = next_booking_capture_prompt(
+            conversation,
+            service_reason=(conversation.lead_reason or "").strip(),
+            booking_mode="hybrid",
+        )
+        return hybrid_prompt or ""
+
     # Match your existing intake field order
 
     if not conversation_has_specific_lead_reason(conversation):
@@ -6003,6 +6120,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         "resume_after_answer=", resume_intake_after_answer,
         "text=", user_text[:80]
     )
+
+    # =========================================================
+    # Hybrid post-handoff state
+    # =========================================================
+    # Once a hybrid conversation has captured name + phone, notified the
+    # office, and displayed the booking link, intake is finished. Treat
+    # follow-ups as ordinary questions so the FAQ, info, and conversation-
+    # ending guards keep working — and so the bypass/intake continuation
+    # logic can never resume asking for email, time window, patient type,
+    # or the service reason.
+    hybrid_post_handoff = conversation_is_hybrid_post_handoff(client, conversation)
+    if hybrid_post_handoff:
+        in_intake_mode = False
+        resume_intake_after_answer = False
+        print("[HYBRID POST-HANDOFF] intake disabled for follow-up handling")
 
     # =========================================================
     # Self-harm / suicide crisis guard
@@ -6378,8 +6510,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = build_office_phone_reply(client, conversation, office_phone)
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if in_intake_mode and not lead_completed:
-            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            in_intake_mode
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                reply_text = f"{reply_text}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
@@ -6400,8 +6539,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = build_insurance_reply(user_text)
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if in_intake_mode and not lead_completed:
-            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            in_intake_mode
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                reply_text = f"{reply_text}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
@@ -6971,8 +7117,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta = {"faq_match": False, "mode": "faq_operational_no_match"}
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if (in_intake_mode or resume_intake_after_answer) and not lead_completed:
-            op_reply = f"{op_reply}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            (in_intake_mode or resume_intake_after_answer)
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                op_reply = f"{op_reply}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=op_reply))
         db.commit()
@@ -7538,6 +7691,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             capture_prompt = next_booking_capture_prompt(
                 conversation,
                 service_reason=active_service_reason,
+                booking_mode=get_booking_mode(client),
             )
 
             print(
@@ -7566,6 +7720,44 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             conversation=conversation,
             service_reason=active_service_reason,
         )
+
+        # Hybrid mode: name + valid phone are now guaranteed captured above.
+        # Notify the office exactly once through the existing notification
+        # helper (it has its own duplicate guards, and this branch can only
+        # run once because booking_link_sent gates re-entry). The lead is NOT
+        # marked "completed" here — doing so made the post-completion guard
+        # close the conversation on the patient's next ordinary message.
+        if (
+            capture_first
+            and get_booking_mode(client) == "hybrid"
+            and (conversation.lead_name or "").strip()
+            and (conversation.lead_phone or "").strip()
+        ):
+            if not bool(getattr(conversation, "is_lead", False)):
+                conversation.is_lead = True
+
+            (
+                hybrid_email_sent,
+                hybrid_sms_sent,
+                hybrid_email_error,
+                hybrid_sms_error,
+            ) = notify_office_of_completed_lead(db, client, conversation)
+
+            print(
+                "[HYBRID BOOKING CAPTURE NOTIFY]",
+                "email_sent=", hybrid_email_sent,
+                "sms_sent=", hybrid_sms_sent,
+                "email_error=", hybrid_email_error,
+                "sms_error=", hybrid_sms_error,
+            )
+
+            # Only claim the info was "sent" if a channel actually succeeded.
+            if hybrid_email_sent or hybrid_sms_sent:
+                hybrid_intro = "Thank you. Your information has been sent to the office."
+            else:
+                hybrid_intro = "Thank you. Your information has been saved for the office."
+
+            handoff_reply = f"{hybrid_intro}\n\n{handoff_reply}"
 
         conversation.booking_link_sent = True
         db.add(conversation)
@@ -7730,6 +7922,31 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             reply=reply_text,
             conversation_id=str(conversation.id),
             meta={"mode": "safety_guard", "faq_match": False, "show_start_over": show_start_over,},
+        )
+
+    # =========================================================
+    # Hybrid post-handoff follow-up guard
+    # =========================================================
+    # Anything reaching this point after the hybrid booking handoff was not
+    # an FAQ / info / safety / ending message (those all returned above).
+    # Typical examples: "I don't see any times", "the link isn't working",
+    # "please have the office call me", or a repeated booking request.
+    # Acknowledge that the office already has the captured info. Never
+    # resume intake, never re-send the booking link, never re-notify, and
+    # never final-close the conversation here.
+    if hybrid_post_handoff:
+        reply_text = build_hybrid_post_handoff_reply(conversation, office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "hybrid_post_handoff_followup",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
         )
 
     # =========================================================
