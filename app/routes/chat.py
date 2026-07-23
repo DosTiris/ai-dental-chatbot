@@ -5124,6 +5124,35 @@ def lead_reason_can_be_replaced(current_reason: Optional[str], new_reason: Optio
 
     return False
 
+
+def source_text_is_generic_appointment_wording(source_text: Optional[str]) -> bool:
+    """
+    True when lead_reason_source_text is blank or merely generic scheduling
+    wording ("I need an appointment", "book a visit") that names no real
+    service — safe to replace with the patient's specific service message.
+    """
+    s = (source_text or "").strip()
+    if not s:
+        return True
+
+    if detect_library_dental_service(s):
+        return False  # already names a real service — never overwrite
+
+    tokens = set(_norm_text(s).split())
+    return bool(
+        tokens
+        & {
+            "appointment",
+            "appointments",
+            "appt",
+            "schedule",
+            "scheduling",
+            "book",
+            "booking",
+            "visit",
+        }
+    )
+
 def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
     """
     Normal appointment leads require:
@@ -8200,6 +8229,44 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         ):
             setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
             updated = True
+
+    elif (
+        matched_library_service is not None
+        and service_reason
+        and service_reason != "other"
+        and (conversation.lead_reason or "").strip() == "appointment request"
+        and service_reason == "appointment request"
+        and getattr(matched_library_service, "category", "") != "admin_other"
+    ):
+        # SERVICE DETAIL ENRICHMENT: "Book Appointment" already stored the
+        # generic "appointment request", and this specific library service
+        # (e.g. Root Canal, Dentures) legacy-maps to the same generic
+        # bucket, so lead_reason_can_be_replaced() is false. The specific
+        # service must still enrich the existing generic reason — otherwise
+        # conversation_has_specific_lead_reason() stays false and Mia loops
+        # on "What brings you in?".
+        service_selected_now = True
+        lead_captured_now = True
+        updated = True
+
+        # Keep lead_reason = "appointment request"; record the specific
+        # service as the detail. Never overwrite an already captured
+        # different specific service detail.
+        if (
+            hasattr(conversation, "lead_reason_detail")
+            and not (getattr(conversation, "lead_reason_detail", "") or "").strip()
+        ):
+            setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
+
+        # Replace the source only when it is blank or merely generic
+        # appointment wording ("I need an appointment").
+        if source_text_is_generic_appointment_wording(
+            getattr(conversation, "lead_reason_source_text", "")
+        ):
+            conversation.lead_reason_source_text = (user_text or "")[:120]
+
+        if should_mark_reason_as_priority_symptom(service_reason, user_text):
+            conversation.lead_is_priority = True
 
     # Once a service is selected, force intake mode to stay active
     if service_selected_now:
