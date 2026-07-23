@@ -843,6 +843,19 @@
         .filter(Boolean);
     }
 
+    function getServiceReplyOptions() {
+      // Full configured service button objects for the quick-reply row.
+      // Keeps the configured label/message pairing so the row behaves the
+      // same as the top Services menu.
+      const buttonsToRender = Array.isArray(serviceButtons) && serviceButtons.length
+        ? serviceButtons
+        : DEFAULT_SERVICE_BUTTONS;
+
+      return buttonsToRender
+        .map(normalizeQuickReplyOption)
+        .filter(Boolean);
+    }
+
     function renderServiceMenuButtons() {
       const serviceMenu = document.getElementById("service-menu");
       if (!serviceMenu) return;
@@ -962,17 +975,40 @@
       document.querySelectorAll(".quick-replies, .booking-link-row").forEach(el => el.remove());
     }
 
+    function normalizeQuickReplyOption(option) {
+      // Accepts either a plain string (legacy quick replies) or a configured
+      // service button object ({ key, label, message }). The patient always
+      // sees the label, while the configured message is what gets submitted.
+      if (typeof option === "string") {
+        const text = option.trim();
+        if (!text) return null;
+        return { label: text, message: text };
+      }
+
+      if (option && typeof option === "object") {
+        const label = String(option.label || "").trim();
+        const message = String(option.message || option.label || "").trim();
+        if (!label || !message) return null;
+        return { label: label, message: message };
+      }
+
+      return null;
+    }
+
     function renderQuickReplies(options) {
       clearActionRows();
       const row = document.createElement("div");
       row.className = "quick-replies";
 
       options.forEach(option => {
+        const normalized = normalizeQuickReplyOption(option);
+        if (!normalized) return;
+
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "quick-reply";
-        btn.textContent = option;
-        btn.addEventListener("click", () => selectQuickReply(option));
+        btn.textContent = normalized.label;
+        btn.addEventListener("click", () => selectQuickReply(normalized.message));
         row.appendChild(btn);
       });
 
@@ -1156,7 +1192,7 @@
         const replyText = String(reply || "").toLowerCase();
 
         if (data.meta && data.meta.show_service_menu) {
-          renderQuickReplies(getServiceReplyLabels());
+          renderQuickReplies(getServiceReplyOptions());
         }
 
         if (data.meta && data.meta.show_booking_button) {
