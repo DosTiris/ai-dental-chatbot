@@ -3882,3 +3882,151 @@ and 389/389 full. S8 (FAQ resume reconciliation) and S9 (hybrid capture /
 post-handoff synchronization, including the deferred receptionist-bypass
 drift) have NOT started. Awaiting explicit approval and scope before any
 S8 work begins.
+
+## PATCH S8 CLOSURE — FAQ Interruption Resume-Once Synchronization
+## (Synchronization program — S8 closure only; Rule 13/18/19)
+
+### Status
+CLOSED. Locally verified and committed by the project owner.
+
+Workspace: backend-calendar-patch9a-staging-prep
+Branch:    staging-patch9a
+Commit:    0d7df43  Synchronize FAQ resume-once behavior (S8)
+Working tree after commit: clean.
+
+### Owner-observed verification (2026-07-24)
+Focused file (calendar_tests/test_faq_resume_once.py):
+  30 collected, 30 passed, 0 failed.
+Preservation suites: 126 passed, 0 failed.
+Full calendar suite: 419 collected, 419 passed, 0 failed.
+
+Final file hashes:
+  app/routes/chat.py
+    38AF08D3A2AEBB6BDE21B4F883DD26C916D556C9AEFAEFF67FBEFCB462D1D973
+  calendar_tests/test_faq_resume_once.py
+    5A94838049FEE55EA40195DDDA2FAECECC3F2746B1619877B77F3FF1EDF86E09
+  calendar_tests/test_chat_integration.py
+    C13EB742AD0951D74FBF25E3E70E9483A69B9A29089B1D79DEAEC4D3B90A0351
+  static/chat.html (UNCHANGED throughout S8)
+    DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+
+### Behavior synchronized
+- FAQ resume-once reconciliation is synchronized.
+  last_assistant_asked_intake_question() was backported byte-identical from
+  production and placed with the other last_assistant_asked_* owners.
+- The office-phone, insurance, and operational-FAQ resume sites now
+  require, before appending a resumed question: active incomplete intake
+  (in_intake_mode — or resume_intake_after_answer at the operational site —
+  with the lead not completed), booking_link_sent false, the latest
+  assistant message actually asked an intake question, and a non-empty
+  next prompt from _next_intake_prompt.
+- FAQs answer first. Only the correct current intake question is resumed,
+  and the question appears exactly once (answer, blank line, question —
+  proven by exact reply equality in the focused tests).
+- Intake does not auto-start merely because lead data exists: with no
+  pending question in the latest assistant message, the FAQ answer stands
+  alone.
+- An older historical intake question does not cause resumption when the
+  most recent assistant message is not an intake question; the backported
+  helper evaluates only the latest assistant message (proven directly and
+  through the real chat() flow).
+- No intake question resumes after a booking link has already been sent,
+  at any of the three changed sites.
+- Captured lead fields remain unchanged during FAQ interruption
+  (before/after snapshot equality).
+- FAQ interruption does not begin native booking prematurely
+  (booking_state remains NONE, including with calendar booking enabled).
+- Standard intake stages covered, each resuming its exact
+  _next_intake_prompt question once: service/reason, first name, phone,
+  email or skip, time window, new/returning.
+- Priority/ASAP stages (first name, phone, email or skip, time window,
+  new/returning) preserve S3 completeness: priority_intake_is_complete()
+  remains False across the FAQ interruption at every stage, no completion,
+  office handoff, or booking begins, and an answered phone continues to
+  the email question in the full S3 capture-first order.
+- Two consecutive FAQs do not stack or duplicate questions; each reply
+  carries the pending question exactly once and state is unchanged.
+- A valid patient reply after FAQ resumption continues through the
+  existing intake owner: a name is captured and the continuation owner
+  (receptionist_bypass_reply) asks for the phone; a valid Other detail is
+  captured (other_reason_detail_captured) and advances to first name; a
+  recognized service (Cleaning) routes on its existing path.
+- A safe irrelevant reply after FAQ resumption ("my neighbor has a
+  friendly dog") does not populate the pending field and
+  does not advance intake; the existing continuation owner
+  (receptionist_bypass_reply, mode bypass) re-asks the pending question
+  exactly once.
+- S7 Other-reason pending behavior remains production-consistent:
+  FAQ-like text while Other is pending remains owned by the earlier Other
+  validation block — which precedes every FAQ guard in both production and
+  the calendar branch — rather than escaping into the later FAQ path.
+  Rejections keep the Other step pending, including after S7 non-dental
+  and unclear rejections, and a valid retry is captured normally.
+- S4 final_closed conversations remain closed: the FAQ receives the
+  final-closed reply (mode final_closed) and the conversation is not
+  reopened or resumed.
+- Completed conversations are not reopened: the FAQ answers alone even
+  when a stale historical intake question is present in the transcript.
+- The post-booking-link integration expectation
+  (test_post_link_unrelated_message_not_hijacked) was updated because S8
+  deliberately suppresses intake resumption after booking_link_sent=True;
+  the corrected test asserts the operational answer alone with exact reply
+  equality, the retained mode/metadata contract, preserved post-link
+  state, snapshot-equal lead fields, and zero lead or booking
+  notification sends.
+
+### Scope discipline confirmed
+- The application change set is exactly one backported helper plus the
+  three gated resume conditions in app/routes/chat.py; no second FAQ
+  detector, resume state field, parser, or competing intake router was
+  added; chat() was not replaced wholesale; CRLF was preserved.
+- Production drift belonging to S9 (the hybrid capture branches of
+  _next_intake_prompt and next_booking_capture_prompt, the hybrid
+  post-handoff owners, and the deferred receptionist-bypass drift) was
+  identified in the owner inventory and deliberately left untouched.
+- No widget, model, migration, Supabase, Patch 9A, Patch 9B, or S9 work
+  occurred; static/chat.html is unchanged (hash above);
+  calendar_tests/test_booking_db.py was untouched.
+- CHANGE_REPORT.md was not modified during S8 implementation or
+  verification; this closure is being appended separately after the S8
+  code commit.
+- No push and no deployment occurred. S9 has not started.
+
+### Revision history (honest record)
+- Revision 1 implemented the four bounded application changes and
+  introduced the initial 20 focused real chat() flow tests, together with
+  the production-versus-calendar owner inventory and the before/after
+  behavior matrix; all results were packaged NOT RUN pending owner-side
+  verification.
+- Revision 2 corrected one focused-test expectation that had attributed
+  the post-name continuation wording to the wrong owner (the continuation
+  is owned by receptionist_bypass_reply, not _next_intake_prompt); the
+  application patch was unchanged.
+- Revision 3 (owner-requested) strengthened the focused tests for:
+  booking-link suppression at all three changed call sites,
+  latest-assistant-message semantics, FAQ followed by safe irrelevant
+  text, and the priority/ASAP pending stages; the focused file grew to 30
+  expected tests.
+- Owner-side focused tests then passed 30/30, with preservation suites at
+  126 passed.
+- The first full-suite run produced 419 collected / 418 passed / 1
+  failed: test_post_link_unrelated_message_not_hijacked encoded the stale
+  pre-S8 expectation (the hours answer with the new/returning question
+  appended for a conversation with booking_link_sent=True).
+- Revision 4 changed only test_post_link_unrelated_message_not_hijacked
+  to assert the correct booking-link suppression contract.
+- The final full suite passed 419/419 and S8 was committed as 0d7df43.
+
+### Rollback point
+Commit 0d7df43 is the S8 checkpoint. Prior checkpoint: b4dc355 (S7
+documentation closure; code checkpoint 9e1b720), chat.py
+5943442E947A797D80B3AF6CEF4854BAEE200BAD43FD584C54DED63690E4CCA5; the S8
+review package additionally contains the timestamped b4dc355-baseline
+file backup (chat.py.backup_20260724_151148).
+
+### CHECKPOINT (Rule 18)
+S8 CLOSED 2026-07-24 at commit 0d7df43 with owner-observed 30/30 focused,
+126/126 preservation, and 419/419 full. S9 (hybrid capture / post-handoff
+synchronization, including the deferred receptionist-bypass drift) has
+NOT started. Awaiting explicit approval and scope before any S9 work
+begins.
