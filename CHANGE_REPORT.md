@@ -3521,3 +3521,123 @@ S1 closed 2026-07-24 with owner-observed local verification (263/263 Python,
 static/chat.html (hash above). Not deployed, not committed, not pushed at the
 time of this record. Synchronization Patch S2 (Google Maps action backport):
 NOT started — awaiting explicit approval and scope.
+
+## S2 CLOSURE — Google Maps Action Backport (Synchronization Patch S2)
+
+### Scope and committed files
+Backport of the verified production Google Maps action into the calendar
+branch. Exactly four files committed at checkpoint 7255994
+("Backport verified Google Maps action to calendar (S2)"),
+branch staging-patch9a, working tree clean after commit:
+1. app/routes/chat.py            (modified — purely additive, +81/-0, CRLF preserved)
+2. static/chat.html              (modified — purely additive, +37/-0, LF preserved)
+3. calendar_tests/test_maps_action.py  (new — focused Maps regression tests)
+4. tests/test_map_action.js            (new — focused Maps widget tests)
+No migration, no Supabase change, no other file touched.
+
+### Verified hashes
+app/routes/chat.py
+- BEFORE: 201B79815CCCC33F4C88CAE7794A99DA974C66690569DAE6C6B315C6646578C9
+  (byte-identical to the S1 checkpoint 95012a1 file)
+- AFTER:  858BCB216B123F09B3778867D2B29083A3706454F7EB06352E3E45B7E3D95AF5
+static/chat.html
+- BEFORE: 618DEDEB7B25B1B728CA5A5AEE378D707CDD46F12329DBE538D4F48026B2B5AF
+  (the S1-verified widget)
+- AFTER:  DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+
+### Exact functions and call sites changed
+app/routes/chat.py — three anchored, single-match, additive edits:
+1. Import block: ADDED `from urllib.parse import urlparse` (used only by
+   the Maps validator).
+2. Between get_booking_button_label() and get_client_timezone_name():
+   ADDED APPROVED_MAPS_HOSTS, MAPS_BUTTON_LABEL,
+   get_verified_maps_url(client), and build_map_action(client) —
+   verbatim from verified production.
+3. Inside the existing operational-FAQ location-intent branch (the single
+   location-answer owner): when the FAQ address answer is non-empty,
+   ATTACH meta["map_action"] = build_map_action(client) when a verified
+   URL exists. This is the only backend call site. Because the Calendar
+   booking dialog already yields to location questions
+   (is_information_interruption) and intake resume already appends the
+   pending question in this block, the one owner serves standalone,
+   mid-intake, and mid-booking flows (Rule 3); no interruption, resume,
+   booking, tenant-isolation, ledger, or emergency line was modified.
+static/chat.html — two anchored, single-match, additive edits:
+4. ADDED APPROVED_MAP_HOSTS + renderMapActionButton(action) after
+   renderBookingButton() — widget-side re-validation rendering through the
+   existing safe external-link renderer.
+5. ADDED the sendMessage `data.meta.map_action` call site after the
+   show_booking_button block.
+
+### Maps security rules (enforced backend AND widget, defense-in-depth)
+- The URL comes only from trusted client configuration (settings.maps_url);
+  it is never generated, guessed, or derived from the office's written
+  address, and no user-supplied URL is ever trusted or echoed.
+- HTTPS only: http, javascript, data, ftp, blank/malformed schemes rejected.
+- Exact-host allowlist: maps.app.goo.gl, maps.google.com (any HTTPS path);
+  www.google.com and google.com only for "/maps" or "/maps/..." paths
+  (bare homepage, /search, /mapsearch lookalike segments rejected).
+  Legacy goo.gl intentionally not approved. Lookalike hosts
+  (e.g. maps.google.com.evil.example) and userinfo deception
+  (maps.google.com@evil.example) rejected.
+- Absent/blank/malformed/unapproved config fails safely: address-only
+  answer, no action, no exception.
+- The widget re-validates independently and opens the link via the existing
+  renderer (new tab, rel="noopener noreferrer"); it never redirects.
+
+### Verification (honest, per Rule 19 — owner-observed local results)
+- Focused Maps Python tests: 10 passed (7 no-DB validation, 3 requires_db
+  flow tests: map_action in meta, standalone location does not start
+  intake, mid-booking interruption preserves booking_state).
+- Maps Node widget tests: 18 passed, 0 failed.
+- S1 quick-reply Node tests: 7 passed, 0 failed (S1 behavior re-proven).
+- JavaScript syntax validation: passed. Python compilation: passed.
+- FULL calendar suite (273 collected): 272 passed, 1 FAILED.
+  The single failure was the KNOWN date-sensitive test
+  calendar_tests/test_booking_db.py::test_slot_taken_between_display_and_selection,
+  which ran during the midnight/date-boundary window. A focused rerun of
+  that same test during the same window also failed. The suite excluding
+  only that test produced: 272 passed, 1 deselected, 0 failed.
+  Per the standing Phase 1 instruction the test was NOT modified; its
+  hardening remains a separate, already-designated test-only cleanup task.
+  The failure predates S2 in character (time-dependent), involves no Maps
+  code, and no S2 file is imported by it.
+- Authoring-environment results (recorded in the S2 package): 18/18
+  extracted-function validation harness, 18/18 Maps Node, 7/7 S1 Node,
+  node --check pass, py_compile pass.
+
+### Preserved behavior (confirmed)
+- S1 quick-reply object support: functions present and 7/7 tests passing.
+- Staging Render URL (line 731,
+  https://ai-dental-chatbot-staging.onrender.com): byte-identical; the
+  production Render URL string is proven absent by test.
+- Native calendar booking, external booking handoff, interruption/resume,
+  tenant isolation, appointment holds/cleanup, Patch 9A notification
+  ledger, emergency behavior, persistent-state behavior, lead
+  notifications: untouched (additive-only diffs, zero removed lines).
+- Practice-address wording unchanged. Patch 9B remains deferred/not started.
+
+### Rollback method
+Revert commit 7255994 (or restore the two timestamped backups from the S2
+package — chat.py.backup_20260724_023702, chat.html.backup_20260724_023702,
+hashes above — and delete calendar_tests/test_maps_action.py and
+tests/test_map_action.js). No migration, data, or configuration rollback.
+
+### Recommended documentation commit message
+    Record S2 closure in CHANGE_REPORT (Maps action backport)
+
+    Documents the S2 verification: 10 focused Maps Python tests, 18 Maps
+    Node tests, 7 S1 Node tests, syntax/compile checks, and the full-suite
+    result of 272 passed with the single known date-sensitive
+    test_slot_taken_between_display_and_selection failure during the
+    midnight window (272 passed, 1 deselected, 0 failed with it excluded;
+    test intentionally unmodified pending its designated test-only
+    hardening). Code checkpoint: 7255994.
+
+### CHECKPOINT (Rule 18)
+S2 closed 2026-07-24 at commit 7255994 with owner-observed verification as
+recorded above, including the honest full-suite result (272/273 passed; the
+one failure is the pre-existing, out-of-scope date-sensitive test). Rollback
+point: 95012a1 file states (hashes above). Not deployed, not pushed,
+Supabase untouched. Synchronization Patch S3 (ASAP capture-first wording):
+NOT started — awaiting explicit approval and scope.
