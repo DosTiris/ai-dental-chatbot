@@ -5553,6 +5553,49 @@ def last_assistant_asked_for_name(db: Session, conversation_id: uuid.UUID) -> bo
     ]
     return any(p in t for p in name_prompts)
 
+
+def last_assistant_asked_intake_question(db: Session, conversation_id: uuid.UUID) -> bool:
+    """
+    True only when the most recent assistant message asked one of the intake
+    questions (reason, name, phone, email, time window, new/returning, or a
+    pre-booking capture question).
+
+    Standalone FAQ answers must only resume a question that is actually
+    pending — they must never start intake automatically by appending the
+    generic reason-for-visit question.
+    """
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+
+    intake_markers = [
+        "what brings you in",
+        "briefly tell me what you need help with",
+        "your first name",
+        "may i have your name",
+        "what s your name",
+        "phone number to reach you",
+        "what s your phone number",
+        "an email for confirmation",
+        "what s your email",
+        "day time window works best",
+        "what day time works",
+        "which weekday works best",
+        "do you prefer morning or afternoon",
+        "new or returning patient",
+        "before i send you to online booking",
+    ]
+    return any(p in t for p in intake_markers)
+
 def last_assistant_was_emergency_prompt(db: Session, conversation_id: uuid.UUID) -> bool:
     last_msg = (
         db.query(Message)
@@ -7626,8 +7669,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = build_office_phone_reply(client, conversation, office_phone)
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if in_intake_mode and not lead_completed:
-            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            in_intake_mode
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                reply_text = f"{reply_text}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
@@ -7648,8 +7698,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         reply_text = build_insurance_reply(user_text)
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if in_intake_mode and not lead_completed:
-            reply_text = f"{reply_text}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            in_intake_mode
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                reply_text = f"{reply_text}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
@@ -8418,8 +8475,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             meta = {"faq_match": False, "mode": "faq_operational_no_match"}
 
         lead_completed = (conversation.lead_status or "").strip().lower() == "completed"
-        if (in_intake_mode or resume_intake_after_answer) and not lead_completed:
-            op_reply = f"{op_reply}\n\n{_next_intake_prompt(client, conversation)}"
+        if (
+            (in_intake_mode or resume_intake_after_answer)
+            and not lead_completed
+            and not bool(getattr(conversation, "booking_link_sent", False))
+            and last_assistant_asked_intake_question(db, conversation.id)
+        ):
+            resumed_prompt = _next_intake_prompt(client, conversation)
+            if resumed_prompt:
+                op_reply = f"{op_reply}\n\n{resumed_prompt}"
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=op_reply))
         db.commit()

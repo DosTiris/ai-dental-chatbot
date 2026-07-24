@@ -851,26 +851,54 @@ def test_post_link_unrelated_message_not_hijacked(db, fakes):
     client = make_client(db, booking_url="https://book.example.com")
     # lead_reason is set (factory default) — exactly the stored value that
     # used to make the trigger fire for every message after the link.
-    # Intake is deliberately UNFINISHED (lead_is_new_patient=None), so the
-    # pre-Patch-3 operational behavior appends the next intake prompt to
-    # the hours answer — the combined reply below is the exact existing
-    # Patch 2D wording, preserved on purpose.
+    # Intake is deliberately UNFINISHED (lead_is_new_patient=None). Under
+    # the S8 booking_link_sent gate, a post-link FAQ answer is NOT followed
+    # by intake resumption: the resume sites additionally require
+    # last_assistant_asked_intake_question() and
+    # not booking_link_sent, so the operational answer stands alone and the
+    # post-link state is preserved.
     conversation = make_conversation(db, client, booking_link_sent=True)
+    lead_before = dict(
+        reason=conversation.lead_reason,
+        name=conversation.lead_name,
+        phone=conversation.lead_phone,
+        email=conversation.lead_email,
+        email_opt_out=bool(getattr(conversation, "lead_email_opt_out", False)),
+        time_window=getattr(conversation, "lead_time_window", None),
+        new_patient=getattr(conversation, "lead_is_new_patient", None),
+        status=conversation.lead_status,
+    )
 
     resp = send(db, client, conversation, "what are your hours?")
 
     assert resp.meta.get("mode") != "external_booking_link_reminder"
     assert resp.meta.get("mode") == "faq_operational_no_match"
+    assert resp.meta.get("faq_match") is False
+    # S8 contract: the operational answer is the ENTIRE reply — no
+    # new/returning question, no intake question of any kind.
     assert resp.reply == (
         "Please call the office and our team can confirm our office hours."
-        "\n\n"
-        "One quick question — Kevin Alvarado, are you a new or returning patient?"
     )
+    assert "new or returning" not in resp.reply.lower()
+    assert "?" not in resp.reply
     assert conversation.booking_link_sent is True
     assert (conversation.booking_state or "none") == BookingState.NONE
+    # No captured lead field changed on the FAQ turn.
+    lead_after = dict(
+        reason=conversation.lead_reason,
+        name=conversation.lead_name,
+        phone=conversation.lead_phone,
+        email=conversation.lead_email,
+        email_opt_out=bool(getattr(conversation, "lead_email_opt_out", False)),
+        time_window=getattr(conversation, "lead_time_window", None),
+        new_patient=getattr(conversation, "lead_is_new_patient", None),
+        status=conversation.lead_status,
+    )
+    assert lead_after == lead_before
     # No internal Calendar owner started and no completed-lead notification
     # was sent for this message.
     assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert len(fakes.booking_sms) == 0 and len(fakes.booking_email) == 0
 
 
 def test_location_interruption_pauses_and_resumes(db, fakes):
