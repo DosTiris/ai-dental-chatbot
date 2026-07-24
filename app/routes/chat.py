@@ -4735,6 +4735,14 @@ def get_other_reason_detail(conversation: Conversation) -> str:
     if source_norm in generic_sources:
         return ""
 
+    # S6 rev6: the SINGLE narrow generic-wording owner. Scheduling-only
+    # phrases ("appointment please", "book a visit") are no detail at all;
+    # meaningful Other detail that merely contains a scheduling token
+    # ("sore spot since my last visit") has non-vocabulary tokens, is not
+    # generic, and is preserved.
+    if source_text_is_generic_appointment_wording(source):
+        return ""
+
     if looks_like_scheduling_intent(source) and not detect_appointment_reason(source):
         return ""
 
@@ -4775,6 +4783,69 @@ def lead_reason_can_be_replaced(current_reason: Optional[str], new_reason: Optio
         return True
 
     return False
+
+# Core scheduling words plus the filler vocabulary of short "just book me"
+# phrasings. Used ONLY by source_text_is_generic_appointment_wording().
+SCHEDULING_CORE_TOKENS = {
+    "appointment",
+    "appointments",
+    "appt",
+    "schedule",
+    "scheduling",
+    "scheduled",
+    "book",
+    "booking",
+    "visit",
+}
+
+SCHEDULING_FILLER_TOKENS = {
+    "i", "a", "an", "the", "to", "for", "my", "me", "us", "in", "up",
+    "need", "needs", "want", "wants", "would", "like", "please",
+    "can", "could", "get", "make", "set", "come", "really", "just",
+}
+
+
+def source_text_is_generic_appointment_wording(source_text: Optional[str]) -> bool:
+    """
+    The SINGLE generic-wording owner (S6 revision 6). True ONLY for blank
+    text or short scheduling-only phrases — "I need an appointment",
+    "appointment please", "book a visit", "please schedule an appointment"
+    — where every token is scheduling or filler vocabulary and at least
+    one core scheduling token is present.
+
+    False the moment the text names a real library service (Root Canal,
+    Dentures) OR carries any meaningful non-vocabulary token ("sore spot
+    since my last visit" keeps "sore", "spot", "since", "last").
+
+    Both consumers rely on the same contract:
+    - the S6 service-detail enrichment gate: a stored source may be
+      REPLACED by the patient's specific service message only when it is
+      generic by this definition, so meaningful Other detail is never
+      silently overwritten;
+    - get_other_reason_detail(): a source that is generic by this
+      definition is no detail at all and is filtered to "".
+
+    NOTE: deliberately NARROWER than the production helper of the same
+    name (production classifies any scheduling-token text as generic).
+    The calendar branch tightened it after the broad rule was shown to
+    erase meaningful Other detail; recorded as a documented divergence.
+    """
+    s = (source_text or "").strip()
+    if not s:
+        return True
+
+    if detect_library_dental_service(s):
+        return False  # names a real service — never generic
+
+    tokens = set(_norm_text(s).split())
+    if not tokens:
+        return True
+
+    if not (tokens & SCHEDULING_CORE_TOKENS):
+        return False
+
+    return tokens <= (SCHEDULING_CORE_TOKENS | SCHEDULING_FILLER_TOKENS)
+
 
 def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
     """
@@ -7962,6 +8033,41 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         ):
             setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
             updated = True
+
+    elif (
+        matched_library_service is not None
+        and service_reason
+        and service_reason != "other"
+        and (conversation.lead_reason or "").strip() == "appointment request"
+        and service_reason == "appointment request"
+        and getattr(matched_library_service, "category", "") != "admin_other"
+    ):
+        # SERVICE DETAIL ENRICHMENT: "Book Appointment" already stored the
+        # generic "appointment request", and this specific library service
+        # (e.g. Root Canal, Dentures) legacy-maps to the same generic
+        # bucket, so lead_reason_can_be_replaced() is false. The specific
+        # service must still enrich the existing generic reason — otherwise
+        # conversation_has_specific_lead_reason() stays false and Mia loops
+        # on "What brings you in?".
+        service_selected_now = True
+        lead_captured_now = True
+        updated = True
+
+        # Keep lead_reason = "appointment request". In the calendar branch the
+        # detail is DERIVED, not stored: replacing the generic source text
+        # below is the persistence, and get_other_reason_detail() (the single
+        # existing detail owner) turns that source into the clean display
+        # label ("Root Canal", "Dentures"). The single narrow owner below is
+        # False for any source naming a real service OR carrying meaningful
+        # non-vocabulary tokens, so neither an existing specific service nor
+        # meaningful Other free-text detail is ever overwritten.
+        if source_text_is_generic_appointment_wording(
+            getattr(conversation, "lead_reason_source_text", "")
+        ):
+            conversation.lead_reason_source_text = (user_text or "")[:120]
+
+        if should_mark_reason_as_priority_symptom(service_reason, user_text):
+            conversation.lead_is_priority = True
 
     # Once a service is selected, force intake mode to stay active
     if service_selected_now:
