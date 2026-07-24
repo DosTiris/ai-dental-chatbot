@@ -3429,3 +3429,95 @@ NEXT-PHASE STATUS:
 - Patch 9B has not started.
 - Patch 9C has not started.
 - Patch 10 has not started.
+
+## S1 CLOSURE — Calendar Widget Quick-Reply Object Support (Synchronization Patch S1)
+
+### Scope
+Backport of the verified production quick-reply object behavior into the
+calendar branch widget. One file changed: static/chat.html. No Python file,
+service, route, test, migration, Supabase object, or configuration changed.
+
+### Verified hashes
+- BEFORE: static/chat.html SHA-256
+  9237F06408F50D772461FF1504DFEA7AA3D54C1BF4D5D874F1EC2F31F81F95F2
+  (byte-identical to the verified staging-patch9a checkpoint at commit 84f36c9)
+- AFTER:  static/chat.html SHA-256
+  618DEDEB7B25B1B728CA5A5AEE378D707CDD46F12329DBE538D4F48026B2B5AF
+  (1,171 -> 1,207 lines, +36; LF line endings preserved; exactly 3 diff hunks)
+
+### Exact functions and call site changed
+1. ADDED getServiceReplyOptions() — inserted directly after the retained,
+   byte-unchanged getServiceReplyLabels(); returns the full configured
+   {key, label, message} service button objects (serviceButtons or
+   DEFAULT_SERVICE_BUTTONS), normalized and filtered.
+2. ADDED normalizeQuickReplyOption(option) — accepts a legacy plain string or
+   a configured object; returns {label, message} with
+   message = option.message || option.label; returns null for blank/invalid
+   entries so they are skipped.
+3. MODIFIED renderQuickReplies(options) — normalizes each option; the button
+   displays normalized.label and submits normalized.message through the
+   existing selectQuickReply() path. Button element type, the "quick-reply"
+   CSS class, the "quick-replies" row markup, clearActionRows(), append and
+   scroll behavior are unchanged.
+4. MODIFIED one call site — the sendMessage meta.show_service_menu handler now
+   calls renderQuickReplies(getServiceReplyOptions()) instead of
+   renderQuickReplies(getServiceReplyLabels()). getServiceReplyLabels()
+   itself is retained unchanged for compatibility.
+   renderServiceMenuButtons() (top Services menu) was not touched.
+
+### Verification (honest, per Rule 19)
+- Node widget regression tests: executed in the patch-authoring environment
+  (node v22.22.2) against the delivered patched file — the byte-identical
+  artifact installed in the workspace, confirmed by the AFTER hash above:
+  7 passed, 0 failed. Coverage: Root Canal displays "Root Canal" but submits
+  the configured message; Dentures likewise; all configured buttons preserve
+  label/message separation; legacy string quick replies still work; the
+  unchanged Services-menu path still submits configured messages; buttons
+  missing a label are skipped without breaking the row; quick replies
+  rendered by the real sendMessage meta.show_service_menu path submit the
+  configured message.
+- JavaScript syntax validation: the single inline <script> block
+  (lines 722–1205, containing all edited code) extracted and passed
+  node --check in the authoring environment.
+- Full calendar Python suite: VERIFIED LOCALLY by the project owner on
+  2026-07-24 in the authoritative workspace
+  (backend-calendar-patch9a-staging-prep, branch staging-patch9a) against the
+  safeguarded local disposable PostgreSQL 16 database:
+  263 collected; 263 passed; 0 failed; 0 skipped; 0 errors; 12.35 s.
+  Expected count was unchanged (263) because no Python code changed; the
+  reported figure is the real observed result, not an assumption.
+- Post-run Git status observed by the owner: "M static/chat.html" only —
+  confirming no other file was modified.
+
+### Preserved behavior (confirmed)
+- Staging Render URL (line 731, https://ai-dental-chatbot-staging.onrender.com)
+  is byte-for-byte unchanged — verified by hashing the line before and after.
+- Top Services menu behavior, all CSS classes, styling, spacing, scrolling,
+  and mobile behavior unchanged.
+- Calendar booking, slot, tenant-isolation, notification, emergency, Patch 9A
+  behavior, and the deferred Patch 9B architecture untouched (no backend file
+  changed). Production Maps widget code was intentionally NOT backported —
+  that is Synchronization Patch S2, not started.
+
+### Rollback method
+Replace static/chat.html with the timestamped backup
+chat.html.backup_20260724_011514
+(SHA-256 9237F064...646578C9, identical to the 84f36c9 checkpoint file).
+Single-file restore; no migration, no data, no configuration involved.
+
+### Recommended Git commit message
+    Backport quick-reply object support to calendar widget (S1)
+
+    Service quick-reply buttons now display the configured label but submit
+    the configured message, matching the verified production widget fix.
+    Adds normalizeQuickReplyOption() and getServiceReplyOptions(), updates
+    renderQuickReplies() and the meta.show_service_menu call site. Legacy
+    string quick replies, the top Services menu, styling, and the staging
+    Render URL are unchanged. static/chat.html only; Python suite 263/263.
+
+### CHECKPOINT (Rule 18)
+S1 closed 2026-07-24 with owner-observed local verification (263/263 Python,
+7/7 Node, syntax pass). Rollback point: the 84f36c9 checkpoint copy of
+static/chat.html (hash above). Not deployed, not committed, not pushed at the
+time of this record. Synchronization Patch S2 (Google Maps action backport):
+NOT started — awaiting explicit approval and scope.
