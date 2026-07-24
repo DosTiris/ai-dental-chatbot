@@ -30,6 +30,10 @@ import unicodedata
 import random
 import os
 
+# urlparse is used only by get_verified_maps_url() below to validate the
+# manually configured Google Maps share link (S2 Maps backport).
+from urllib.parse import urlparse
+
 from app.config import OPENAI_API_KEY
 from app.database import SessionLocal
 from app.models import Client, Conversation, Message, ClientFAQ, FAQEvent
@@ -683,6 +687,75 @@ def get_booking_mode(client) -> str:
 
 def get_booking_button_label(client) -> str:
     return (get_client_setting(client, "booking_button_label", "") or "").strip() or "Book Online"
+
+
+# Approved hosts for the manually verified "Open in Google Maps" link.
+# Hosts mapped to True accept any HTTPS path; hosts mapped to "/maps"
+# accept only paths beginning with /maps.
+# goo.gl is intentionally NOT approved (no legacy links in use;
+# Timeless Smiles uses a current maps.app.goo.gl share link).
+APPROVED_MAPS_HOSTS = {
+    "maps.app.goo.gl": True,
+    "maps.google.com": True,
+    "www.google.com": "/maps",
+    "google.com": "/maps",
+}
+
+MAPS_BUTTON_LABEL = "Open in Google Maps"
+
+
+def get_verified_maps_url(client) -> str:
+    """Return the manually verified Google Maps share link for this client,
+    or "" when it is missing, blank, malformed, non-HTTPS, uses an unsafe
+    scheme, or is not on an approved Google Maps domain.
+
+    This function only validates a stored value. It never generates,
+    guesses, or derives a URL from the office's written address.
+    """
+    raw = get_client_setting(client, "maps_url", "")
+    if not isinstance(raw, str):
+        return ""
+    url = raw.strip()
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        # Rejects http, javascript, data, file, ftp, blank schemes, etc.
+        return ""
+    host = (parsed.hostname or "").lower()
+    rule = APPROVED_MAPS_HOSTS.get(host)
+    if rule is None:
+        return ""
+    if rule is not True:
+        # google.com / www.google.com are approved only for /maps paths:
+        # exactly "/maps" or "/maps/..." (rejects /search, /account,
+        # the bare homepage, and lookalike segments like /mapsearch).
+        path = (parsed.path or "").lower()
+        if path != rule and not path.startswith(rule + "/"):
+            return ""
+    return url
+
+
+def build_map_action(client) -> Optional[dict]:
+    """Build the single structured "Open in Google Maps" action for the
+    widget, or None when no verified maps_url is configured. The widget
+    renders this through its existing safe external-link button renderer
+    (new tab + rel="noopener noreferrer"); it never redirects on its own.
+    """
+    url = get_verified_maps_url(client)
+    if not url:
+        return None
+    return {
+        "type": "external_link",
+        "url": url,
+        "label": MAPS_BUTTON_LABEL,
+        "target": "_blank",
+        "rel": "noopener noreferrer",
+    }
 
 def get_client_timezone_name(client) -> str:
     """Return the practice timezone, defaulting to New York for current demos."""
@@ -7452,6 +7525,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             if faq:
                 op_reply = (faq.answer or "").strip() or "Please call the office and our team can share our location details."
                 meta = {"faq_match": True, "faq_id": str(faq.id), "mode": "faq_operational"}
+                # "Open in Google Maps" button: shown only alongside the
+                # office's written address, and only when a manually
+                # verified maps_url exists in this client's settings.
+                # Missing/invalid maps_url fails safely (address only).
+                if (faq.answer or "").strip():
+                    map_action = build_map_action(client)
+                    if map_action:
+                        meta["map_action"] = map_action
             else:
                 op_reply = "Please call the office and our team can share our address and directions."
                 meta = {"faq_match": False, "mode": "faq_operational_no_match"}
