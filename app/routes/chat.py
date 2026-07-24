@@ -3889,10 +3889,17 @@ def handle_time_window_capture(
 
         next_open_day = get_next_open_day_label(client, now_local)
 
+        # Time-independent behavior: ASAP confirmations are STATEMENTS only
+        # (no question mark), before or after noon and regardless of what
+        # get_next_open_day_label() returns. The outer one-question-per-
+        # message guard then appends the next required capture-first
+        # question (email/skip, then new/returning), so the next-open-day
+        # nudge never replaces or postpones a required intake step, and the
+        # patient is never asked to confirm another day after choosing ASAP.
         if is_after_noon:
             if next_open_day:
                 return (
-                    f"Got it — we’ll look for the earliest available time. If we can’t fit you in today, would {next_open_day} work?",
+                    f"Got it — we’ll look for the earliest available time. If today is unavailable, the next opening may be {next_open_day}.",
                     True,
                 )
             return ("Got it — we’ll look for the earliest available time.", True)
@@ -5951,14 +5958,19 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
             "reason",
         )
 
-    # Priority non-emergency flow: name + phone only.
-    # Do not ask email, preferred time, or new/returning for ASAP tooth pain.
+    # Priority non-emergency flow: keep the urgent-flavored name/phone
+    # prompts, but do not bypass the remaining required capture-first fields
+    # (email or skip, complete time window, new/returning). ASAP marks the
+    # request urgent; only documented emergency / short-symptom paths use a
+    # shorter intake.
     if is_priority_non_emergency:
         if not has_name:
             return ("Got it — I’ll mark this as urgent. What’s your first name?", "name")
         if not has_phone:
             return (f"Thanks {conversation.lead_name}! What’s the best phone number for the office to call you back?", "phone")
-        return (build_priority_handoff_reply(conversation), "complete")
+        if priority_intake_is_complete(conversation):
+            return (build_priority_handoff_reply(conversation), "complete")
+        # Fall through to the standard remaining-field questions below.
     if not has_name:
         symptom_source_text = (
             getattr(conversation, "lead_reason_source_text", None)
@@ -6006,7 +6018,18 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
     return (f"Thanks! We’ve got your request—our team will contact you shortly to confirm the appointment time.")
 
 def priority_intake_is_complete(conversation: Conversation) -> bool:
-    """Priority non-emergency leads only need name + phone."""
+    """
+    Priority (non-emergency) leads may be marked urgent, but they must not
+    bypass any remaining required capture-first field. The approved
+    one-question-at-a-time order still applies:
+    reason -> name -> phone -> email (or skip) -> time window -> new/returning.
+
+    "ASAP" counts as a complete time window (time_window_is_complete accepts
+    it), so answering ASAP never adds an extra question — it only marks the
+    request urgent. Documented emergency (lead_is_emergency) and short-symptom
+    flows are handled elsewhere and intentionally keep their own shorter
+    intake.
+    """
     time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
 
     is_priority = (
@@ -6016,11 +6039,19 @@ def priority_intake_is_complete(conversation: Conversation) -> bool:
 
     is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
 
+    email_captured_or_skipped = (
+        bool((getattr(conversation, "lead_email", "") or "").strip())
+        or bool(getattr(conversation, "lead_email_opt_out", False))
+    )
+
     return (
         is_priority
         and not is_emergency
         and bool((conversation.lead_name or "").strip())
         and bool((conversation.lead_phone or "").strip())
+        and email_captured_or_skipped
+        and time_window_is_complete(time_window)
+        and (getattr(conversation, "lead_is_new_patient", None) is not None)
     )
 
 

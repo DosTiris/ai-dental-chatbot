@@ -323,15 +323,29 @@ def test_internal_short_symptom_completion_starts_booking(db, fakes):
 
 def test_internal_priority_time_window_completion_starts_booking(db, fakes):
     client = make_client(db, calendar_enabled=True)
+    # S3-synchronized completeness (production parity): a priority lead is
+    # complete only with name + phone + email-or-skip + complete time window
+    # + new/returning. Every other required field is pre-completed here so
+    # the time window is genuinely the FINAL missing field, and supplying it
+    # is the completing answer.
     conversation = make_conversation(
-        db, client, lead_time_window=None, lead_is_new_patient=None
+        db, client, lead_time_window=None, lead_is_new_patient=True
     )
+
+    # Not complete yet — only the time window is missing.
+    assert not chat_module.priority_intake_is_complete(conversation)
+    assert (conversation.lead_name or "").strip()
+    assert (conversation.lead_phone or "").strip()
+    assert conversation.lead_email_opt_out is True
+    assert conversation.lead_is_new_patient is not None
 
     resp = send(db, client, conversation, "as soon as possible please")
 
-    # handle_time_window_capture set ASAP + priority; the priority
-    # time-window completion site notified the office and routed to the
-    # Calendar (priority NON-emergency leads may book).
+    # handle_time_window_capture set ASAP + priority; ASAP counts as a
+    # complete time window, so the priority time-window completion site
+    # notified the office and routed to the Calendar (priority NON-emergency
+    # leads may book).
+    assert chat_module.priority_intake_is_complete(conversation)
     assert resp.meta.get("mode") == "booking"
     assert (conversation.lead_time_window or "").strip().upper() == "ASAP"
     assert conversation.lead_is_priority is True
@@ -342,14 +356,21 @@ def test_internal_priority_time_window_completion_starts_booking(db, fakes):
 
 def test_internal_bypass_priority_completion_starts_booking(db, fakes):
     client = make_client(db, calendar_enabled=True)
-    # Priority intake already complete BEFORE the message; a neutral message
-    # falls through to the receptionist bypass at its "complete" stage.
+    # Priority intake already complete BEFORE the message under the
+    # S3-synchronized (production-parity) rule: name + phone (builder
+    # defaults) + email explicitly skipped + complete time window ("ASAP")
+    # + new/returning answered. A neutral message then falls through to the
+    # receptionist bypass at its "complete" stage.
     conversation = make_conversation(
         db, client,
         lead_is_priority=True,
         lead_time_window="ASAP",
-        lead_email_opt_out=False,
+        lead_email_opt_out=True,
+        lead_is_new_patient=True,
     )
+
+    # Genuinely complete before the action that should start booking.
+    assert chat_module.priority_intake_is_complete(conversation)
 
     resp = send(db, client, conversation, "ok")
 
