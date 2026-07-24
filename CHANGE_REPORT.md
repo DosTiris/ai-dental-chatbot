@@ -4030,3 +4030,212 @@ S8 CLOSED 2026-07-24 at commit 0d7df43 with owner-observed 30/30 focused,
 synchronization, including the deferred receptionist-bypass drift) has
 NOT started. Awaiting explicit approval and scope before any S9 work
 begins.
+
+# ============================================================================
+# S9 — HYBRID CAPTURE AND POST-HANDOFF SYNCHRONIZATION — CLOSED
+# Appended after owner-side verification and commit. Append-only per Rule 13:
+# no prior section of this file was modified.
+# ============================================================================
+
+## Status
+- S9 hybrid capture and post-handoff synchronization is CLOSED.
+- Verified locally and committed by the project owner as:
+  9f23ea4 Synchronize hybrid capture and post-handoff behavior (S9)
+- Workspace: C:\Users\kalva\Desktop\ai-dental-chatbot\backend-calendar-patch9a-staging-prep
+- Branch: staging-patch9a
+- Focused S9 verification: 73 collected / 73 passed / 0 failed.
+- Full calendar verification: 492 collected / 492 passed / 0 failed.
+- Working tree after commit: clean.
+
+## Final hashes (SHA-256)
+- app/routes/chat.py
+  F608467E0EB59F016A49060EA24212A7F8B8500DD3D4AE052E94D6F293F37AE4
+- calendar_tests/test_hybrid_capture.py
+  7442F00518F8D19E01D7F19CBE87FEB5D24B3DB8B8E28E2B2782CCD515CEDCA0
+- static/chat.html (unchanged throughout S9)
+  DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+
+## Hybrid capture policy
+- booking_mode supports the existing exact values: direct, capture_first,
+  hybrid. Invalid or missing booking_mode continues to fall back to hybrid.
+- Hybrid capture is now UNCONDITIONAL before an external booking handoff.
+  The obsolete conditional hybrid gate (urgent / emergency / high-value /
+  routine) and its unused is_after_hours local were removed with it, so
+  exactly one hybrid capture policy exists (Rule 3).
+- Direct mode behavior remains unchanged.
+- capture_first behavior remains unchanged.
+
+## Ordinary hybrid capture
+- Ordinary hybrid capture asks: (1) first name, (2) phone, (3) external
+  booking handoff — one question per response.
+- The combined name-and-phone prompt is no longer used for hybrid.
+- Ordinary hybrid leads are not asked for email, time window, or
+  new/returning before handoff.
+- next_booking_capture_prompt() and _next_intake_prompt() share the same
+  ordinary-hybrid policy owner (conversation_is_ordinary_hybrid_lead), so
+  the two prompt owners cannot disagree.
+- Generic, Other, and unmapped reasons no longer bypass hybrid capture.
+
+## Priority / ASAP preservation (S3)
+- S3 remains calendar-authoritative.
+- Priority/ASAP hybrid leads retain the complete priority sequence: name,
+  phone, email or explicit skip, complete time window, new/returning.
+- Priority/ASAP leads are NOT handed off after name and phone alone.
+- priority_intake_is_complete() remains the completion gate.
+- The ordinary-versus-priority hybrid split is an intentional, documented
+  calendar adaptation from production, made to preserve S3.
+
+## External versus native booking
+- route_completed_lead() remains the single external-versus-native
+  precedence owner.
+- With an external URL and native calendar booking both configured, the
+  external handoff remains authoritative; native booking does not begin
+  simultaneously.
+- No slot, hold, or internal booking state is created before external
+  handoff.
+- Existing internal-booking transition and cleanup owners remain intact.
+
+## Post-handoff behavior
+- conversation_is_hybrid_post_handoff() and build_hybrid_post_handoff_reply()
+  were synchronized from the verified production owners.
+- A new post-handoff residue guard prevents safe non-scheduling follow-ups
+  from reopening intake after the external link was sent. Verified residue
+  examples: "I don't see any times", "The link isn't working", "Please have
+  the office call me".
+- The residue reply does not include or repeat the booking link, does not
+  reopen intake, does not mutate captured fields, does not begin native
+  booking, and does not retrigger lead or booking notifications.
+
+## Calendar post-link scheduling preserved
+- Calendar behavior remains authoritative for scheduling requests after
+  handoff: post-link scheduling continues to use
+  external_booking_link_reminder, repeatably, with the existing booking
+  link/button metadata.
+- The production no-link residue response does not replace the calendar
+  scheduling reminder path.
+- A recognized scheduling service after handoff (e.g. "crown") remains owned
+  by the external reminder path.
+
+## Post-handoff interruption owners preserved
+- Operational FAQ remains owned by the S8 FAQ owner.
+- Insurance remains owned by insurance_info.
+- Office-phone requests remain owned by the existing office-phone owner.
+- Location remains owned by the Maps/location owner.
+- Dental emergencies remain owned by the emergency guard.
+- Life-threatening emergencies still persist final_closed.
+- Genuine endings remain owned by the existing ending/cleanup owner.
+- Completed conversations are not reopened.
+- service_selected_now cannot reopen intake after handoff.
+
+## Settings transitions
+- External URL removal before handoff prevents external handoff.
+- URL removal after handoff prevents the external post-handoff guard from
+  claiming an inactive external owner.
+- Adding an external URL during an internal booking conversation continues
+  through the existing transition/cleanup owner.
+- booking_mode changes during incomplete intake are resolved from current
+  settings.
+- Settings changes after handoff do not create simultaneous external and
+  native owners.
+
+## S7-deferred bypass consumer
+- The deferred S7 drift was confirmed to be in the chat() consumer block,
+  not inside receptionist_bypass_reply(), which was byte-identical between
+  branches.
+- The bypass consumer now delegates directly to the existing calendar owner
+  classify_other_reason_detail(user_text, enabled_service_keys). No second
+  classifier and no production vocabulary copy was added.
+- All three verdicts are preserved: dental, unclear, non_dental.
+- Dental results use the existing mapping/persistence contract; unmapped
+  dental details persist "appointment request" plus the exact source text;
+  existing meaningful source text remains protected from overwrite.
+- Unclear results return the existing clarification builder with mode
+  unclear_other_reason_detail. Non-dental results return the existing
+  rejection builder with mode non_dental_other_reason_detail. Both rejection
+  paths persist nothing and keep the reason step pending; neither is
+  flattened to the shared "bypass" mode.
+- The primary S7 Other-capture block was not modified.
+- The approved D1–D5 vocabulary deviations remain preserved: sore spot /
+  sore spots; irritation / irritated; book / booking / booked; last;
+  metallic taste.
+
+## S9-7 deferral
+- The proposed receptionist_bypass_reply() bare-string tuple cleanup was
+  REVERTED and is NOT part of S9.
+- A natural real chat() flow did not reproduce the originally claimed
+  failure; the relevant legacy consumer region is not naturally reachable
+  through the current detector graph in the manner originally assumed.
+- receptionist_bypass_reply() remains byte-identical to the S8 baseline.
+- The tuple cleanup remains deferred pending a separately approved patch or
+  a genuine natural-flow reproduction.
+- S9 makes NO claim of fixing an HTTP 500 associated with this return.
+
+## Notification deferral (D-3)
+- S9 did not add office notification at hybrid handoff.
+- send_external_booking_handoff() still contains no new notification call.
+- Hybrid capture, handoff, and post-handoff residue introduce no new lead or
+  booking notification sends.
+- Existing S5 honest notification wording remains unchanged.
+- Hybrid-handoff notification remains a future, separately scoped candidate.
+
+## Test coverage
+- calendar_tests/test_hybrid_capture.py was added; it collected and passed
+  73 focused tests.
+- Coverage: exact booking-mode resolution; direct preservation;
+  capture_first preservation; sequential ordinary hybrid capture (a real
+  multi-turn chat() flow); priority/ASAP S3 preservation; external-over-
+  native precedence; post-handoff scheduling reminders; post-handoff residue
+  behavior; exact interruption owner modes; settings transitions; S7
+  classifier consumer behavior; D1–D5 acceptance and guardrails;
+  no-overwrite protection; notification deferral.
+- Final complete calendar suite: 492 collected / 492 passed / 0 failed.
+
+## Scope discipline
+- Implementation files committed: app/routes/chat.py and
+  calendar_tests/test_hybrid_capture.py — nothing else.
+- static/chat.html unchanged. No model changed. No migration changed.
+  Supabase not changed. calendar_tests/test_booking_db.py untouched.
+  Notification ledger services untouched. Patch 9A untouched. Patch 9B
+  remains deferred.
+- CHANGE_REPORT.md was not modified during S9 implementation or
+  verification; this closure is appended separately after the S9 code
+  commit.
+- No push or deployment occurred.
+
+## Revision history (honest record)
+1. Reconnaissance identified the production hybrid owners, the post-handoff
+   owners, and the deferred bypass consumer.
+2. Revision 1 implemented the bounded S9 units and initially included a
+   proposed receptionist_bypass_reply() tuple correction (S9-7).
+3. Static review rejected that S9-7 correction: its required natural
+   real-flow reproduction had not been established. Revision 1 also required
+   stronger three-way S7 consumer modes and a real sequential hybrid test.
+4. Revision 2 was rebuilt from the clean c8fae0c baseline. It reverted S9-7
+   and documented its deferral, completed the dental / unclear / non_dental
+   consumer contract, added the real sequential ordinary hybrid flow, and
+   strengthened exact post-handoff owner assertions.
+5. Static review found a reporting-count error in the revision-2 delivery:
+   Claude reported 62 focused tests and an obsolete 263-test baseline. The
+   actual focused count was 73 and the verified S8 baseline was 419
+   (419 + 73 = 492, matching the observed full-suite collection).
+6. Owner-side focused verification passed 73/73; owner-side full
+   verification passed 492/492; S9 was committed as 9f23ea4.
+
+## Rollback point
+- S9 code checkpoint: 9f23ea4 Synchronize hybrid capture and post-handoff
+  behavior (S9)
+- Prior documentation checkpoint: c8fae0c Document S8 synchronization
+  closure
+- Prior S8 code checkpoint: 0d7df43 Synchronize FAQ resume-once behavior (S8)
+- Prior chat.py hash:
+  38AF08D3A2AEBB6BDE21B4F883DD26C916D556C9AEFAEFF67FBEFCB462D1D973
+- Final S9 chat.py hash:
+  F608467E0EB59F016A49060EA24212A7F8B8500DD3D4AE052E94D6F293F37AE4
+
+## Checkpoint
+- S9 is CLOSED at commit 9f23ea4.
+- Focused verification: 73/73. Full verification: 492/492.
+- S9-7 remains deferred. Hybrid-handoff notification remains deferred.
+  Patch 9B remains deferred.
+- This closure records S9 only; the production/calendar synchronization
+  program is not claimed complete by this record.
