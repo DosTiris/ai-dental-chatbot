@@ -6931,6 +6931,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         if next_prompt and "?" not in reply_text:
             reply_text = f"{reply_text}\n\n{next_prompt}"
 
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
         return ChatResponse(
@@ -6993,6 +7003,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         if next_prompt:
             reply_text = f"{reply_text}\n\n{next_prompt}"
+
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
@@ -7160,6 +7180,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             # prompt so the office can still reach the patient quickly.
             if not looks_like_life_threatening_emergency(user_text):
                 reply_text += "\n\n" + _next_emergency_prompt(conversation)
+
+        life_threatening_stop = looks_like_life_threatening_emergency(user_text)
+        if life_threatening_stop:
+            # Persistent stop: a life-threatening message permanently closes
+            # this conversation. The existing top-level final_closed guard
+            # then intercepts every later message before extraction, FAQ
+            # intake resumption, capture, priority logic, completion, and
+            # notification. Persisted by the existing db.commit() below.
+            conversation.final_closed = True
+            db.add(conversation)
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()

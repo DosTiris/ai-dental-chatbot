@@ -1408,19 +1408,42 @@ def test_dental_emergency_without_life_threat_keeps_contact_prompt(db, fakes):
     assert "first name" in resp.reply.lower()
 
 
-def test_affirmative_after_standalone_emergency_still_offers_contact_capture(db, fakes):
-    """Intentionally unchanged: on the NEXT turn, an explicit patient
-    affirmative after the emergency instruction resumes the emergency
-    contact capture. Only same-message resumption was removed."""
+def test_affirmative_after_life_threatening_hits_persistent_stop(db, fakes):
+    """S4 persistent-stop contract (supersedes the pre-S4 next-turn
+    contact-capture behavior this test previously encoded): the
+    life-threatening response persists final_closed, so a later
+    affirmative is intercepted by the existing final_closed guard and
+    must NOT resume emergency contact capture. Ordinary dental
+    emergencies keep their contact chain — proven separately by
+    test_dental_emergency_without_life_threat_keeps_contact_prompt."""
     client = make_client(db)
     conversation = make_conversation(db, client, lead_phone=None,
                                      lead_time_window=None,
                                      lead_email_opt_out=False)
 
     first = send(db, client, conversation, LIFE_THREATENING_MESSAGE)
-    assert "?" not in first.reply  # standalone instruction, per this patch
+    assert "?" not in first.reply  # standalone instruction, unchanged
+    # S4: the life-threatening response permanently closed the conversation.
+    assert conversation.final_closed is True
+    lead_sms_before = len(fakes.lead_sms)
+    lead_email_before = len(fakes.lead_email)
+    name_before = conversation.lead_name
 
     resp = send(db, client, conversation, "ok")
 
-    assert resp.meta.get("mode") == "emergency_intake_continue"
-    assert "phone number" in resp.reply.lower()
+    assert resp.meta.get("mode") == "final_closed"
+    assert resp.reply == (
+        "This conversation has ended. "
+        "Please tap Start Over to begin a new request."
+    )
+    # No contact-capture resumption, no lead mutation, no notification,
+    # no booking state or hold on the blocked turn.
+    assert "phone number" not in resp.reply.lower()
+    assert conversation.lead_name == name_before
+    assert (conversation.lead_phone or None) is None
+    assert len(fakes.lead_sms) == lead_sms_before
+    assert len(fakes.lead_email) == lead_email_before
+    assert (conversation.booking_state or "none") == BookingState.NONE
+    assert conversation.booking_selected_slot_id is None
+    # Start Over remains exposed through the existing response contract.
+    assert resp.meta.get("show_start_over") is True
