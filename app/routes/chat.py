@@ -830,22 +830,59 @@ def should_capture_before_booking_link(
         return True
 
     # hybrid
-    is_urgent = bool(getattr(conversation, "lead_is_priority", False)) or looks_like_urgent_but_not_er(user_text)
-    is_emergency = bool(getattr(conversation, "lead_is_emergency", False)) or looks_like_emergency(user_text)
-    effective_reason = service_reason or getattr(conversation, "lead_reason", None)
+    # S9-2 (decision D-1, approved): hybrid ALWAYS captures before the
+    # external booking link is shown. This replaces — rather than sits beside
+    # — the previous conditional policy (urgent / emergency / high-value /
+    # routine), so exactly ONE hybrid capture policy exists (Rule 3). It now
+    # covers generic, "Other", unmapped, routine, high-value, urgent and
+    # emergency-compatible lead paths; every earlier emergency owner in
+    # chat() still claims the message before this owner is consulted. The
+    # dead is_after_hours local was removed with the conditional it fed.
+    # "direct" (above) still skips capture; "capture_first" (above) keeps its
+    # own behavior. Both are unchanged.
+    return True
 
-    is_high_value = is_high_value_service(effective_reason)
-    is_routine = is_routine_service(effective_reason)
-    is_after_hours = bool(getattr(conversation, "lead_is_outside_hours", False)) or is_currently_after_hours_for_client(client)
+def conversation_is_ordinary_hybrid_lead(conversation: Conversation) -> bool:
+    """
+    S9-1 (decision D-2, S3 preservation condition): THE single owner of the
+    ordinary-vs-priority split used by hybrid pre-handoff capture.
 
-    return (
-        is_urgent
-        or is_emergency
-        or is_high_value
-        or is_routine
+    Purpose: An ORDINARY hybrid lead uses the short production capture
+             sequence (first name -> phone -> external booking link). A
+             PRIORITY/ASAP lead must NOT use it: the S3 sequence
+             (reason -> name -> phone -> email or skip -> complete time
+             window -> new/returning) stays calendar-authoritative and its
+             completion is owned by priority_intake_is_complete(). Emergency
+             leads are excluded too and keep the behavior they have today.
+    Inputs:  conversation - the active Conversation row.
+    Returns: True only when the lead is neither priority/ASAP nor emergency.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none - missing attributes read as absent.
+
+    Documented duplication (Rule 3 note): the priority expression below is the
+    same one already computed inline inside priority_intake_is_complete() and
+    receptionist_bypass_reply(). S9 does not refactor those S3 owners (Rule
+    12: no refactor plus feature in one patch), so it is stated once here and
+    unifying the three sites is recorded as deferred drift.
+    """
+    time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
+
+    is_priority = (
+        bool(getattr(conversation, "lead_is_priority", False))
+        or time_window in {"ASAP", "ASAP / tomorrow ok"}
     )
+    is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
 
-def next_booking_capture_prompt(conversation: Conversation, service_reason: Optional[str] = None) -> Optional[str]:
+    return not is_priority and not is_emergency
+
+
+def next_booking_capture_prompt(
+    conversation: Conversation,
+    service_reason: Optional[str] = None,
+    booking_mode: Optional[str] = None,
+    client: Optional[Client] = None,
+) -> Optional[str]:
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
 
@@ -858,6 +895,35 @@ def next_booking_capture_prompt(conversation: Conversation, service_reason: Opti
         "service_reason_present=", bool(service_reason),
         "conversation=", conversation.id,
     )
+
+    # S9-1 (decision D-2, approved): HYBRID -> first name, then phone, ONE
+    # question per response, then the external link. The combined
+    # "name and phone number" prompt is never used in hybrid, and email, time
+    # window and new/returning are never asked before an ordinary hybrid
+    # handoff. Wording is the verified production wording.
+    if booking_mode == "hybrid":
+        if conversation_is_ordinary_hybrid_lead(conversation):
+            if not has_name:
+                return "Before I send you to online booking, what’s your first name?"
+            if not has_phone:
+                return "Before I send you to online booking, what’s the best phone number to reach you?"
+            return None
+
+        # S9 CALENDAR ADAPTATION (decision D-2, S3 preservation condition):
+        # a priority/ASAP lead is NEVER handed off on name + phone alone.
+        # Until priority_intake_is_complete() - the existing S3 completeness
+        # owner - is True, the next required question is produced by the
+        # existing S3 owner receptionist_bypass_reply() rather than by a
+        # second copy of the S3 sequence here (Rule 3). This call runs ONLY
+        # while priority_intake_is_complete() is False, so at least one field
+        # is missing and a field-question tuple branch of that owner always
+        # answers it. A "complete" stage is not a capture question, so it
+        # releases the handoff instead of being echoed as a prompt.
+        if not priority_intake_is_complete(conversation):
+            priority_prompt, priority_stage = receptionist_bypass_reply(conversation, client)
+            if priority_stage != "complete" and priority_prompt:
+                return priority_prompt
+        return None
 
     # 🔥 ROUTINE SERVICES → PHONE ONLY
     if is_routine_service(service_reason):
@@ -895,6 +961,84 @@ def build_booking_handoff_meta(client: Client, service_reason: Optional[str]) ->
         "booking_service_reason": service_reason or "appointment request",
         "open_booking_in_new_tab": True,
     }
+
+
+def conversation_is_hybrid_post_handoff(client: Client, conversation: Conversation) -> bool:
+    """
+    S9-3 (decision D-5, approved): ported from the verified production owner.
+
+    True once a hybrid conversation has finished its booking capture:
+    name + phone stored and the external booking link already displayed
+    (booking_link_sent).
+
+    In this state intake is FINISHED. Follow-up messages must be treated as
+    ordinary questions (FAQ / info / safety / ending owners keep working),
+    intake must never resume, and the conversation must not be auto-closed.
+    Conversations already marked "completed" or final-closed keep their
+    existing dedicated handling.
+
+    Calendar note: this predicate is READ-ONLY. It never repeats the booking
+    link, never mutates a captured field, never starts native booking, and
+    never triggers a notification.
+
+    Inputs:  client - the tenant row; conversation - the active Conversation.
+    Returns: bool.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none - missing attributes read as absent.
+    """
+    return (
+        get_booking_mode(client) == "hybrid"
+        and has_external_booking(client)
+        and bool(getattr(conversation, "booking_link_sent", False))
+        and bool((getattr(conversation, "lead_name", None) or "").strip())
+        and bool((getattr(conversation, "lead_phone", None) or "").strip())
+        and (getattr(conversation, "lead_status", "") or "").strip().lower() != "completed"
+        and not bool(getattr(conversation, "final_closed", False))
+    )
+
+
+def build_hybrid_post_handoff_reply(conversation: Conversation, office_phone: str = "") -> str:
+    """
+    S9-3 (decision D-5, approved): ported from the verified production owner.
+
+    Deterministic reply for the NON-SCHEDULING residue after the hybrid
+    booking handoff (e.g. "I don't see any times", "the link isn't working",
+    "please have the office call me").
+
+    States that the office already has the captured info and can follow up.
+    Never re-asks intake questions, never repeats the booking link, and never
+    triggers a notification.
+
+    Post-link SCHEDULING requests are NOT routed here: decision D-5 keeps the
+    calendar's repeatable external_booking_link_reminder authoritative for
+    those, and its owner (send_external_booking_handoff) runs earlier in
+    chat().
+
+    Inputs:  conversation - the active Conversation; office_phone - already
+             resolved by the caller.
+    Returns: the reply text.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none.
+    """
+    name = (getattr(conversation, "lead_name", None) or "").strip()
+    name_part = f", {name}" if name else ""
+
+    reply = (
+        f"No problem{name_part} — the office already has your name and phone number, "
+        "and the team can follow up with you directly to help schedule."
+    )
+
+    office_phone = (office_phone or "").strip()
+    if office_phone:
+        reply += f" You can also call the office at {office_phone}."
+
+    reply += (
+        "\n\nIf you have any other questions about hours, location, insurance, "
+        "or services, I’m happy to help."
+    )
+    return reply
 
 
 def booking_dialog_active(conversation: Conversation) -> bool:
@@ -970,6 +1114,10 @@ def send_external_booking_handoff(
         capture_prompt = next_booking_capture_prompt(
             conversation,
             service_reason=active_service_reason,
+            # S9-1: the capture policy owner needs the resolved mode and the
+            # client; both are read through their existing single owners.
+            booking_mode=get_booking_mode(client),
+            client=client,
         )
 
         # PATCH 6 (Recommended #7): controlled fields only — no patient
@@ -6922,6 +7070,36 @@ def build_priority_handoff_reply(conversation: Conversation) -> str:
 def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_prefix = f"{name}, " if name else ""
+
+    # S9-4 (decision D-2, approved): an ACTIVE ordinary hybrid pre-booking
+    # capture resumes its OWN name/phone questions, in that order, instead of
+    # the full intake sequence - hybrid intake is only name + phone, then the
+    # booking link, never email / time window / new-returning. This keeps
+    # _next_intake_prompt() and next_booking_capture_prompt() in agreement on
+    # the hybrid sequence, with next_booking_capture_prompt() as the single
+    # wording owner.
+    #
+    # S9 CALENDAR ADAPTATION (S3 preservation condition): the shortcut is
+    # taken ONLY for an ordinary lead. A priority/ASAP lead falls through to
+    # the full sequence below, so S3 completeness and ordering are unchanged.
+    # conversation_is_ordinary_hybrid_lead() is the single owner of that
+    # split, so the two prompt owners can never disagree, and the shortcut it
+    # gates never calls back into this function (no recursion).
+    if (
+        has_external_booking(client)
+        and get_booking_mode(client) == "hybrid"
+        and not bool(getattr(conversation, "booking_link_sent", False))
+        and bool((getattr(conversation, "lead_reason", "") or "").strip())
+        and conversation_is_ordinary_hybrid_lead(conversation)
+    ):
+        hybrid_prompt = next_booking_capture_prompt(
+            conversation,
+            service_reason=(conversation.lead_reason or "").strip(),
+            booking_mode="hybrid",
+            client=client,
+        )
+        return hybrid_prompt or ""
+
     # Match your existing intake field order
 
     if not conversation_has_specific_lead_reason(conversation):
@@ -7205,6 +7383,27 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         "text_length=", len(user_text or ""),
         "conversation=", conversation.id,
     )
+
+    # =========================================================
+    # Hybrid post-handoff state (S9-3, decision D-5)
+    # =========================================================
+    # Once a hybrid conversation has captured name + phone and displayed the
+    # external booking link, intake is FINISHED. Treat follow-ups as ordinary
+    # questions so the FAQ, info, safety and conversation-ending owners keep
+    # working - and so the bypass / intake-continuation logic can never resume
+    # asking for email, time window, patient type, or the service reason.
+    # This flag is read-only state: it repeats no link, mutates no captured
+    # field, starts no native booking, and sends no notification.
+    hybrid_post_handoff = conversation_is_hybrid_post_handoff(client, conversation)
+    if hybrid_post_handoff:
+        in_intake_mode = False
+        resume_intake_after_answer = False
+        # PATCH 6 logging contract: controlled fields + conversation UUID only.
+        print(
+            "[HYBRID_POST_HANDOFF]",
+            "intake_disabled=", True,
+            "conversation=", conversation.id,
+        )
 
     # =========================================================
     # Self-harm / suicide crisis guard
@@ -9300,6 +9499,37 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     # =========================================================
+    # Hybrid post-handoff follow-up guard (S9-3, decision D-5)
+    # =========================================================
+    # Anything reaching this point after the hybrid booking handoff was NOT a
+    # scheduling request, FAQ, info, safety or ending message - every one of
+    # those owners runs earlier and returned already. In particular the
+    # calendar's repeatable external_booking_link_reminder owner
+    # (send_external_booking_handoff) runs earlier and keeps post-link
+    # SCHEDULING requests, per decision D-5. What is left is the residue this
+    # guard owns: "I don't see any times", "the link isn't working",
+    # "please have the office call me".
+    #
+    # Contract: acknowledge that the office already has the captured info.
+    # Never resume intake, never repeat the booking link (no booking meta and
+    # no booking button), never re-notify, never mutate a captured field,
+    # never begin native booking, and never final-close the conversation.
+    if hybrid_post_handoff:
+        reply_text = build_hybrid_post_handoff_reply(conversation, office_phone)
+
+        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+        db.commit()
+        return ChatResponse(
+            reply=reply_text,
+            conversation_id=str(conversation.id),
+            meta={
+                "mode": "hybrid_post_handoff_followup",
+                "faq_match": False,
+                "show_start_over": show_start_over,
+            },
+        )
+
+    # =========================================================
     # Lead completion + deterministic intake continuation
     # =========================================================
     is_thanks = (
@@ -9432,24 +9662,81 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             and not (conversation.lead_reason or "").strip()
             and "can you briefly tell me what you need help with" in last_assistant_norm
         ):
+            # S9-5 (decision D-4, revision 2): this legacy bypass consumer
+            # previously mapped the free-text "Other" reason with NO
+            # dental-relevance gate at all. It now delegates DIRECTLY to the
+            # one existing calendar classifier - no second classifier, no
+            # production vocabulary constants, no wrapper - and preserves the
+            # SAME three-verdict result contract as the primary S7 owner,
+            # including its exact reply builders and response modes. The
+            # rejection modes are returned here directly so the shared
+            # "bypass" response below can never flatten them.
+            #
+            # HONEST REACHABILITY (recorded per the revision-2 review): under
+            # the current detector graph this branch is statically
+            # unreachable - a message that sets service_reason_now == "other"
+            # is returned earlier by the other_service_prompt owner, and its
+            # follow-up free text is claimed by the primary S7 Other-capture
+            # block. The contract is completed here as an instructed
+            # defensive cleanup so that, if routing ever changes, this
+            # consumer already matches the primary owner instead of silently
+            # skipping the dental-relevance gate.
+            reason_verdict = classify_other_reason_detail(user_text, enabled_service_keys)
+
+            if reason_verdict == "unclear":
+                # Same builder and mode as the primary S7 owner: neutral
+                # clarification, nothing persisted, reason step stays pending.
+                reply_text = build_unclear_dental_reason_reply()
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+                db.commit()
+                return ChatResponse(
+                    reply=reply_text,
+                    conversation_id=str(conversation.id),
+                    meta={
+                        "mode": "unclear_other_reason_detail",
+                        "faq_match": False,
+                        "show_start_over": show_start_over,
+                    },
+                )
+
+            if reason_verdict == "non_dental":
+                # Same builder and mode as the primary S7 owner: nothing
+                # persisted, reason step stays pending.
+                reply_text = build_non_dental_reason_detail_reply()
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+                db.commit()
+                return ChatResponse(
+                    reply=reply_text,
+                    conversation_id=str(conversation.id),
+                    meta={
+                        "mode": "non_dental_other_reason_detail",
+                        "faq_match": False,
+                        "show_start_over": show_start_over,
+                    },
+                )
+
+            # Dental verdict: persist through the same contract as the
+            # primary S7 owner - the mapped enum when one maps, otherwise the
+            # generic "appointment request" with the exact accepted detail
+            # carried by lead_reason_source_text (this consumer's existing
+            # no-overwrite rule preserved), plus the primary flow's priority
+            # marking owner - then continue through this consumer's existing
+            # intake owner.
             mapped_reason = map_reason_detail_to_enum(user_text)
 
-            if mapped_reason:
-                conversation.lead_reason = mapped_reason
-                if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
-                    conversation.lead_reason_source_text = user_text[:120]
-                db.add(conversation)
-                db.commit()
-                db.refresh(conversation)
+            conversation.lead_reason = mapped_reason or "appointment request"
+            if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
+                conversation.lead_reason_source_text = user_text[:120]
 
-                # Re-enter bypass flow now that reason is safely captured
-                bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
-            else:
-                bypass_text = (
-                    "Please briefly describe the issue using plain words only, like "
-                    "'chipped tooth', 'tooth pain', or 'consultation'."
-                )
-                bypass_stage = "reason_detail"
+            if mark_priority_if_symptom_lead(conversation):
+                pass
+
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
+            # Re-enter bypass flow now that reason is safely captured
+            bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
 
         if bypass_text:
             lead_email_error = None
