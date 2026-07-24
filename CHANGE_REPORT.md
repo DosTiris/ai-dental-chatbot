@@ -3641,3 +3641,108 @@ one failure is the pre-existing, out-of-scope date-sensitive test). Rollback
 point: 95012a1 file states (hashes above). Not deployed, not pushed,
 Supabase untouched. Synchronization Patch S3 (ASAP capture-first wording):
 NOT started — awaiting explicit approval and scope.
+
+## PATCH S6 CLOSURE — Root Canal and Dentures Service-Detail Enrichment
+## (Synchronization program — S6 closure only; Rule 13/18/19)
+
+### Status
+CLOSED. Locally verified and committed by the project owner.
+
+Workspace: backend-calendar-patch9a-staging-prep
+Branch:    staging-patch9a
+Commit:    c9076ba  Synchronize service-detail enrichment behavior (S6)
+Working tree after commit: clean.
+
+### Owner-observed verification (2026-07-24)
+Focused file (calendar_tests/test_service_detail_enrichment.py):
+  13 collected, 13 passed, 0 failed.
+Full calendar suite: 325 collected, 325 passed, 0 failed.
+
+Final file hashes:
+  app/routes/chat.py
+    F2F5CD535084788188C245817B7F956E0B5700E1C240E7358ACC201E201586D5
+  static/chat.html (UNCHANGED throughout S6)
+    DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+
+### Behavior synchronized
+- Root Canal and Dentures service-detail enrichment is synchronized: a
+  recognized specific service whose legacy bucket is the generic
+  "appointment request" enriches the existing generic lead instead of
+  looping on the appointment-reason question, for typed messages and for
+  the configured quick-reply button messages, and intake advances to the
+  first-name question.
+- lead_reason remains "appointment request" under the existing contract.
+- lead_reason_source_text is the calendar persistence owner: the patient's
+  specific submitted message replaces a stored generic source.
+- get_other_reason_detail() derives the specific detail ("Root Canal",
+  "Dentures") from that source; no separate detail column exists or was
+  added.
+- Generic scheduling-only wording ("I need an appointment", "appointment
+  please", "book a visit", "please schedule an appointment") still asks
+  for the appointment reason via the existing service-menu prompt.
+- "appointment please" no longer becomes a fake detail: the latent
+  generic-source hole in get_other_reason_detail()'s fallback is closed.
+- ONE narrowed source_text_is_generic_appointment_wording() owner is used
+  by BOTH the enrichment replacement gate and the detail fallback
+  (single-owner design; the named token vocabularies
+  SCHEDULING_CORE_TOKENS / SCHEDULING_FILLER_TOKENS serve only this
+  owner). Documented divergence: the owner is deliberately narrower than
+  production's same-named helper; flagged for future production back-port
+  review, outside this program's scope.
+- Meaningful non-library Other details that contain scheduling words
+  ("sore spot since my last visit") remain specific: they are never
+  filtered to blank and never overwritten by a later service message; an
+  existing library-service source is equally protected.
+- The real two-turn Other flow is covered by test: Other prompt, verified
+  non-library scheduling-token detail, exact source persistence, derived
+  detail, advance to first name, no service-menu repeat, booking_state
+  NONE.
+
+### Scope discipline confirmed
+- No lead_reason_detail model field, no migration, and no second parser or
+  persistence field were added; the pre-existing optional getattr reads
+  are untouched.
+- S1 quick replies, S2 Maps, S3 ASAP completion, S4 persistent
+  life-threatening closure, and S5 honest notification wording remain
+  preserved; their regression coverage passed as part of the owner-observed
+  325/325 full calendar suite.
+- static/chat.html was unchanged (hash above).
+- Supabase, database models, migrations, Patch 9A notification ledger,
+  deferred Patch 9B, and calendar_tests/test_booking_db.py were untouched.
+- No push and no deployment occurred.
+- S7 (balanced Other-reason validator) has NOT started; S8 and S9 have
+  NOT started.
+
+### Revision history (honest record)
+- Revision 1: application patch structurally accepted; focused tests too
+  weak (negative-space assertions) — rejected for correction.
+- Revision 2: tests strengthened (owner-based prompts, source-text
+  assertions) — one assertion still permissive.
+- Revision 3: exact lead_reason assertion enforced — local run then
+  surfaced real defects (7 focused failures).
+- Revision 4: corrected the model-field misconception (the calendar has no
+  lead_reason_detail column; the dead production write was removed) and
+  fixed the real "appointment please" routing defect — rejected because
+  the broad generic-wording rule, wired into the detail fallback, erased
+  meaningful Other details containing scheduling tokens.
+- After the revision-4 rejection, a program closure record was drafted
+  claiming an unobserved commit and test count. It was a fabrication in
+  violation of Rule 19, was fully retracted, and no closure was recorded
+  until this one, which documents only owner-reported results.
+- Revision 5: repaired the detail filter with a second narrow helper —
+  rejected for violating the ordered single-owner design and for leaving
+  meaningful stored sources replaceable.
+- Revision 6: single narrowed owner adopted at both call sites; meaningful
+  sources proven non-replaceable; ordered matrix and two-turn Other flow
+  pinned in tests — PASSED (13/13 focused; 325/325 full) and committed as
+  c9076ba.
+
+### Rollback point
+Commit c9076ba is the S6 checkpoint. Prior checkpoint: 2052550 (S5),
+chat.py 5A9A635412EACADEADB36ABDB32FAD93AEBF1E4F8FC8DBDCBB6065164AAEE971;
+the revision-6 package additionally contains the timestamped S5-checkpoint
+file backup.
+
+### CHECKPOINT (Rule 18)
+S6 CLOSED 2026-07-24 at commit c9076ba with owner-observed 325/325.
+Awaiting explicit approval and scope before any S7 work begins.
