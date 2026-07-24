@@ -46,6 +46,7 @@ from app.services.mia_service_library import (
     DEFAULT_VISIBLE_SERVICE_BUTTONS,
     SPECIALTY_PRESETS,
     normalize_service_text,
+    MASTER_DENTAL_SERVICES,
 )
 from twilio.rest import Client as TwilioClient
 import resend
@@ -4659,7 +4660,17 @@ def last_assistant_asked_for_other_reason(db: Session, conversation_id: uuid.UUI
         return False
 
     t = _norm_text(last_msg.content or "")
-    return "please briefly tell me what you re coming in for" in t
+
+    # The Other-reason step stays pending after Mia rejects unsafe or
+    # non-dental text, so the patient can try again with a valid dental
+    # reason instead of falling out of the capture flow.
+    other_reason_pending_phrases = [
+        "please briefly tell me what you re coming in for",
+        "please briefly describe the dental reason for your visit",
+        "please enter a short description using plain text only",
+        "please briefly describe the tooth gum denture braces or other dental issue",
+    ]
+    return any(p in t for p in other_reason_pending_phrases)
 
 
 def build_unsafe_reason_detail_reply() -> str:
@@ -4667,6 +4678,599 @@ def build_unsafe_reason_detail_reply() -> str:
         "Please enter a short description using plain text only, like "
         "“jaw pain,” “consultation,” or “something else.”"
     )
+
+
+def build_non_dental_reason_detail_reply() -> str:
+    return (
+        "I can only help with dental care. Please briefly describe the dental "
+        "reason for your visit, such as tooth pain, a cleaning, dentures, or "
+        "an implant consultation."
+    )
+
+
+def build_unclear_dental_reason_reply() -> str:
+    return (
+        "Please briefly describe the tooth, gum, denture, braces, or other "
+        "dental issue you need help with."
+    )
+
+
+# S7 APPROVED CALENDAR DEVIATIONS (D1-D5): the vocabulary entries marked
+# "S7 deviation" below are deliberate calendar-branch additions to the
+# production classifier vocabulary, approved by the owner in the S7 decision
+# record. They extend existing production patterns only; the classifier
+# structure, rules A/B, verdict vocabulary, and all other entries are
+# verbatim production. A future production back-sync must preserve or
+# consciously retire them.
+# Generic dental anchor words for free-text "Other" reasons that do not match
+# a specific library service, e.g. "a dental issue not listed".
+# Generic dental EVIDENCE words ("jaw", "mouth", "oral", "tooth", "gum",
+# "dentist", "dental", ...). Evidence only — never automatic acceptance.
+# They count when they form a recognized symptom, a complete dental service,
+# a complete generic dental phrase, or are supported by another meaningful
+# dental term ("jaw pain" yes, "jaw dropping movie" no). A lone evidence
+# word ("dentist", "tooth") is intentionally incomplete: the classifier
+# rejects it and Mia asks the patient to describe the actual dental reason.
+DENTAL_REASON_EVIDENCE_TERMS = [
+    "tooth",
+    "teeth",
+    "molar",
+    "molars",
+    "gum",
+    "gums",
+    "gingival",
+    "jaw",
+    "tmj",
+    "mouth",
+    "oral",
+    "dental",
+    "dentist",
+    "dentists",
+    "denture",
+    "dentures",
+    "cavity",
+    "cavities",
+    "enamel",
+    "plaque",
+    "tartar",
+    "canker",
+    "tongue",
+]
+
+# Dental-only words and phrases with no ordinary non-dental meaning; these
+# provide a dental core signal on a complete whole-word / whole-phrase match
+# (full coverage of the remaining words still applies).
+DENTAL_REASON_AUTO_ACCEPT_TERMS = [
+    "root canal",
+    "night guard",
+    "mouth guard",
+    "mouthguard",
+    "check up",
+    "invisalign",
+    "toothache",
+    "gingivitis",
+    "periodontitis",
+    "bruxism",
+    "dental issue",
+    "dental issues",
+    "dental problem",
+    "dental problems",
+    "dental emergency",
+    "tooth problem",
+    "tooth problems",
+    "teeth problems",
+    "gum problem",
+    "gum problems",
+    "mouth sore",
+    "mouth sores",
+    "oral lesion",
+    "oral lesions",
+    "bad breath",
+    "halitosis",
+    "dry mouth",
+    "overbite",
+    "underbite",
+    "lockjaw",
+    "oral cancer screening",
+    "preventive care",
+    "preventative care",
+    # S7 deviation D1: preserve the locked S6 fixture and ordinary
+    # oral-symptom wording ("sore spot since my last visit"); pattern
+    # precedent: "mouth sore(s)". Coverage rule B still rejects
+    # "sore spot on my arm".
+    "sore spot",
+    "sore spots",
+    # S7 deviation D5: dental symptom wording ("metallic taste in my
+    # mouth"); coverage rule B still rejects "metallic taste in music"
+    # and "metallic paint". "bad taste" intentionally NOT added in S7.
+    "metallic taste",
+]
+
+# Phrases whose tokens become explainable ONLY when the complete phrase is
+# present — they never provide a dental core signal by themselves. This is
+# how "a dental issue not listed" keeps working after "not" stopped being
+# general request filler: "not listed" is handled specifically as part of
+# the approved generic dental phrase, without globally discarding negation.
+DENTAL_REASON_COVERAGE_ONLY_PHRASES = [
+    "not listed",
+]
+
+# Negation signals. Never request filler and never explainable vocabulary:
+# "not a root canal", "not cleaning", and "I do not need a cleaning" must
+# not be stored as appointment reasons.
+DENTAL_REASON_NEGATION_TOKENS = {
+    "not", "no", "dont", "don", "doesnt", "didnt", "wont", "cant",
+    "never", "without",
+}
+
+# Problem/complaint/dental-event words — semantic token groups with common
+# grammatical and inflection variants ("broke/broken", "fell/came/lost",
+# "pull/pulled/remove/removal/extraction", "grind/grinding",
+# "click/clicking", "inflamed/inflammation/swollen", "discoloration/
+# discolored", "adjust/adjustment"). They combine with dental anatomy or a
+# dental activity to form a complaint ("my tooth broke", "gum pain",
+# "jaw clicking"). Never sufficient on their own.
+DENTAL_REASON_PROBLEM_TERMS = {
+    "pain", "pains", "ache", "aches", "aching",
+    "hurt", "hurts", "hurting",
+    "sore", "sores", "soreness",
+    "bleeding", "bleeds", "bled",
+    "swelling", "swollen",
+    "inflamed", "inflammation",
+    "sensitive", "sensitivity",
+    "infection", "infected", "abscess", "abscessed",
+    "lesion", "lesions", "ulcer", "ulcers",
+    "broken", "broke", "break", "breaks",
+    "chipped", "cracked", "fractured",
+    "loose", "missing", "lost", "fell", "came",
+    "stuck",
+    "decay", "decayed", "cavity",
+    "receding", "recede", "receded", "recession",
+    "grinding", "grind", "grinds", "clenching", "clench",
+    "clicking", "click", "clicks", "popping", "pops",
+    "crooked", "crowded",
+    "discoloration", "discolored", "discoloured",
+    "stained", "stains", "stain", "yellow", "yellowing",
+    "killing",
+    "problem", "problems", "issue", "issues",
+    "emergency", "injury", "injured",
+    "repair", "repairs", "fix", "replacement", "replace",
+    "reline", "relined", "relines",
+    "adjustment", "adjustments", "adjust", "adjusted", "tighten", "tightened",
+    "pulled", "pull", "pulls",
+    "extract", "extracted", "removal", "remove", "removed",
+    "whiten", "whitened",
+    # S7 deviation D2: accept anatomy-supported wording ("gum irritation");
+    # pattern precedent: "inflamed"/"inflammation". Rules A/B still reject
+    # "knee irritation" and "skin irritation".
+    "irritation", "irritated",
+}
+
+# Dental activities: combine with a complaint word to form a dental reason
+# ("pain when chewing", "bleeding when I floss") and are explainable inside
+# one. Never dental signals on their own.
+DENTAL_REASON_ACTIVITY_TOKENS = {
+    "chewing", "chew", "chews", "chewed",
+    "biting", "bites",
+    "brushing", "brush", "brushed",
+    "flossing", "flossed",
+    "eating", "eat", "eats",
+    "drinking", "drink", "drinks",
+    "swallowing", "swallow",
+    "smiling", "smile",
+    "talking", "opening", "closing",
+}
+
+# Harmless connectors and treatment/complaint modifiers. Explainable inside
+# a dental reason ("root canal because my tooth hurts", "deep cleaning",
+# "severe jaw pain") but never dental signals on their own.
+DENTAL_REASON_MODIFIER_TOKENS = {
+    "and", "or", "but", "because", "since", "as", "so", "that", "this",
+    "it", "its", "there", "here", "when", "if", "then",
+    "really", "very", "quite", "pretty", "too", "also", "still", "again",
+    "just", "only", "even", "more", "most", "much", "lot",
+    "bad", "badly", "worse", "worst", "severe", "severely", "mild", "slight",
+    "slightly", "chronic", "constant", "sudden", "sharp", "dull",
+    "throbbing", "extreme", "terrible", "awful",
+    "upper", "lower", "front", "back", "left", "right", "top", "bottom",
+    "side", "inside",
+    "deep", "full", "partial", "complete", "whole", "entire",
+    "new", "old", "temporary", "permanent", "regular", "routine", "general",
+    "urgent", "urgently", "asap", "soon", "now", "today", "tomorrow",
+    "week", "days", "day", "night", "morning", "recently", "lately",
+    # S7 deviation D4: "last" as a harmless time modifier ("since my last
+    # visit"); pattern precedent: "recently"/"lately". Rule A still rejects
+    # "last minute meeting" (no dental core signal).
+    "last",
+    "started", "starting", "getting", "feels", "feel", "feeling",
+    "out", "off", "up", "down", "between", "under", "around", "near",
+    "while", "during", "every", "each", "at", "after", "before",
+    "food", "something",
+}
+
+# Single-word dental SERVICE terms that are ordinary English words in other
+# domains ("braces", "retainer", "veneer", "whitening", "implant", "bridge",
+# "cleaning", ...). Accepted only when the substantive reason is exactly the
+# service term after filler removal, when every substantive word is dental
+# vocabulary ("implant consultation"), or when an evidence word supplies
+# dental context ("braces for my teeth"). "knee braces", "legal retainer",
+# "wood veneer", "shoe whitening", and "hair implants" all fail these rules.
+DENTAL_REASON_SERVICE_SINGLE_TERMS = [
+    "bite",
+    "floss",
+    "wisdom",
+    "cleaning",
+    "cleanings",
+    "checkup",
+    "extraction",
+    "extractions",
+    "filling",
+    "fillings",
+    "crown",
+    "crowns",
+    "cap",
+    "caps",
+    "bridge",
+    "bridges",
+    "bonding",
+    "consultation",
+    "braces",
+    "retainer",
+    "retainers",
+    "veneer",
+    "veneers",
+    "whitening",
+    "implant",
+    "implants",
+    "aligner",
+    "aligners",
+    "sealant",
+    "sealants",
+    "fluoride",
+    "denture",
+    "dentures",
+    "exam",
+    "exams",
+    "screening",
+    "screenings",
+    "xray",
+    "xrays",
+]
+
+# Ordinary request filler stripped before deciding whether the substantive
+# reason is exactly one service term ("I need a cleaning" -> "cleaning").
+DENTAL_REASON_REQUEST_FILLER_TOKENS = {
+    "i", "im", "id", "we", "me", "my", "our", "you",
+    "need", "needs", "want", "wants", "would", "like",
+    "have", "has", "having", "got",
+    "a", "an", "the", "some", "any", "one",
+    "appointment", "appointments", "appt", "visit",
+    "for", "to", "in", "on", "of", "about", "with",
+    "looking", "get", "schedule", "scheduling",
+    # S7 deviation D3: booking-language variants, mirroring production's
+    # existing "schedule"/"scheduling" filler. Coverage rule B still
+    # rejects "book a hotel", "book club last week", "booking a flight".
+    "book", "booking", "booked",
+    "am", "is", "are", "was", "were",
+    "interested", "please", "hi", "hello", "thanks",
+    "listed",
+}
+
+def _text_contains_whole_term(normalized_tokens: List[str], term: str) -> bool:
+    """
+    Deterministic whole-word / whole-phrase containment.
+
+    Single-word terms must equal a complete normalized token ("gum" matches
+    "bleeding gums"-style token "gum" but never "gummy"). Multiword terms
+    ("root canal", "night guard", "check up") must appear as a complete
+    consecutive token phrase. No raw substring matching.
+    """
+    term_tokens = _norm_text(term).split()
+    if not term_tokens:
+        return False
+
+    if len(term_tokens) == 1:
+        return term_tokens[0] in normalized_tokens
+
+    span = len(term_tokens)
+    for start in range(len(normalized_tokens) - span + 1):
+        if normalized_tokens[start:start + span] == term_tokens:
+            return True
+    return False
+
+
+def _substantive_reason_tokens(normalized_tokens: List[str]) -> List[str]:
+    """Drop ordinary request filler so 'I need a cleaning' reduces to
+    ['cleaning'] — the patient's substantive reason."""
+    return [
+        token
+        for token in normalized_tokens
+        if token not in DENTAL_REASON_REQUEST_FILLER_TOKENS
+    ]
+
+
+def _has_dental_evidence_term(normalized_tokens: List[str]) -> bool:
+    return any(
+        _text_contains_whole_term(normalized_tokens, term)
+        for term in DENTAL_REASON_EVIDENCE_TERMS
+    )
+
+
+def _has_dental_problem_term(normalized_tokens: List[str]) -> bool:
+    return any(token in DENTAL_REASON_PROBLEM_TERMS for token in normalized_tokens)
+
+
+# Canonical forms for equivalent dental event tokens, used ONLY inside the
+# Other-reason validator to match service aliases against the patient's
+# substantive words ("I need a tooth pulled" ~ alias "tooth removal").
+DENTAL_REASON_TOKEN_CANON = {
+    "pull": "extraction", "pulled": "extraction", "pulls": "extraction",
+    "extract": "extraction", "extracted": "extraction",
+    "extractions": "extraction", "extraction": "extraction",
+    "remove": "extraction", "removed": "extraction", "removal": "extraction",
+    "broke": "broken", "break": "broken", "breaks": "broken",
+    "fractured": "broken", "cracked": "broken",
+    "fell": "lost", "came": "lost", "lose": "lost", "losing": "lost",
+    "grind": "grinding", "grinds": "grinding", "ground": "grinding",
+    "click": "clicking", "clicks": "clicking",
+    "pop": "clicking", "popping": "clicking", "pops": "clicking",
+    "inflamed": "swelling", "inflammation": "swelling", "swollen": "swelling",
+    "discolored": "discoloration", "discoloured": "discoloration",
+    "adjust": "adjustment", "adjusted": "adjustment",
+    "adjustments": "adjustment",
+    "tooth": "tooth", "teeth": "tooth",
+    "whiten": "whitening", "whitened": "whitening",
+    "cleanings": "cleaning",
+    "denture": "denture", "dentures": "denture",
+}
+
+
+def _canonical_token(token: str) -> str:
+    return DENTAL_REASON_TOKEN_CANON.get(token, token)
+
+
+def _substantive_library_alias_matches(
+    substantive_tokens: List[str],
+    enabled_service_keys: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Match master-library service aliases against the SUBSTANTIVE normalized
+    patient tokens (request filler already removed), tolerating filler
+    inserted inside the alias, common inflection variants, and word-order
+    variation for short aliases:
+
+      "grinding my teeth"     ~ alias "teeth grinding"
+      "remove a tooth"        ~ alias "remove tooth" / "tooth removal"
+      "I need a tooth pulled" ~ alias "tooth removal"
+
+    An alias of up to three canonical tokens matches when its canonical
+    token bag is contained in the substantive canonical token bag. Admin/
+    office services never match. This is not raw substring matching: every
+    alias token must be present as a complete patient word (canonicalized),
+    and full coverage of the remaining substantive words still applies in
+    the caller. Returns the matched patient tokens (which the caller marks
+    as explained).
+    """
+    canon_substantive = [_canonical_token(token) for token in substantive_tokens]
+    canon_counts: dict = {}
+    for token in canon_substantive:
+        canon_counts[token] = canon_counts.get(token, 0) + 1
+
+    explained_patient_tokens: List[str] = []
+    for service in MASTER_DENTAL_SERVICES.values():
+        if getattr(service, "category", "") == "admin_other":
+            continue
+
+        for term in [service.display_name] + list(service.aliases):
+            term_tokens = [
+                _canonical_token(token) for token in _norm_text(term).split()
+            ]
+            term_tokens = [
+                token
+                for token in term_tokens
+                if token not in DENTAL_REASON_REQUEST_FILLER_TOKENS
+            ]
+            if not term_tokens or len(term_tokens) > 3:
+                continue
+
+            needed: dict = {}
+            for token in term_tokens:
+                needed[token] = needed.get(token, 0) + 1
+
+            if all(canon_counts.get(tok, 0) >= n for tok, n in needed.items()):
+                needed_canon = set(needed)
+                for patient_token, canon in zip(substantive_tokens, canon_substantive):
+                    if canon in needed_canon:
+                        explained_patient_tokens.append(patient_token)
+
+    return explained_patient_tokens
+
+
+def _library_whole_term_supports(user_text: str, service) -> tuple[list, list]:
+    """
+    Complete whole-word / whole-phrase service terms that actually appear in
+    the message for a library match. Substring-only support (alias 'cap'
+    inside 'capital') never counts. Returns (multiword_terms, single_words).
+    """
+    normalized_tokens = _norm_text(user_text).split()
+    all_terms = [getattr(service, "display_name", "")] + list(
+        getattr(service, "aliases", []) or []
+    )
+
+    multiword: List[str] = []
+    singles: List[str] = []
+    for term in all_terms:
+        normalized_term = _norm_text(term)
+        if not normalized_term:
+            continue
+        if _text_contains_whole_term(normalized_tokens, normalized_term):
+            if len(normalized_term.split()) > 1:
+                multiword.append(normalized_term)
+            else:
+                singles.append(normalized_term)
+    return multiword, singles
+
+
+def classify_other_reason_detail(
+    user_text: str,
+    enabled_service_keys: Optional[List[str]] = None,
+) -> str:
+    """
+    Deterministic, fail-closed classification of the free-text reason typed
+    after the patient selects "Other". Returns:
+
+      "dental"     — store the reason and advance intake.
+      "unclear"    — negated or ambiguous dental wording ("not a root
+                     canal", "I do not need a cleaning"): keep the Other
+                     step pending with a neutral clarification instead of
+                     the "only dental care" wording.
+      "non_dental" — clearly unrelated: keep the Other step pending with
+                     the existing non-dental wording.
+
+    Acceptance requires BOTH:
+
+      A) a dental core signal —
+         - a recognized dental symptom ("jaw pain", "bleeding gums"),
+         - a complete dental-only term or approved generic dental phrase
+           ("root canal", "overbite", "dry mouth", "dental issue"),
+         - a complete library service phrase, single-word service term, or a
+           library alias matched against the SUBSTANTIVE tokens with
+           inflection variants and short-alias word-order tolerance
+           ("grinding my teeth" ~ "teeth grinding", "I need a tooth pulled"
+           ~ "tooth removal"),
+         - dental anatomy/evidence combined with a complaint/event word
+           ("my tooth broke", "gum pain", "jaw clicking"), or
+         - a complaint word combined with a dental activity
+           ("pain when chewing", "bleeding when I floss"); AND
+
+      B) full coverage — every substantive word (after removing ordinary
+         request filler) must be explainable as part of the dental reason:
+         dental anatomy/evidence, complaint/event word, service term,
+         matched service-phrase or alias word, dental activity, treatment
+         modifier, or harmless connector. "root canal documentary",
+         "denture repair shop", and "dental braces for my knee" fail here.
+
+    Negation is never request filler: "not", "don't", "no", etc. are
+    unexplainable, so "not a root canal" and "I do not need a cleaning" are
+    never stored — they classify as "unclear" (negated dental wording).
+    "a dental issue not listed" stays accepted because "not listed" is
+    handled specifically as part of the approved generic dental phrase via
+    DENTAL_REASON_COVERAGE_ONLY_PHRASES, not by discarding negation.
+
+    There is no blacklist or whitelist of complete sentences anywhere;
+    rejection is always failure of rule A or B.
+    """
+    t = (user_text or "").strip()
+    if not looks_like_safe_reason_detail(t):
+        return "non_dental"
+
+    normalized_tokens = _norm_text(t).split()
+    if not normalized_tokens:
+        return "non_dental"
+
+    substantive = _substantive_reason_tokens(normalized_tokens)
+    if not substantive:
+        return "non_dental"
+
+    # ---- Gather dental signals present as complete whole terms ----
+    present_auto_terms = [
+        term
+        for term in DENTAL_REASON_AUTO_ACCEPT_TERMS
+        if _text_contains_whole_term(normalized_tokens, term)
+    ]
+    present_coverage_only_terms = [
+        term
+        for term in DENTAL_REASON_COVERAGE_ONLY_PHRASES
+        if _text_contains_whole_term(normalized_tokens, term)
+    ]
+
+    # Master library (admin/office topics excluded inside
+    # detect_library_dental_service). Complete whole-word / whole-phrase
+    # support against the original wording:
+    matched_service = detect_library_dental_service(
+        t, enabled_service_keys=enabled_service_keys
+    )
+    if not matched_service and enabled_service_keys:
+        # A library match without the office restriction still proves the
+        # text is dental — the office may simply not offer it.
+        matched_service = detect_library_dental_service(t)
+
+    library_multiword_supports: List[str] = []
+    library_single_supports: set = set()
+    if matched_service:
+        lib_multiword, lib_singles = _library_whole_term_supports(t, matched_service)
+        library_multiword_supports = lib_multiword
+        library_single_supports = set(lib_singles)
+
+    # Library aliases matched against the SUBSTANTIVE tokens (filler removed
+    # inside the alias, inflection variants, short-alias word order).
+    alias_explained_tokens = _substantive_library_alias_matches(
+        substantive, enabled_service_keys
+    )
+
+    service_single_terms = (
+        set(DENTAL_REASON_SERVICE_SINGLE_TERMS) | library_single_supports
+    )
+    has_service_single = any(token in service_single_terms for token in substantive)
+    has_service_phrase = bool(present_auto_terms) or bool(
+        library_multiword_supports
+    ) or bool(alias_explained_tokens)
+
+    has_evidence = _has_dental_evidence_term(normalized_tokens)
+    has_problem = _has_dental_problem_term(normalized_tokens)
+    has_activity = any(
+        token in DENTAL_REASON_ACTIVITY_TOKENS for token in normalized_tokens
+    )
+    has_symptom = looks_like_dental_symptom_request(t)
+
+    has_negation = any(
+        token in DENTAL_REASON_NEGATION_TOKENS for token in substantive
+    )
+    negation_explained = set()
+    for term in present_coverage_only_terms:
+        negation_explained.update(term.split())
+    has_unexplained_negation = any(
+        token in DENTAL_REASON_NEGATION_TOKENS and token not in negation_explained
+        for token in substantive
+    )
+
+    # ---- A) dental core signal ----
+    has_core_dental_signal = (
+        has_service_phrase
+        or has_service_single
+        or has_symptom
+        or (has_problem and (has_evidence or has_activity))
+    )
+    if not has_core_dental_signal:
+        return "non_dental"
+
+    # Negated dental wording ("not a root canal", "not cleaning",
+    # "I do not need a cleaning") is never stored; ask a neutral
+    # clarification instead of the "only dental care" wording.
+    if has_unexplained_negation:
+        return "unclear"
+
+    # ---- B) full coverage: every substantive word must be explainable ----
+    explained_vocab = (
+        set(DENTAL_REASON_EVIDENCE_TERMS)
+        | DENTAL_REASON_PROBLEM_TERMS
+        | service_single_terms
+        | DENTAL_REASON_MODIFIER_TOKENS
+        | DENTAL_REASON_ACTIVITY_TOKENS
+        | set(alias_explained_tokens)
+    )
+    for term in present_auto_terms:
+        explained_vocab.update(term.split())
+    for term in library_multiword_supports:
+        explained_vocab.update(term.split())
+    for term in present_coverage_only_terms:
+        explained_vocab.update(term.split())
+
+    if all(token in explained_vocab for token in substantive):
+        return "dental"
+
+    return "non_dental"
+
 
 def get_other_reason_detail(conversation: Conversation) -> str:
     """
@@ -6668,6 +7272,32 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 conversation_id=str(conversation.id),
                 meta={
                     "mode": "unsafe_other_reason_detail",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
+        # Dental relevance gate: the free-text "Other" reason must describe a
+        # dental need before intake advances. Nothing is saved on rejection
+        # and the Other step stays pending. Negated/ambiguous dental wording
+        # gets a neutral clarification; clearly unrelated text keeps the
+        # existing non-dental wording.
+        reason_verdict = classify_other_reason_detail(user_text, enabled_service_keys)
+        if reason_verdict != "dental":
+            if reason_verdict == "unclear":
+                reply_text = build_unclear_dental_reason_reply()
+                reply_mode = "unclear_other_reason_detail"
+            else:
+                reply_text = build_non_dental_reason_detail_reply()
+                reply_mode = "non_dental_other_reason_detail"
+
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": reply_mode,
                     "faq_match": False,
                     "show_start_over": show_start_over,
                 },
