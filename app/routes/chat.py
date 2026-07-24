@@ -3459,6 +3459,79 @@ def finalize_and_notify_if_ready(
     )
 
 
+def apply_notification_outcome_to_completion_reply(
+    reply_text: Optional[str],
+    email_sent: bool,
+    sms_sent: bool,
+) -> Optional[str]:
+    """
+    Keep completion wording honest based on the notification helper's real
+    per-channel success values.
+
+    - If at least one configured channel succeeded (email or SMS), the
+      existing "sent to the office / team will call you back" wording is
+      accurate and is left unchanged.
+    - If no channel succeeded (e.g. notification_email and notification_phone
+      are both NULL, or both sends failed), the reply is rewritten to say the
+      information was "saved for the office" and must not promise a callback.
+
+    This only rewrites Mia's own deterministic completion sentences; it does
+    not touch provider configuration or notification formatting.
+    """
+    if email_sent or sms_sent:
+        return reply_text
+
+    if not reply_text:
+        return reply_text
+
+    saved_wording_replacements = [
+        # "sent" claims -> "saved" claims
+        (
+            "I’ll mark this as urgent for the team.",
+            "I’ve saved this urgent request for the office.",
+        ),
+        (
+            "I’ll send this same-day appointment request to the team.",
+            "I’ve saved this same-day appointment request for the office.",
+        ),
+        (
+            "I’ll send this priority appointment request to the team.",
+            "I’ve saved this priority appointment request for the office.",
+        ),
+        (
+            "I’ve sent this to the team.",
+            "I’ve saved this for the office.",
+        ),
+        (
+            "I’ll send this to the team.",
+            "I’ve saved this for the office.",
+        ),
+        # callback promises -> no promised callback
+        (
+            "The office team will call you back shortly.",
+            "The office will see it when they review new requests. If you need help sooner, please call the office directly.",
+        ),
+        (
+            "The office will contact you shortly to help with the next available appointment.",
+            "The office will see it when they review new requests. If you need help sooner, please call the office directly.",
+        ),
+        (
+            "We’ve got your request—our team will contact you shortly to confirm the appointment time.",
+            "Your appointment-request information has been saved for the office.",
+        ),
+        (
+            "The office will contact you shortly to confirm the appointment time.",
+            "Your appointment-request information has been saved for the office.",
+        ),
+    ]
+
+    honest_reply = reply_text
+    for sent_phrase, saved_phrase in saved_wording_replacements:
+        honest_reply = honest_reply.replace(sent_phrase, saved_phrase)
+
+    return honest_reply
+
+
 def mark_completed_and_notify_office(
     db: Session,
     client: Client,
@@ -4731,7 +4804,20 @@ def build_normal_lead_complete_reply(conversation: Conversation) -> str:
     )
 
 
-def build_conversation_ending_reply(conversation: Conversation) -> str:
+def build_conversation_ending_reply(
+    conversation: Conversation,
+    office_notified: Optional[bool] = None,
+) -> str:
+    """
+    office_notified reflects the real per-channel outcome of the single
+    finalize_and_notify_if_ready() call at the ending guard:
+      - True  -> at least one channel (email or SMS) has succeeded, so the
+                 existing follow-up wording is accurate.
+      - False -> no channel succeeded (e.g. none configured), so Mia must not
+                 promise a follow-up and says the info was saved instead.
+      - None  -> outcome unknown (legacy/default), keep original wording.
+    Emergency-specific wording is always preserved.
+    """
     is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
     is_priority = bool(getattr(conversation, "lead_is_priority", False))
     has_symptom_reason = conversation_has_symptom_or_safety_reason(conversation)
@@ -4740,6 +4826,11 @@ def build_conversation_ending_reply(conversation: Conversation) -> str:
         return "You’re welcome. If anything gets worse, please call the office right away."
 
     if is_priority:
+        if office_notified is False:
+            return (
+                "You’re welcome. Your information has been saved for the office. "
+                "If you need help sooner, please call the office directly."
+            )
         return "You’re welcome. The office team will follow up shortly."
 
     return "You’re welcome. Please contact the office if you need anything else."
@@ -6612,12 +6703,19 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 except Exception as rollback_error:
                     print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
 
-        reply_text = build_conversation_ending_reply(conversation)
-
+        # Single safety-net call FIRST (duplicate-safe via the persisted
+        # lead_email_sent / lead_sms_sent flags), then the ending wording is
+        # built from that call's real per-channel values — never a second
+        # notification call just to read status.
         lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = finalize_and_notify_if_ready(
             db,
             client,
             conversation,
+        )
+
+        reply_text = build_conversation_ending_reply(
+            conversation,
+            office_notified=bool(lead_email_sent or lead_sms_sent),
         )
 
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
@@ -6742,6 +6840,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     routed = route_completed_lead(db, client, conversation, user_text, office_phone)
                     if routed is not None:
                         return _routed_completion_response(db, conversation, routed, show_start_over)
+
+                    # S5: wording reflects THIS turn's real per-channel
+                    # results; no second notification call.
+                    reply_text = apply_notification_outcome_to_completion_reply(
+                        reply_text,
+                        lead_email_sent,
+                        lead_sms_sent,
+                    )
 
             db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
             db.commit()
@@ -8078,6 +8184,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         reply_text = build_normal_lead_complete_reply(conversation)
 
+        # S5: wording reflects THIS turn's real per-channel results —
+        # the values already returned above; no second notification call.
+        reply_text = apply_notification_outcome_to_completion_reply(
+            reply_text,
+            lead_email_sent,
+            lead_sms_sent,
+        )
+
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
 
@@ -8146,6 +8260,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             routed = route_completed_lead(db, client, conversation, user_text, office_phone)
             if routed is not None:
                 return _routed_completion_response(db, conversation, routed, show_start_over)
+
+            # S5: wording reflects THIS turn's real per-channel results —
+            # the values already returned above; no second notification call.
+            combined_reply = apply_notification_outcome_to_completion_reply(
+                combined_reply,
+                lead_email_sent,
+                lead_sms_sent,
+            )
         else:
             lead_email_sent = bool(getattr(conversation, "lead_email_sent", False))
             lead_sms_sent = bool(getattr(conversation, "lead_sms_sent", False))
@@ -8461,6 +8583,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         name_part = f" {name}" if name else ""
 
         reply_text = f"Thanks{name_part}! We’ve got your request—our team will contact you shortly to confirm the appointment time."
+        # S5: wording reflects THIS turn's real per-channel results —
+        # the values already returned above; no second notification call.
+        reply_text = apply_notification_outcome_to_completion_reply(
+            reply_text,
+            lead_email_sent,
+            lead_sms_sent,
+        )
         db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
         db.commit()
 
@@ -8544,6 +8673,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 routed = route_completed_lead(db, client, conversation, user_text, office_phone)
                 if routed is not None:
                     return _routed_completion_response(db, conversation, routed, show_start_over)
+
+                # S5: wording reflects THIS turn's real per-channel results —
+                # the values already returned above; no second notification call.
+                bypass_text = apply_notification_outcome_to_completion_reply(
+                    bypass_text,
+                    lead_email_sent,
+                    lead_sms_sent,
+                )
             db.add(Message(conversation_id=conversation.id, role="assistant", content=bypass_text))
             db.commit()
 
