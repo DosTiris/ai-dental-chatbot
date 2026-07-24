@@ -3746,3 +3746,139 @@ file backup.
 ### CHECKPOINT (Rule 18)
 S6 CLOSED 2026-07-24 at commit c9076ba with owner-observed 325/325.
 Awaiting explicit approval and scope before any S7 work begins.
+
+## PATCH S7 CLOSURE — Balanced "Other" Reason Validation Synchronization
+## (Synchronization program — S7 closure only; Rule 13/18/19)
+
+### Status
+CLOSED. Locally verified and committed by the project owner.
+
+Workspace: backend-calendar-patch9a-staging-prep
+Branch:    staging-patch9a
+Commit:    9e1b720  Synchronize Other-reason validation behavior (S7)
+Working tree after commit: clean.
+
+### Owner-observed verification (2026-07-24)
+Focused file (calendar_tests/test_other_reason_validation.py):
+  64 collected, 64 passed, 0 failed.
+Full calendar suite: 389 collected, 389 passed, 0 failed.
+
+Final file hashes:
+  app/routes/chat.py
+    5943442E947A797D80B3AF6CEF4854BAEE200BAD43FD584C54DED63690E4CCA5
+  static/chat.html (UNCHANGED throughout S7)
+    DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+
+### Behavior synchronized
+- The primary Other free-text validation path is synchronized: the
+  production classifier architecture (classify_other_reason_detail with
+  verdicts dental / unclear / non_dental, its vocabulary constants and
+  helpers, and the two production rejection reply builders) was backported
+  into the calendar branch, and the production dental-relevance gate now
+  runs at the main Other-capture call site in the production order:
+  input-safety validation, then classification, then rejection or
+  clarification without persistence, then persistence and intake
+  advancement only after a dental verdict.
+- D1–D5 are deliberate, owner-approved calendar vocabulary deviations from
+  the production classifier, commented at each constant:
+  D1 "sore spot" / "sore spots" (auto-accept),
+  D2 "irritation" / "irritated" (problem terms),
+  D3 "book" / "booking" / "booked" (request filler),
+  D4 "last" (modifier),
+  D5 "metallic taste" (auto-accept; "bad taste" deliberately excluded).
+  Guardrails are pinned by test: "sore spot on my arm", "knee irritation",
+  "skin irritation", "book a hotel", "book club last week",
+  "booking a flight", "last minute meeting", "metallic taste in music",
+  and "metallic paint" all remain non_dental.
+- Valid dental Other details persist through lead_reason_source_text (the
+  existing persistence owner); get_other_reason_detail() remains the sole
+  derived-detail owner. Verified non-library details derive back as the
+  exact submitted text; details that map to a specific legacy reason enum
+  ("gum pain appointment", "my tooth hurts and I want to book a visit" →
+  "tooth pain") follow the pre-existing owner contract (specific
+  lead_reason carries the reason; derived detail is empty), which S7 pins
+  by test and does not alter.
+- Invalid non-dental details receive the exact production retry behavior
+  ("I can only help with dental care…", mode
+  non_dental_other_reason_detail) with nothing persisted and no intake
+  advance.
+- Unclear/negated dental wording ("not a root canal", "I do not need a
+  cleaning") receives the exact production neutral clarification (mode
+  unclear_other_reason_detail) with nothing persisted.
+- Rejected replies keep the Other step pending: the production
+  pending-phrase list was backported into
+  last_assistant_asked_for_other_reason(), and a valid reply immediately
+  after any rejection is captured normally (proven in real chat() flow).
+- Unsafe input remains owned by the pre-existing unsafe-input guard
+  (looks_like_safe_reason_detail / build_unsafe_reason_detail_reply),
+  byte-untouched, and remains retryable.
+- Root Canal, Dentures, and Cleaning remain on their existing
+  recognized-service routes and are never forced through the Other
+  validator: Root Canal and Dentures via the S6 enrichment route, Cleaning
+  via its existing reason-replacement route (lead_reason
+  "cleaning/checkup"; a non-empty stored source is left untouched by that
+  route's own rule).
+- Meaningful details containing "appointment", "schedule", "book", or
+  "last visit" remain accepted when dental context is present, including
+  the locked S6 fixture "sore spot since my last visit".
+- Existing meaningful source text is not overwritten, and the derived
+  detail for a protected seeded source is proven intact
+  (get_other_reason_detail() returns the seeded text).
+
+### Scope discipline confirmed
+- No lead_reason_detail field, model, migration, second parser, second
+  persistence field, AI/semantic classifier, or fallback acceptance layer
+  was added; rejection is always failure of the classifier's rule A or B.
+- looks_like_dental_reason_detail() was NOT backported: its only
+  production consumer is the receptionist-bypass site, whose drift
+  (production gates that path with the classifier wrapper and non-dental
+  wording; the calendar keeps its enum-mapping behavior, which never
+  persists unmapped text) was deliberately deferred to S9 or a separately
+  approved patch and was not modified in S7.
+- S1 quick replies, S2 Maps, S3 ASAP completion, S4 persistent
+  life-threatening closure, S5 honest notification wording, and S6
+  enrichment / single generic-wording owner / no-overwrite protection
+  remain preserved through the owner-observed 389/389 full suite.
+- static/chat.html was unchanged (hash above).
+- Supabase, database models, migrations, Patch 9A notification ledger,
+  deferred Patch 9B, calendar_tests/test_booking_db.py, S8, and S9 were
+  untouched.
+- No push and no deployment occurred.
+- CHANGE_REPORT.md was not modified during S7 implementation or verification;
+  this S7 closure is being appended separately after the S7 code commit.
+
+### Revision history (honest record)
+- Reconnaissance stop: executing the verbatim production classifier proved
+  it rejects the locked S6 fixture and other legitimate wording,
+  contradicting the S7 spec's own requirements; work stopped for an owner
+  decision, which approved the production architecture with the D1–D5
+  deviations and deferred the receptionist-bypass drift.
+- Revision 1: application patch structurally accepted (four anchored
+  edits; byte-fidelity audit against production; 40-case pinned direct
+  classifier matrix executed). Tests rejected for correction: they did not
+  positively prove the intended non-library fixtures (a conditional
+  assertion could silently skip), omitted the Cleaning real-flow route,
+  and — surfaced by executing the real derived-detail owner chain during
+  the correction — asserted a non-empty derived detail for two fixtures
+  that map to the "tooth pain" enum, which would have failed owner-side.
+- Revision 2: corrected only the focused tests. Non-library fixtures are
+  now positively proven non-library inside the tests with exact
+  source-and-derived-text assertions; the existing enum-derived detail
+  contract is pinned rather than assumed; Cleaning real-flow coverage was
+  added; the no-overwrite proof was strengthened with the derived-detail
+  assertion. Revision 2 passed 64/64 focused and 389/389 full, then was
+  committed as 9e1b720.
+
+### Rollback point
+Commit 9e1b720 is the S7 checkpoint. Prior checkpoint: b5ce521 (S6
+documentation closure; code checkpoint c9076ba), chat.py
+F2F5CD535084788188C245817B7F956E0B5700E1C240E7358ACC201E201586D5; the S7
+review package additionally contains the timestamped b5ce521-baseline file
+backup.
+
+### CHECKPOINT (Rule 18)
+S7 CLOSED 2026-07-24 at commit 9e1b720 with owner-observed 64/64 focused
+and 389/389 full. S8 (FAQ resume reconciliation) and S9 (hybrid capture /
+post-handoff synchronization, including the deferred receptionist-bypass
+drift) have NOT started. Awaiting explicit approval and scope before any
+S8 work begins.
