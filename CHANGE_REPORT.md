@@ -4239,3 +4239,348 @@ begins.
   Patch 9B remains deferred.
 - This closure records S9 only; the production/calendar synchronization
   program is not claimed complete by this record.
+
+# ============================================================================
+# S10 — EMERGENCY CONTINUATION AND IMMEDIATE INPUT LOCK — CLOSED
+# Appended after owner-side local verification, staging deployment, manual
+# staging verification, and the separate S10 code commit. Append-only per
+# Rule 13: no prior section of this file was modified.
+# ============================================================================
+
+## Status
+- S10 emergency staging repair is CLOSED.
+- Verified locally and committed by the project owner as:
+  c8e4f98 Fix emergency continuation and immediate input lock (S10)
+- Pushed to origin/staging-patch9a and auto-deployed by Render to
+  ai-dental-chatbot-staging at commit c8e4f98 on 2026-07-26.
+- Owner-performed manual staging verification passed for symptom
+  continuation, immediate life-threatening input lock, Start Over recovery,
+  and ordinary dental-emergency continuation.
+- The exposed staging client key was rotated after verification. No key value
+  is recorded in this report.
+- Workspace: C:\Users\kalva\Desktop\ai-dental-chatbot\backend-calendar-patch9a-staging-prep
+- Branch: staging-patch9a
+- Verified pre-S10 checkpoint: aae27fa Document S9 synchronization closure
+- Focused S10 verification: 19 collected / 19 passed / 0 failed (3.32s).
+- Existing emergency regression suites: 71 passed (7.10s).
+- Full hybrid suite: 73 passed (5.45s).
+- FAQ resume-once suite: 30 passed (4.40s).
+- Full calendar verification: 511 collected / 511 passed / 0 failed (25.30s).
+- Existing baseline before S10: 492. New S10 tests: 19. Final total: 511.
+
+## Verification provenance (Rule 19)
+- Every pytest result recorded in this closure was observed by the project
+  owner on the owner's Windows environment against a disposable
+  PostgreSQL 16 container. None of it was executed by Claude.
+- Claude executed only the following at authoring and packaging time, in a
+  container with no database: py_compile of the modified source and of both
+  new test files, parametrize-aware AST test counting, anchor
+  occurrence-count assertions, CRLF/BOM inspection, and SHA-256 hashing.
+- Claude's pre-verification test count was a static AST derivation of 511
+  (492 + 19). The owner's observed collection count of 511 matched that
+  derivation. The derivation was not adjusted to reach the observed number,
+  and the observed number was not adjusted to reach the derivation.
+- No test result in this closure was produced, estimated, or reconstructed
+  by Claude.
+- Manual staging observations were performed by the project owner against the
+  deployed Render staging service at commit c8e4f98. Claude did not perform
+  browser staging verification.
+
+## Final hashes (SHA-256)
+- app/routes/chat.py before S10
+  F608467E0EB59F016A49060EA24212A7F8B8500DD3D4AE052E94D6F293F37AE4
+- app/routes/chat.py after S10 (owner-verified)
+  68C2BC6F91D97E25232DB6CAADED4C39199293DD6E4A0935F2CA43B3D7FE437D
+- static/chat.html (unchanged throughout S10, owner-verified)
+  DE8C358E994E1C56D1D1D7885CA23CBF08507A5D39F8A8EF07AB48A5CFF69144
+- calendar_tests/test_symptom_name_continuation.py
+  F3E46FBACD28858A937C851D38765886392B1F6CEC58C48BD6B457A22117B5DC
+- calendar_tests/test_life_threatening_input_lock.py
+  1A9902893BB9D49A85CCF1FF81D5D1B843A7D4C59B8497E89FF0CCCC82FFE2DF
+- The two new test-file hashes were computed by Claude at packaging time.
+  The chat.py and static/chat.html hashes were confirmed by the owner after
+  installation and commit.
+
+## Defect 1 — ordinary dental symptom continuation
+
+### Observed staging defect
+- "I have severe tooth pain and swelling" produced the symptom safety
+  guidance and a first-name question.
+- "Kyle" was answered with "Just to confirm, would you like to schedule an
+  appointment for swelling / possible infection?" and the typed name was
+  discarded without ever being persisted.
+- "yes" then re-emitted the symptom safety guidance and asked for the first
+  name a second time.
+
+### Root cause (reconnaissance record)
+- The staging "emergency guidance" was NOT emergency-owner output. It is the
+  safety paragraph inside build_symptom_appointment_start_reply(), emitted by
+  the existing bypass/intake owner. The lead was classified priority, not
+  emergency (lead_is_priority true, lead_is_emergency false).
+- last_assistant_offered_scheduling_service() matches any service alias
+  appearing anywhere in the previous assistant response. The symptom reply
+  contains "swelling" inside its safety sentence, so the reply that asked for
+  the patient's name was misread as a scheduling offer.
+- The service-offer clarification owner runs before the name-capture owner,
+  claimed the message, and returned without persisting anything. The name was
+  never stored, so the bypass owner correctly re-emitted the symptom
+  introduction on the following turn.
+- Classification: owner-ordering plus state-mutation omission. It was not
+  repeated emergency detection, and receptionist_bypass_reply() was not the
+  defect owner.
+
+### Repair applied (Option A — owner ordering)
+- One condition was added to the single service-offer clarification branch so
+  that it cannot claim a message when last_assistant_asked_for_name() is
+  true. The message then reaches the existing name-capture owner.
+- No new state, no new field, no new predicate. Nothing is persisted inside
+  the clarification branch.
+- last_assistant_offered_scheduling_service() was NOT modified.
+
+### Verified behavior after S10 (owner-observed locally and on deployed staging)
+1. "I have severe tooth pain and swelling" asks for the first name.
+2. "Kyle" preserves Kyle and proceeds directly to the phone-number question.
+3. The spurious service-offer clarification turn no longer claims a response
+   to a pending first-name question.
+4. The symptom safety introduction is emitted exactly once and is not
+   repeated.
+5. Priority classification (lead_is_priority) and the original reason source
+   text (lead_reason_source_text) remain preserved across the name turn.
+6. A genuine service offer — one that names a service and contains no name
+   question — still produces the clarification turn unchanged.
+7. Ordinary emergency name capture also advances correctly rather than
+   producing a clarification.
+
+### Approved scope revision
+- The approved flow is: symptom -> name -> phone.
+- This intentionally supersedes the earlier STAGING_FINDINGS.md wording that
+  expected symptom -> name -> yes confirmation -> phone. The intermediate
+  confirmation turn was spurious and was removed by decision, not by
+  accident.
+
+### Behavior change to an existing weakly-pinned flow (honest record)
+- test_ordinary_dental_emergency_stays_open_with_contact_prompt (S4) sends a
+  name on its second turn. Before S10 that turn returned mode
+  service_offer_clarification; after S10 it returns
+  emergency_followup_intake. The test asserts only that the mode is not
+  final_closed, so it remained green, but the underlying owner changed.
+- This was identified before implementation, stated in the implementation
+  handoff rather than allowed to pass silently, and is now pinned explicitly
+  by test_ordinary_emergency_name_capture_advances.
+
+## Defect 2 — life-threatening immediate input lock
+
+### Observed staging defect
+- "I can't breathe and my face is swelling rapidly" produced the correct 911
+  response and persisted conversation.final_closed, but the widget text input
+  remained usable for one additional message.
+
+### Root cause (reconnaissance record)
+- S4 backported the final_closed persistence from production but not the
+  disable_input half of the same production change. Production already
+  carried the contract at all three life-threatening response paths;
+  calendar did not.
+- Comparison of the three complete response blocks showed the ONLY difference
+  from production was that single missing line in each block.
+
+### Repair applied (exact production backport)
+- All three life-threatening response owners now emit
+  disable_input=True only when life_threatening_stop is true:
+
+    **({"disable_input": True} if life_threatening_stop else {}),
+
+  applied to:
+  - dangerous_dental_self_treatment_guard
+  - urgent_dental_safety_guard
+  - emergency_booking_mode
+- The three response blocks are now byte-identical to production.
+- The conditional is what keeps ordinary dental emergencies open;
+  emergency_booking_mode is also the ordinary-emergency return path.
+
+### Verified behavior after S10 (owner-observed locally and on deployed staging)
+1. The initial life-threatening response carries disable_input=True.
+2. All three life-threatening response owners carry disable_input=True.
+3. The existing widget contract immediately disables the text input and the
+   Send button on that first response, and sets the placeholder to
+   "Please call the office directly."
+4. No static/chat.html application-code change was required. The widget's
+   single existing disable-input owner already consumed meta.disable_input;
+   only the backend needed to emit it.
+5. Ordinary dental emergencies do not carry disable_input, remain open, and
+   continue contact intake with the first-name question.
+6. final_closed persistence is unchanged; a later message on a closed
+   conversation still returns mode final_closed with no lead mutation and no
+   notification.
+7. show_start_over remains true on both the locking response and the later
+   blocked response, and startOver() still re-enables the input and Send
+   button and restores the normal placeholder.
+
+## Preserved behavior (confirmed)
+- Emergency trigger constants and predicates unchanged: EMERGENCY_TRIGGERS,
+  LIFE_THREATENING_TRIGGERS, looks_like_emergency(),
+  looks_like_life_threatening_emergency(),
+  looks_like_urgent_dental_safety_issue(),
+  looks_like_dangerous_dental_instruction().
+- receptionist_bypass_reply(), build_symptom_appointment_start_reply(),
+  _next_emergency_prompt(), and _emergency_meta() unchanged.
+- The shared top-level final_closed guard unchanged and still identical to
+  production; post_completion_polite behavior preserved.
+- Calendar booking, appointment slots, holds, confirmations, and
+  cancellations unchanged.
+- Hybrid, direct, and capture-first booking modes unchanged.
+- Notification services, the notification attempt ledger, models,
+  migrations, and Supabase unchanged.
+- Patch 9A unchanged. Patch 9B remains deferred and was not started.
+
+## Test coverage
+- calendar_tests/test_symptom_name_continuation.py was added; 8 tests.
+  Coverage: the exact staging transcript; immediate lead_name persistence;
+  the phone prompt addressing the captured name; the symptom safety
+  introduction appearing exactly once; priority classification and original
+  reason source surviving the name turn; absence of any spurious
+  "Just to confirm" turn; genuine service-offer clarification unchanged;
+  ordinary emergency name capture advancing to the follow-up owner.
+- calendar_tests/test_life_threatening_input_lock.py was added; 11 tests.
+  Coverage: the exact life-threatening staging message locking the input on
+  the first response; all three life-threatening owners carrying
+  disable_input, each asserted against its exact expected mode; ordinary
+  dental emergencies not carrying disable_input; final_closed persisting on
+  the later blocked message with no lead mutation and no notification;
+  show_start_over true on both turns; a fresh conversation after Start Over;
+  and two structural widget contract checks.
+- The two structural widget tests are contract-presence checks. They read
+  static/chat.html through a repository-relative pathlib resolution and
+  assert the disable-input owner and the startOver() release lines are
+  present. They do not execute JavaScript and are not behavioral proof.
+- Owner-side manual staging supplied the behavioral proof: the initial
+  life-threatening response immediately disabled the text field and Send
+  button, preserved Start Over, and a fresh ordinary dental-emergency
+  conversation remained usable and completed urgent contact intake.
+- Focused S10 verification: 19 collected / 19 passed / 0 failed.
+- Final complete calendar suite: 511 collected / 511 passed / 0 failed.
+
+## Scope discipline
+- Implementation files committed: app/routes/chat.py,
+  calendar_tests/test_symptom_name_continuation.py, and
+  calendar_tests/test_life_threatening_input_lock.py — nothing else.
+- app/routes/chat.py changed by exactly four anchored edits: one widened
+  condition and three single-line meta insertions. Net +11 lines, +560 bytes.
+  Every anchor was asserted to occur exactly once before replacement and
+  zero times after.
+- CRLF line endings and the absence of a BOM were preserved in chat.py. Both
+  new test files use LF with no BOM, matching the existing calendar_tests
+  convention.
+- static/chat.html unchanged. No existing test file modified. No model
+  changed. No migration changed. Supabase not changed. Notification ledger
+  services untouched. Patch 9A untouched. Patch 9B remains deferred.
+- production/ was treated as read-only reference throughout and was never
+  modified.
+- CHANGE_REPORT.md was not modified during S10 reconnaissance,
+  implementation, or verification; this closure is appended separately after
+  the S10 code commit.
+- S10 code commit c8e4f98 was pushed to origin/staging-patch9a and
+  auto-deployed to Render staging. No production merge or production
+  deployment occurred.
+
+## Deferred items (accurate record)
+- Quick-action buttons can still call sendMessage() while the text input is
+  disabled, because sendMessage() checks only for non-empty input and not for
+  inputEl.disabled. This is pre-existing widget drift, present in production
+  as well, and it also affects the one_strike_locked path. The backend
+  final_closed guard still prevents every state mutation. Not addressed in
+  S10 by decision.
+- Reload / localStorage restoration does not reapply the input lock, because
+  the generic final_closed response does not carry disable_input. The guard
+  was intentionally left identical to production so that ordinary
+  post-completion conversations keep their normal end-of-conversation
+  behavior and wording.
+- last_assistant_offered_scheduling_service() still over-matches service
+  aliases appearing anywhere in an assistant response. This is the root
+  enabling condition for defect 1 and was deliberately not narrowed in S10.
+  No S10 test depends on the over-matching remaining, so it may be repaired
+  later without rewriting S10 coverage.
+- The priority expression remains stated in three places
+  (conversation_is_ordinary_hybrid_lead, priority_intake_is_complete,
+  receptionist_bypass_reply). Pre-existing S9 deferred drift, untouched.
+- Patch 9B remains deferred and unstarted.
+- Separate calendar observation from manual staging: after the symptom flow
+  correctly reached scheduling, the availability fallback said Monday,
+  July 27 was unavailable while also presenting Monday, July 27 as the
+  nearest available day, producing a selection loop. This is outside S10,
+  did not affect the S10 emergency fixes, and remains for separate calendar
+  investigation.
+
+## Revision history (honest record)
+1. Reconnaissance established that the staging "emergency guidance" in
+   defect 1 came from the symptom intake-start reply, not from any emergency
+   owner, and that no emergency predicate fires on that transcript. This
+   moved the repair out of the emergency owners entirely.
+2. Reconnaissance identified the misfiring predicate, the owner-ordering
+   problem, and the state-mutation omission, and confirmed by direct
+   execution of the service-library matcher that the symptom reply matches
+   the swelling alias.
+3. An addendum resolved two items the first report had marked unverified.
+   Production was confirmed to already carry the disable_input contract at
+   all three life-threatening paths, making defect 2 a backport rather than
+   new design. A matcher sweep across every name-asking prompt showed only
+   symptom and emergency prompts trip the matcher, which retired the stated
+   hybrid regression risk by inspection.
+4. The owner selected Option A (owner ordering) over Option B (retention),
+   revising the STAGING_FINDINGS.md expected flow to symptom -> name ->
+   phone, and issued three required corrections to the approved plan.
+5. All three corrections were applied: the proposed matcher-boundary test was
+   not written, because a test must pin desired externally observable
+   behavior and not preserve a known internal defect that is scheduled for
+   possible repair; the structural widget tests resolve the widget path with
+   pathlib relative to the repository rather than a hardcoded path; and the
+   long historical comment above the Option A condition was replaced with the
+   approved three-line comment, with the root-cause history kept in the
+   implementation report and in this closure.
+6. Implementation applied four anchored edits with before-and-after
+   occurrence-count assertions, and added two new test files. Claude claimed
+   no test outcome at delivery; the handoff marked every test NOT RUN.
+7. Owner-side verification passed 19/19 focused and 511/511 full, and S10 was
+   committed as c8e4f98.
+8. The code commit was pushed to origin/staging-patch9a and Render deployed
+   commit c8e4f98 to ai-dental-chatbot-staging.
+9. Owner-side manual staging passed the approved S10 checks: symptom -> name
+   -> phone without the spurious confirmation or repeated guidance; immediate
+   life-threatening input lock on the first response; Start Over recovery;
+   and ordinary dental-emergency intake remaining open.
+10. The staging client key visible during verification was rotated. The key
+    value is intentionally absent from this record.
+
+## Rollback point
+- S10 code checkpoint: c8e4f98 Fix emergency continuation and immediate
+  input lock (S10)
+- Prior documentation checkpoint: aae27fa Document S9 synchronization
+  closure
+- Prior S9 code checkpoint: 9f23ea4 Synchronize hybrid capture and
+  post-handoff behavior (S9)
+- Prior chat.py hash:
+  F608467E0EB59F016A49060EA24212A7F8B8500DD3D4AE052E94D6F293F37AE4
+- Final S10 chat.py hash:
+  68C2BC6F91D97E25232DB6CAADED4C39199293DD6E4A0935F2CA43B3D7FE437D
+- Rollback is a clean file-level revert: restore chat.py to the prior hash
+  and remove the two new test files. No schema change, no migration, no
+  persisted-state change, and no data backfill are involved, so there is
+  nothing to undo in the database.
+
+## Checkpoint
+- S10 is CLOSED at commit c8e4f98 and deployed to Render staging.
+- Focused verification: 19/19. Full verification: 511/511.
+- Manual staging verification: PASS for symptom continuation, immediate
+  life-threatening input lock, Start Over recovery, and ordinary
+  dental-emergency continuation.
+- The staging client key exposed during verification was rotated.
+- The quick-action bypass, the reload/localStorage lock restoration, and the
+  last_assistant_offered_scheduling_service() over-matching all remain
+  deferred. Patch 9B remains deferred.
+- The S10 manual staging/widget regression is complete. Any production merge
+  or production deployment still requires explicit approval and the remaining
+  production-readiness gates.
+- Credential rotation for integrations exposed via .env.donotuse remains a
+  separate standing precondition for any live-service staging run; this
+  record does not claim those unrelated integration credentials were rotated.
+- This closure records S10 only; the production/calendar synchronization
+  program is not claimed complete by this record.
