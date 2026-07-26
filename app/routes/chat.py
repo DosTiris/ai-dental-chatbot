@@ -7321,7 +7321,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     offered_library_service = last_assistant_offered_library_service(db, conversation.id) if accepted_schedule else None
 
-    if offered_service_reason and service_offer_name and not accepted_schedule:
+    # S10: A symptom reply can contain service aliases while also asking for
+    # the patient's name. Let the existing name-capture owner handle that
+    # response instead of the service-offer clarification owner.
+    if (
+        offered_service_reason
+        and service_offer_name
+        and not accepted_schedule
+        and not last_assistant_asked_for_name(db, conversation.id)
+    ):
         offered_service_for_clarification = last_assistant_offered_library_service(db, conversation.id)
 
         if offered_service_for_clarification:
@@ -8018,6 +8026,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now" if is_true_emergency else "Call Office",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 
@@ -8091,6 +8100,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 
@@ -8268,6 +8278,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "call_phone": office_phone,
                 "call_cta_label": "Call Office Now",
                 "show_start_over": show_start_over,
+                **({"disable_input": True} if life_threatening_stop else {}),
             },
         )
 
