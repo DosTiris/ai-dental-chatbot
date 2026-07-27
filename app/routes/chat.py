@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
+from datetime import date as _date
 from zoneinfo import ZoneInfo
 from difflib import get_close_matches
 from typing import List, Dict, Optional, Any, Tuple
@@ -2362,6 +2363,298 @@ def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
         return None
 
 
+# =========================================================
+# Explicit calendar dates in time windows
+#
+# Canonical stored shape (internal only, never shown to a patient or to
+# the office):
+#     Mon 2026-07-27
+#     Mon 2026-07-27 morning
+#     Mon 2026-07-27 9am
+#
+# The leading weekday token keeps every existing consumer working
+# (time_window_has_specific_day, _extract_day_token,
+# _get_day_key_from_time_window). The ISO token carries the REAL date so
+# nothing downstream has to re-derive it from the weekday, which is wrong
+# for anything more than a week out.
+# =========================================================
+
+_MONTH_NAME_TO_NUMBER = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+# Longest month names first so "july" wins over "jul".
+_MONTH_NAME_DATE_RE = re.compile(
+    r"\b(" + "|".join(sorted(_MONTH_NAME_TO_NUMBER, key=len, reverse=True)) + r")\.?\s+"
+    r"(\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+
+_NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+
+_ISO_DATE_IN_TW_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
+# Dental patients routinely say "pain 9/10". A slash token in that context
+# is a severity score or a ratio, never an appointment date.
+_RATING_CONTEXT_RE = re.compile(
+    r"\b(?:pain|painful|hurt|hurts|hurting|ache|aches|aching|"
+    r"severity|severe|score|scored|scoring|rating|ratings|rate|rated|"
+    r"scale|out\s+of|ratio|people|patients|persons)\b",
+    re.IGNORECASE,
+)
+
+# A date preposition immediately before the token settles it as a date,
+# so "come in on 7/27" survives even next to symptom language. "of" is
+# deliberately NOT here: "severity of 6/10" and "pain score of 8/10" are
+# rating language, and no supported numeric date form needs it.
+_DATE_PREPOSITION_RE = re.compile(r"\b(?:on|for)\s+$", re.IGNORECASE)
+
+# Bounded windows. Wide enough for "my pain is 7/10" and "9/10 people",
+# narrow enough that an unrelated word elsewhere in a long message cannot
+# veto a genuine date.
+# A slash token read as a FRACTION: "2/3 of my tooth broke". Immediately
+# following "of" / "of my" / "of the" marks the token as a part-of-whole,
+# never a calendar date.
+_FRACTION_FOLLOW_RE = re.compile(r"^\s*of\b", re.IGNORECASE)
+
+_RATING_LOOKBEHIND_CHARS = 24
+_RATING_LOOKAHEAD_CHARS = 16
+
+# Detail-association boundaries. A time detail may only be attached to the
+# SELECTED date when it provably belongs to that date's own region:
+#   * a hard sentence boundary always cuts the region;
+#   * any OTHER date/rating/fraction candidate span always cuts it;
+#   * a comma is natural punctuation ("7/27, morning please") and does not;
+#   * a coordination word cuts BOTH directions: it ends the post-date
+#     region ("appointment on 7/27 and my pain started at 9am" is
+#     day-only) and it cuts the pre-date fallback ("pain 9/10 at 9am and
+#     appointment on 7/27").
+_HARD_BOUNDARY_RE = re.compile(r"[;.!?]")
+_COORDINATION_BOUNDARY_RE = re.compile(r"\b(?:and|but|or)\b", re.IGNORECASE)
+
+
+def _numeric_slash_is_rating_or_ratio(text: str, start: int, end: int) -> bool:
+    """True when a date-shaped slash token is really a rating or ratio.
+
+    Inputs: the full phrase plus the span _NUMERIC_DATE_RE matched. The
+        regex itself is NOT re-declared here; this only classifies the
+        surrounding text.
+    Returns: True for "pain 9/10", "I rate it 8/10", "9/10 people",
+        "severity of 6/10", and fractions like "2/3 of my tooth broke";
+        False for "7/27", "on 7/27 at 9am", "for 7/27".
+    """
+    # "2/3 of my tooth broke": a part-of-whole immediately after the token
+    # is a fraction regardless of any preposition earlier in the phrase.
+    if _FRACTION_FOLLOW_RE.search(text[end:end + _RATING_LOOKAHEAD_CHARS]):
+        return True
+
+    immediately_before = text[max(0, start - 8):start]
+    if _DATE_PREPOSITION_RE.search(immediately_before):
+        return False
+
+    before = text[max(0, start - _RATING_LOOKBEHIND_CHARS):start]
+    after = text[end:end + _RATING_LOOKAHEAD_CHARS]
+    return bool(_RATING_CONTEXT_RE.search(before) or _RATING_CONTEXT_RE.search(after))
+
+
+def _resolve_calendar_date(year, month, day, today):
+    """Turn a month/day (and optional year) into a real date.
+
+    Inputs: year may be None. today is the CLIENT-LOCAL current date.
+    Returns: a date, or None.
+    Rules:
+        * An impossible date (month 13, Feb 30) returns None. Nothing is
+          guessed or clamped.
+        * With no year: the client-local current year when that date is
+          today or later, otherwise the next year.
+    """
+    if not (1 <= month <= 12) or not (1 <= day <= 31):
+        return None
+
+    if year is not None:
+        # A stated past date is a mistake, not a booking. Reject rather than
+        # guess. The current-year / next-year rollover below applies ONLY
+        # when the patient did not state a year.
+        try:
+            supplied = _date(year, month, day)
+        except ValueError:
+            return None
+        return supplied if supplied >= today else None
+
+    for candidate_year in (today.year, today.year + 1):
+        try:
+            candidate = _date(candidate_year, month, day)
+        except ValueError:
+            continue
+        if candidate >= today:
+            return candidate
+
+    return None
+
+
+def _explicit_date_candidates(text: str):
+    """Every explicit-date candidate span, in textual order.
+
+    The ONLY consumer of the two date regexes. Used both to choose the
+    date and to bound detail association, so the two can never disagree
+    about where candidates sit.
+    """
+    candidates = []
+    for match in _MONTH_NAME_DATE_RE.finditer(text):
+        candidates.append(("month", match))
+    for match in _NUMERIC_DATE_RE.finditer(text):
+        candidates.append(("numeric", match))
+    candidates.sort(key=lambda item: item[1].start())
+    return candidates
+
+
+def find_explicit_calendar_date(text: str, now_local: datetime):
+    """Locate ONE explicit calendar date in free text.
+
+    Inputs: text is the raw user phrase; now_local is client-local now.
+    Returns THREE distinguishable states:
+        None                       - NO_DATE_MATCH: no date syntax at all.
+        (date, start, end)         - VALID_DATE_MATCH.
+        (None, start, end)         - INVALID_OR_REJECTED_DATE_MATCH: date
+                                     syntax was present but the date is
+                                     impossible, explicitly in the past, or
+                                     a pain/severity score ("pain 9/10").
+    The caller MUST distinguish the third state. Treating it as "no date"
+    lets the legacy parser keep only the part of day, which silently drops
+    the rejected date and recreates the never-complete time-window loop.
+    Database effects: none.
+
+    Numeric forms use U.S. month/day order. Month-name forms are tried
+    first so "July 27, 2026" is never read as 7/27 inside a longer string.
+    This is the ONLY place explicit-date text is parsed.
+    """
+    if not text:
+        return None
+
+    today = now_local.date()
+
+    # EVERY candidate is examined in textual order. Stopping at the first
+    # rejected token starved real dates later in the same message:
+    # "pain 9/10, appointment on 7/27 morning" must book July 27, while
+    # "pain 9/10 morning" (no valid date anywhere) must still reject.
+    candidates = _explicit_date_candidates(text)
+    if not candidates:
+        return None
+
+    first_rejected_span = None
+    for kind, match in candidates:
+        if kind == "numeric" and _numeric_slash_is_rating_or_ratio(
+            text, match.start(), match.end()
+        ):
+            # A pain score / fraction is a REJECTED candidate, never a
+            # date - but a valid date later in the message may still win.
+            if first_rejected_span is None:
+                first_rejected_span = (match.start(), match.end())
+            continue
+
+        if kind == "month":
+            month = _MONTH_NAME_TO_NUMBER[match.group(1).lower()]
+            day = int(match.group(2))
+            year = int(match.group(3)) if match.group(3) else None
+        else:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            raw_year = match.group(3)
+            year = None
+            if raw_year:
+                year = int(raw_year)
+                if year < 100:
+                    year += 2000
+
+        resolved = _resolve_calendar_date(year, month, day, today)
+        if resolved is not None:
+            return (resolved, match.start(), match.end())
+        if first_rejected_span is None:
+            first_rejected_span = (match.start(), match.end())
+
+    return (None, first_rejected_span[0], first_rejected_span[1])
+
+
+def parse_explicit_calendar_date(text: str, now_local: datetime):
+    """The resolved date for a VALID match only.
+
+    Returns None for both NO_DATE_MATCH and INVALID_OR_REJECTED_DATE_MATCH.
+    Callers that must tell those apart use find_explicit_calendar_date().
+    """
+    found = find_explicit_calendar_date(text, now_local)
+    return found[0] if found else None
+
+
+def extract_explicit_date_from_time_window(tw: Optional[str]):
+    """The real date carried by a canonical stored value, or None for a
+    legacy weekday-only value like "Mon morning"."""
+    if not tw:
+        return None
+    match = _ISO_DATE_IN_TW_RE.search(tw)
+    if not match:
+        return None
+    try:
+        return _date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def extract_time_window_detail(tw: Optional[str]) -> str:
+    """Everything except the weekday token and the ISO date.
+
+    "Mon 2026-07-27 morning" -> "morning";  "Mon morning" -> "morning".
+    Used for rendering, so the raw ISO date can never reach a patient or
+    the office.
+    """
+    if not tw:
+        return ""
+    rest = _ISO_DATE_IN_TW_RE.sub(" ", tw)
+    rest = re.sub(r"^\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", " ", rest.strip(), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", rest).strip()
+
+
+def time_window_day_only_weekday_token(tw: Optional[str]) -> Optional[str]:
+    """The weekday token of a DAY-ONLY value, else None.
+
+    Replaces exact-string checks like `detected_tw in {"Mon", ...}`, which
+    silently stopped matching once a value could carry an ISO date. The
+    day-only requirement preserves the original meaning of those checks:
+    "Mon" and "Mon 2026-07-27" qualify, "Mon morning" does not.
+    """
+    if not tw:
+        return None
+    if not time_window_has_specific_day(tw) or time_window_has_detail(tw):
+        return None
+    return _extract_day_token(tw)
+
+
+def time_window_is_client_today(tw: Optional[str], now_local: datetime) -> bool:
+    """True when the value refers to the client-local current date.
+
+    An explicit date is compared as a DATE. A legacy weekday-only value
+    still falls back to the weekday token, so existing behavior is
+    unchanged for values like "Mon morning".
+    """
+    if not tw:
+        return False
+    explicit = extract_explicit_date_from_time_window(tw)
+    if explicit is not None:
+        return explicit == now_local.date()
+    return _extract_day_token(tw) == now_local.strftime("%a")
+
+
 def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
     if not tw:
         return None
@@ -2658,7 +2951,8 @@ def check_outside_hours(client: Client, time_window: Optional[str]) -> Tuple[boo
     start = row.get("start")
     end = row.get("end")
 
-    pretty_tw = pretty_time_window(time_window)
+    # Staff-facing note: classify Today / Tomorrow in the CLIENT's timezone.
+    pretty_tw = pretty_time_window(time_window, get_client_now(client).date())
 
     if not is_open:
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
@@ -2702,11 +2996,16 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     start_minutes = _parse_hhmm_to_minutes(row.get("start"))
     end_minutes = _parse_hhmm_to_minutes(row.get("end"))
 
-    if not is_open:
-        now_local = get_client_now(client)
-        today_key = now_local.strftime("%a").lower()[:3]
+    # Client-local now is read ONCE, and whether the request is really
+    # today is delegated to the single explicit-date-aware owner. Comparing
+    # weekday keys alone treated a Monday three weeks out as today whenever
+    # today also happened to be a Monday, producing a false "already passed
+    # today" rejection and a false "closed today".
+    now_local = get_client_now(client)
+    requested_is_today = time_window_is_client_today(time_window, now_local)
 
-        if day_key == today_key:
+    if not is_open:
+        if requested_is_today:
             return "The office is closed today. What day/time works better for you?"
 
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
@@ -2716,11 +3015,9 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
         if req_minutes < start_minutes or req_minutes >= end_minutes:
             return "That time is outside normal office hours. What day/time works better for you?"
 
-    now_local = get_client_now(client)
-    today_key = now_local.strftime("%a").lower()[:3]
     now_minutes = now_local.hour * 60 + now_local.minute
 
-    if day_key == today_key and req_minutes <= now_minutes:
+    if requested_is_today and req_minutes <= now_minutes:
         return "That time has already passed today. What later time today or another day works better for you?"
 
     return None
@@ -2832,9 +3129,42 @@ def is_saturday_open(client) -> bool:
     return bool(row.get("open", False))
 
 
-def pretty_time_window(tw: Optional[str]) -> str:
+def _fmt_month_day(d) -> str:
+    """'Jul 27', 'Aug 1' - the existing outward date format."""
+    return d.strftime("%b %d").replace(" 0", " ")
+
+
+def pretty_time_window(tw: Optional[str], reference_date=None) -> str:
+    """Outward wording for a stored time window.
+
+    Inputs:
+        reference_date: the CLIENT-LOCAL current date, used to classify the
+            Today / Tomorrow labels. Every caller holding a Client must
+            pass get_client_now(client).date(); server-local time is wrong
+            on either side of the office's midnight. Omitting it keeps the
+            previous server-local behavior, so legacy callers are
+            byte-for-byte unchanged.
+    Returns: patient- and staff-safe text. The raw ISO date is never
+        emitted.
+    """
     if not tw:
         return ""
+
+    today_date = reference_date or datetime.now().date()
+
+    # Explicit date: render THAT date. Never re-derive one from the
+    # weekday (wrong beyond a week) and never emit the raw ISO token.
+    explicit = extract_explicit_date_from_time_window(tw)
+    if explicit is not None:
+        detail = extract_time_window_detail(tw)
+
+        if explicit == today_date:
+            label = f"Today ({_fmt_month_day(explicit)})"
+        elif explicit == today_date + timedelta(days=1):
+            label = f"Tomorrow ({_fmt_month_day(explicit)})"
+        else:
+            label = f"{explicit.strftime('%a')} ({_fmt_month_day(explicit)})"
+        return f"{label} {detail}" if detail else label
 
     tl = (tw or "").strip().lower()
     parts = tl.split()
@@ -2845,7 +3175,7 @@ def pretty_time_window(tw: Optional[str]) -> str:
     day_token = parts[0]  # e.g. "thu"
     rest = " ".join(parts[1:])  # e.g. "morning"
 
-    today_dt = datetime.now()
+    today_dt = today_date
     today_str = today_dt.strftime("%a").lower()
     tomorrow_dt = today_dt + timedelta(days=1)
     tomorrow_str = tomorrow_dt.strftime("%a").lower()
@@ -3303,7 +3633,12 @@ def lead_is_same_day_without_explicit_urgency(conversation: Conversation) -> boo
     return True
 
 
-def pretty_staff_time_window(conversation: Conversation) -> str:
+def pretty_staff_time_window(
+    conversation: Conversation,
+    client: Optional[Client] = None,
+) -> str:
+    """Staff-facing time window. Pass the Client so Today / Tomorrow are
+    classified in the office's timezone rather than the server's."""
     tw = (getattr(conversation, "lead_time_window", None) or "").strip()
     if not tw:
         return ""
@@ -3312,7 +3647,8 @@ def pretty_staff_time_window(conversation: Conversation) -> str:
     if tw.strip().lower() == "asap" and lead_is_same_day_without_explicit_urgency(conversation):
         return "Today / same-day request"
 
-    return pretty_time_window(tw)
+    reference_date = get_client_now(client).date() if client is not None else None
+    return pretty_time_window(tw, reference_date)
 
 def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     # PATCH 6 (Recommended #7): every untrusted VALUE below is normalized
@@ -3349,7 +3685,7 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
         lines.append(f"Reason detail: {normalize_notification_field(reason_detail, FIELD_LIMIT_FREE_TEXT)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        lines.append(f"Preferred time: {normalize_notification_field(pretty_staff_time_window(conversation), FIELD_LIMIT_FREE_TEXT)}")
+        lines.append(f"Preferred time: {normalize_notification_field(pretty_staff_time_window(conversation, client), FIELD_LIMIT_FREE_TEXT)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         lines.append("Outside hours: Yes")
@@ -3395,7 +3731,7 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
         parts.append(f"Detail: {normalize_notification_field(reason_detail, FIELD_LIMIT_FREE_TEXT)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        parts.append(f"Time: {normalize_notification_field(pretty_staff_time_window(conversation), FIELD_LIMIT_FREE_TEXT)}")
+        parts.append(f"Time: {normalize_notification_field(pretty_staff_time_window(conversation, client), FIELD_LIMIT_FREE_TEXT)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         note = (getattr(conversation, "lead_outside_hours_note", None) or "").strip()
@@ -3808,6 +4144,41 @@ def detect_new_patient_flag(user_text: str) -> Optional[bool]:
     return None
 
 
+def _detect_detail_for_explicit_date(
+    remainder: str,
+    client: Optional[Client],
+    day_key: Optional[str],
+) -> Optional[str]:
+    """The time detail attached to an explicit date, or None.
+
+    Inputs: remainder is the phrase with the date text already removed, so
+        the date's own digits can never be misread as a clock time.
+    Returns: "morning" / "afternoon" / "evening", or a normalized time
+        label such as "9am", or None when only a date was given.
+    """
+    tl = (remainder or "").lower()
+
+    time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b", tl)
+    if time_match:
+        if time_match.group(1):
+            hh = int(time_match.group(1))
+            mm = time_match.group(2) or "00"
+            ap = time_match.group(3)
+            time_label = f"{hh}:{mm}{ap}" if mm != "00" else f"{hh}{ap}"
+        else:
+            time_label = f"{time_match.group(4)}:{time_match.group(5)}"
+        return _resolve_ambiguous_time_label_for_client(client, day_key, time_label)
+
+    if re.search(r"\b(morning|morn)\b", tl):
+        return "morning"
+    if re.search(r"\b(afternoon|aft)\b", tl):
+        return "afternoon"
+    if re.search(r"\b(evening|eve|night)\b", tl):
+        return "evening"
+
+    return None
+
+
 def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optional[str]:
     user_text = normalize_tomorrow_shorthand_for_time(user_text)
 
@@ -3851,6 +4222,81 @@ def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optio
             return f"{day} evening"
 
         return day
+
+    # Explicit calendar date. Checked after today/tomorrow (those are more
+    # specific to the patient) and before the weekday map, so "Monday
+    # July 27" resolves by its real date rather than the bare weekday.
+    now_local_for_date = get_client_now(client) if client is not None else datetime.now()
+    explicit = find_explicit_calendar_date(t, now_local_for_date)
+    if explicit is not None:
+        explicit_date, match_start, match_end = explicit
+
+        # Date syntax matched but the date is impossible or in the past.
+        # Falling through to the legacy parser would keep only the part of
+        # day ("February 30 morning" -> "morning"), silently discarding the
+        # rejected date and rebuilding the original loop. Return nothing so
+        # the caller stores nothing and asks again.
+        if explicit_date is None:
+            return None
+
+        # Detail association is bounded by the ALREADY-SCANNED candidate
+        # spans: the region after the selected date ends at the next
+        # candidate (valid, invalid, rating, or fraction) or at a hard
+        # sentence boundary, whichever comes first. An adjacent comma is
+        # natural punctuation ("7/27, morning please"). A time can
+        # therefore never be borrowed across another date or a rating
+        # clause: "7/27 and 8/3 at 9am" stays day-only.
+        candidate_spans = [
+            (m.start(), m.end()) for _, m in _explicit_date_candidates(t)
+        ]
+
+        after_end = len(t)
+        for span_start, _span_end in candidate_spans:
+            if match_end <= span_start < after_end:
+                after_end = span_start
+        hard = _HARD_BOUNDARY_RE.search(t, match_end, after_end)
+        if hard:
+            after_end = hard.start()
+        # A coordination word also ends the region: what follows "and" /
+        # "but" / "or" is a different clause, and its time belongs to that
+        # clause ("appointment on 7/27 and my pain started at 9am" is
+        # day-only, while "7/27 morning and my pain started at 9am" keeps
+        # the morning that sits BEFORE the coordination). Nothing beyond
+        # the boundary is ever scanned for a detail; a safe extra
+        # morning/afternoon question beats guessing detail ownership.
+        coordination = _COORDINATION_BOUNDARY_RE.search(t, match_end, after_end)
+        if coordination:
+            after_end = coordination.start()
+
+        day_key_for_time = explicit_date.strftime("%a").lower()[:3]
+        detail = _detect_detail_for_explicit_date(
+            t[match_end:after_end], client, day_key_for_time
+        )
+
+        # Pre-date fallback ("morning on 7/27"): only when NO other
+        # candidate shares the unpunctuated segment - an earlier rating's
+        # 9am must never be borrowed - and never across the coordination
+        # that introduces the selected-date clause. When ownership is
+        # ambiguous the date is saved day-only and the existing
+        # morning/afternoon follow-up asks for the time.
+        if detail is None:
+            pre_start = 0
+            for b in _HARD_BOUNDARY_RE.finditer(t, 0, match_start):
+                pre_start = b.end()
+            earlier_candidate_in_segment = any(
+                span_start < match_start and span_end > pre_start
+                for span_start, span_end in candidate_spans
+                if (span_start, span_end) != (match_start, match_end)
+            )
+            if not earlier_candidate_in_segment:
+                for b in _COORDINATION_BOUNDARY_RE.finditer(t, pre_start, match_start):
+                    pre_start = b.end()
+                detail = _detect_detail_for_explicit_date(
+                    t[pre_start:match_start], client, day_key_for_time
+                )
+        day_token = explicit_date.strftime("%a")
+        iso = explicit_date.isoformat()
+        return f"{day_token} {iso} {detail}" if detail else f"{day_token} {iso}"
 
     day_map = {
         "mon": "Mon",
@@ -4082,7 +4528,13 @@ def handle_time_window_capture(
             base = base + timedelta(days=1)
         detected_tw = base.strftime("%a")
 
-    is_today_request = ("today" in norm_user_text) or (detected_tw == today_tok)
+    # An explicit date is compared as a date, so a future Monday is not
+    # mistaken for today just because today is also a Monday.
+    is_today_request = (
+        ("today" in norm_user_text)
+        or (detected_tw == today_tok)
+        or time_window_is_client_today(detected_tw, now_local)
+    )
 
     time_issue_reply = build_time_window_issue_reply(client, detected_tw)
     if time_issue_reply:
@@ -4243,11 +4695,12 @@ def handle_time_window_capture(
 
     # If we already have Weekday morning/afternoon and user gives a day, combine
     if current_tw in {"Weekday morning", "Weekday afternoon"} and detected_tw:
-        if detected_tw in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
+        combine_day_token = time_window_day_only_weekday_token(detected_tw)
+        if combine_day_token in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
             part = "morning" if current_tw == "Weekday morning" else "afternoon"
             conversation.lead_time_window = f"{detected_tw} {part}"
             return (None, True)
-        if detected_tw in {"Sat", "Sun"}:
+        if combine_day_token in {"Sat", "Sun"}:
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
     # If we have day-only and user provides part-of-day or exact time, combine
@@ -4282,7 +4735,9 @@ def handle_time_window_capture(
         return ("Please choose another day/time that works.", False)
     # Normal save path: only save if it improves specificity
     if detected_tw:
-        if detected_tw in {"Sat", "Sun"} and not is_saturday_open(client):
+        # Day-only weekend values are rejected here whether they arrive as
+        # "Sat" or as "Sat 2026-08-01".
+        if time_window_day_only_weekday_token(detected_tw) in {"Sat", "Sun"} and not is_saturday_open(client):
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
         new_score = _time_window_specificity_score(detected_tw)
@@ -4301,7 +4756,7 @@ def handle_time_window_capture(
         if time_window_has_specific_day(current_tw) and not time_window_has_detail(current_tw):
             day_tok = _extract_day_token(current_tw)
 
-            if day_tok == today_tok and is_after_noon:
+            if time_window_is_client_today(current_tw, now_local) and is_after_noon:
                 return ("Got it — what time later today works best?", saved)
 
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
@@ -5856,7 +6311,29 @@ def user_accepted_scheduling(user_text: str) -> bool:
     t = _norm_text(user_text)
     return t in {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "please", "lets do it", "let s do it"}
 
-def build_lead_context(conversation: Conversation) -> Optional[Dict[str, str]]:
+def _render_time_window_for_client(client: Optional[Client], tw: Optional[str]) -> str:
+    """The single client-aware human rendering used at output boundaries.
+
+    Every place a stored time window leaves the backend - browser meta,
+    model context, staff email/SMS, outside-hours notes - goes through a
+    client-local render so the raw canonical ISO value is never exposed.
+    """
+    if not tw:
+        return ""
+    reference_date = get_client_now(client).date() if client is not None else None
+    return pretty_time_window(tw, reference_date)
+
+
+def build_lead_context(
+    conversation: Conversation,
+    client: Optional[Client] = None,
+) -> Optional[Dict[str, str]]:
+    """Lead facts handed to the model as system context.
+
+    The time window is rendered for humans before it leaves this
+    boundary: the canonical stored value can carry an ISO date, and
+    anything placed here can be echoed back to the patient.
+    """
     parts: List[str] = []
     if (conversation.lead_name or "").strip():
         parts.append(f"Lead name: {conversation.lead_name}")
@@ -5871,7 +6348,10 @@ def build_lead_context(conversation: Conversation) -> Optional[Dict[str, str]]:
     if getattr(conversation, "lead_is_new_patient", None) is False:
         parts.append("New patient: no (returning)")
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        parts.append(f"Preferred time window: {conversation.lead_time_window}")
+        parts.append(
+            f"Preferred time window: "
+            f"{_render_time_window_for_client(client, conversation.lead_time_window)}"
+        )
     if getattr(conversation, "lead_email_opt_out", False):
         parts.append("Email opt-out: yes")
     if not parts:
@@ -7808,7 +8288,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 meta={
                     "mode": "intake_time_window_capture",
                     "faq_match": False,
-                    "saved_time_window": getattr(conversation, "lead_time_window", None),
+                    # Human-readable and client-local. The canonical stored
+                    # value can carry an ISO date and must never cross this
+                    # boundary. Sole producer of this key; no repository
+                    # consumer reads the raw form.
+                    "saved_time_window": _render_time_window_for_client(
+                        client, getattr(conversation, "lead_time_window", None)
+                    ) or None,
                     "show_service_menu": reply_should_show_service_menu(reply_text),
                     "show_start_over": show_start_over,
                 },
@@ -9824,7 +10310,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     start = time.time()
     try:
         context_messages = build_context_messages(db, conversation.id)
-        lead_context = build_lead_context(conversation)
+        lead_context = build_lead_context(conversation, client)
 
         openai_input: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if lead_context:
