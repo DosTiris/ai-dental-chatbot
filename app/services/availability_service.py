@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from app.repositories import appointment_repository
+from app.services.appointment_intent import PREF_ANY
 from app.services.availability_rules import filter_bookable_slots
 from app.services.calendar_settings_service import CalendarSettings, local_day_utc_window
 
@@ -54,18 +55,46 @@ def find_days_with_availability(
     now_utc: datetime,
     days_to_scan: int = 7,
     max_days_to_return: int = 3,
+    time_preference: str = PREF_ANY,
+    service_key: Optional[str] = None,
+    skip_start_day: bool = False,
 ) -> List[date]:
     """
     Purpose: When the requested day has nothing, suggest nearby days that do.
+    Inputs:
+        time_preference: the SAME preference bucket the rejected day was
+            filtered with. Defaults to PREF_ANY, which is the pre-existing
+            behavior, so no existing caller changes meaning by accident.
+        service_key: the SAME service filter the rejected day was filtered
+            with. Defaults to None (no service filtering) - also the
+            pre-existing behavior.
+        skip_start_day: when True the scan begins at start_day + 1. A caller
+            that has just told the patient start_day is unavailable MUST set
+            this, otherwise the rejected day is offered straight back.
     Returns: up to max_days_to_return dates (client-timezone) with >=1
-             bookable slot, scanning start_day .. start_day + days_to_scan.
+             bookable slot, scanning start_day .. start_day + days_to_scan,
+             or start_day + 1 .. start_day + days_to_scan when
+             skip_start_day is set.
     Database effects: SELECT only.
+    Possible failures: database errors propagate to the caller (Rule 4 - no
+        broad exception handling that hides failures).
+
+    Both filters are passed straight through to get_available_slots, so a day
+    is suggested only when it would really produce a menu for THIS patient.
+    Filtering the suggestion scan differently from the offer query is what
+    produced the staging contradiction on 2026-07-27: a tooth-pain request
+    was told July 27 had no openings and was then offered July 27, because
+    three cleaning/checkup slots matched the unfiltered scan. The policy
+    rules themselves were correct and are unchanged; only this caller was
+    under-supplying them.
     """
     found: List[date] = []
-    for offset in range(days_to_scan + 1):
+    first_offset = 1 if skip_start_day else 0
+    for offset in range(first_offset, days_to_scan + 1):
         candidate = start_day + timedelta(days=offset)
         slots = get_available_slots(
-            db, client_id, settings, candidate, time_preference="any", now_utc=now_utc
+            db, client_id, settings, candidate, time_preference, now_utc,
+            service_key=service_key,
         )
         if slots:
             found.append(candidate)

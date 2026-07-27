@@ -83,6 +83,17 @@ def _fmt_day(d: date) -> str:
     return d.strftime("%A, %B %d").replace(" 0", " ")
 
 
+def _fmt_day_list(days: Sequence[date]) -> str:
+    """'Tuesday, July 28 and Wednesday, July 29' - readable day enumeration.
+
+    Every label comes from _fmt_day, so date formatting keeps one owner.
+    """
+    labels = [_fmt_day(d) for d in days]
+    if len(labels) <= 1:
+        return "".join(labels)
+    return f"{', '.join(labels[:-1])} and {labels[-1]}"
+
+
 def _fmt_time(dt_utc: datetime, tz_name: str) -> str:
     """'1:30 PM' in the client's timezone."""
     local = ensure_utc(dt_utc).astimezone(ZoneInfo(tz_name))
@@ -373,7 +384,10 @@ def _handle_date(db, client, conversation, settings, user_text, now_utc) -> Book
         return reply
 
     # 'friday morning' answers two questions at once — honor both.
-    preference = parse_time_preference(user_text)
+    preference = (
+        parse_time_preference(user_text)
+        or conversation.booking_time_preference
+    )
     if preference is not None:
         conversation.booking_time_preference = preference
         return _offer_slots(db, client, conversation, settings, now_utc)
@@ -537,10 +551,26 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
 
 
 def _suggest_other_days(db, client, conversation, settings, day, now_utc) -> BookingReply:
-    """No openings on the requested day: offer up to 3 nearby days that have
-    real availability, and go back to WAITING_FOR_DATE."""
+    """No openings on the requested day: offer up to 3 LATER days whose
+    availability actually matches this patient, and go back to
+    WAITING_FOR_DATE.
+
+    The scan is filtered with exactly the preference and service_key the
+    rejected day was filtered with, and it starts the day AFTER the rejected
+    day. Previously it ran unfiltered from offset 0, so a day with no
+    matching slots could be declared unavailable and then offered straight
+    back as available.
+
+    BOTH replies ask for a specific day. WAITING_FOR_DATE can only consume
+    a date, so neither branch of this owner may ask a yes/no question its
+    own state cannot parse (Rule 14) - not the suggestion branch, and not
+    the office-help fallback.
+    """
     days = availability_service.find_days_with_availability(
-        db, client.id, settings, day, now_utc
+        db, client.id, settings, day, now_utc,
+        time_preference=(conversation.booking_time_preference or PREF_ANY),
+        service_key=(conversation.lead_reason or None),
+        skip_start_day=True,
     )
     conversation.booking_state = BookingState.WAITING_FOR_DATE
     conversation.booking_offered_slot_ids = None
@@ -550,14 +580,18 @@ def _suggest_other_days(db, client, conversation, settings, day, now_utc) -> Boo
     db.commit()
 
     if days:
-        options = ", ".join(_fmt_day(d) for d in days)
-        text = (f"I don\u2019t see openings on {_fmt_day(day)}. "
-                f"The nearest days with availability are: {options}. "
-                "Would any of those work?")
+        lead = (
+            f"The nearest day with matching availability is {_fmt_day_list(days)}"
+            if len(days) == 1
+            else f"The nearest days with matching availability are {_fmt_day_list(days)}"
+        )
+        text = (f"I don\u2019t see matching openings on {_fmt_day(day)}. "
+                f"{lead}. "
+                "Which day works best? Please reply with the day.")
     else:
-        text = (f"I don\u2019t see online openings around {_fmt_day(day)}. "
-                "The office can help directly — would you like to try a "
-                "different week?")
+        text = (f"I don\u2019t see matching online openings around {_fmt_day(day)}. "
+                "The office can help directly. "
+                "What other specific day would you like me to check?")
     return BookingReply(True, text,
                         {"mode": "booking", "state": BookingState.WAITING_FOR_DATE})
 
