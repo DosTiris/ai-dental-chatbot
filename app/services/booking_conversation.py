@@ -241,6 +241,11 @@ def begin_booking_after_intake(
     client,
     conversation,
     user_text: str,
+    *,
+    seed_date: Optional[date] = None,
+    seed_date_text: Optional[str] = None,
+    seed_time_preference: Optional[str] = None,
+    seeds_are_authoritative: bool = False,
 ) -> BookingReply:
     """
     Purpose: PATCH 3 (Senior Audit Critical #5) — the EXPLICIT start-after-
@@ -253,6 +258,36 @@ def begin_booking_after_intake(
              via the same _handle_start parsing every start uses).
     Inputs:  live session, client row, conversation row, the raw completing
              patient message.
+             seed_date / seed_date_text / seed_time_preference /
+             seeds_are_authoritative (keyword-only, CHECKPOINT B rev2;
+             seeds default None / False): what chat.py derived from a
+             canonical time-window value. The completing message can
+             contain rating/fraction tokens ("my pain is 7/10 and I can
+             come in on July 28 morning") that the pure intent parser
+             reads as a wrong-year date, and re-parsing raw text also
+             dropped an already-answered part of day — the seeds carry the
+             value the capture owner validated instead.
+             seed_date: an explicit date (used as-is, still validated).
+             seed_date_text: a safe day word ("tuesday", "tomorrow",
+                 "today") from a stored value with no explicit date; this
+                 module resolves it with the SAME appointment-intent owner
+                 (parse_preferred_date) every start already uses — legacy
+                 "Tuesday morning" preferences are consumed, never
+                 re-asked, and no weekday arithmetic is duplicated.
+             seed_time_preference: a PREF_* bucket, honored exactly the way
+                 _handle_date honors "friday morning"; with no resolvable
+                 date it is persisted so the day question is the ONLY
+                 remaining question ("Weekday morning" -> ask the day,
+                 keep morning).
+             seeds_are_authoritative: True only when the caller derived
+                 the seeds from THIS message safely canonicalized through
+                 the rating-aware Checkpoint A pipeline; the raw-text date
+                 fallback is then skipped entirely, because that fallback
+                 is exactly the wrong-candidate defect vector.
+             This module remains the single owner of every state decision:
+             any resolved date still passes _validate_and_store_date
+             (horizon and past-date rules). With no seeds, every
+             pre-Checkpoint-B call site is byte-identical in behavior.
     Returns: BookingReply. handled=False means chat.py must keep today's
              lead-complete reply (booking disabled, emergency-flagged,
              intake identity missing, or a dialog is somehow already
@@ -285,7 +320,13 @@ def begin_booking_after_intake(
         return BookingReply(handled=False)
 
     now_utc = client_now(settings).astimezone(ZoneInfo("UTC"))
-    return _handle_start(db, client, conversation, settings, user_text, now_utc)
+    return _handle_start(
+        db, client, conversation, settings, user_text, now_utc,
+        seed_date=seed_date,
+        seed_date_text=seed_date_text,
+        seed_time_preference=seed_time_preference,
+        seeds_are_authoritative=seeds_are_authoritative,
+    )
 
 
 def cancel_active_booking(db: Session, client, conversation) -> None:
@@ -327,9 +368,32 @@ def cancel_active_booking(db: Session, client, conversation) -> None:
 # State handlers — one per state, each under ~40 lines (Rule 5).
 # ---------------------------------------------------------------------------
 
-def _handle_start(db, client, conversation, settings, user_text, now_utc) -> BookingReply:
+def _handle_start(db, client, conversation, settings, user_text, now_utc,
+                  seed_date=None, seed_date_text=None,
+                  seed_time_preference=None,
+                  seeds_are_authoritative=False) -> BookingReply:
     """NONE -> WAITING_FOR_DATE, or straight to WAITING_FOR_TIME_PREFERENCE
-    when the opening message already named a day ('anything thursday?')."""
+    when the opening message already named a day ('anything thursday?').
+
+    CHECKPOINT B (rev2): seeds derived from a canonical time window replace
+    the raw-text parse. Date resolution order:
+      1. seed_date — an explicit date, used as-is.
+      2. seed_date_text — a safe day word from a stored value with no
+         explicit date ("tuesday", "tomorrow"), resolved by the SAME
+         appointment-intent owner every start uses. This is how a complete
+         legacy preference ("Tuesday morning") collected earlier is
+         consumed when a later answer ("returning") completes the lead.
+      3. the raw message — UNLESS seeds_are_authoritative, because the raw
+         completing message can contain a rating token the intent parser
+         misreads as a wrong-year date (the proven cause of the false
+         booking-horizon rejection on staging).
+    A seed preference with a resolved date answers the morning/afternoon
+    question in the same turn (mirroring how _handle_date honors 'friday
+    morning'); with NO resolvable date ("Weekday morning") it is PERSISTED
+    so the day question is the only remaining question — _handle_date
+    already consumes a persisted preference. Every resolved date is still
+    validated by _validate_and_store_date; unseeded calls behave exactly
+    as before."""
     # Duplicate defense: one appointment per conversation (Rule 10).
     existing = appointment_repository.get_appointment_by_conversation(
         db, client.id, conversation.id
@@ -338,7 +402,14 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc) -> Boo
         return _reply_existing_appointment(existing, settings)
 
     today_local = client_now(settings).date()
-    parsed_date = parse_preferred_date(user_text, today_local)
+
+    parsed_date = seed_date
+    if parsed_date is None and seed_date_text:
+        # Resolve the stored day word through the one date owner — never
+        # weekday arithmetic of our own (Rule 3).
+        parsed_date = parse_preferred_date(seed_date_text, today_local)
+    if parsed_date is None and not seeds_are_authoritative:
+        parsed_date = parse_preferred_date(user_text, today_local)
 
     if parsed_date is not None:
         reply = _validate_and_store_date(
@@ -346,6 +417,13 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc) -> Boo
         )
         if reply is not None:
             return reply
+
+        # The capture owner already recorded the part of day (or exact-time
+        # bucket) — honor it now instead of asking the patient again.
+        if seed_time_preference is not None:
+            conversation.booking_time_preference = seed_time_preference
+            return _offer_slots(db, client, conversation, settings, now_utc)
+
         conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
         db.add(conversation)
         db.commit()
@@ -354,6 +432,15 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc) -> Boo
             f"Great — {_fmt_day(parsed_date)}. Do you prefer morning or afternoon?",
             {"mode": "booking", "state": conversation.booking_state},
         )
+
+    # No resolvable date. A seeded preference ("Weekday morning", or a
+    # completed lead's bare "morning" message) is PERSISTED before asking
+    # for the day, so the day is the ONLY remaining question —
+    # _handle_date's existing `parse_time_preference(user_text) or
+    # conversation.booking_time_preference` then consumes it without ever
+    # re-asking morning/afternoon.
+    if seed_time_preference is not None:
+        conversation.booking_time_preference = seed_time_preference
 
     conversation.booking_state = BookingState.WAITING_FOR_DATE
     db.add(conversation)

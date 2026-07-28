@@ -38,6 +38,7 @@ from app.calendar_models import AppointmentSlot, Appointment, BookingState, Slot
 from app.models import Client, Conversation, Message
 from app.schemas import ChatRequest
 from app.services import booking_conversation, notification_service
+from app.services.appointment_intent import parse_preferred_date
 from app.services.booking_conversation import (
     begin_booking_after_intake,
     handle_booking_message,
@@ -267,8 +268,18 @@ def test_internal_patient_type_completion_starts_booking(db, fakes):
     resp = send(db, client, conversation, "returning")
 
     assert resp.meta.get("mode") == "booking"
-    assert resp.meta.get("state") == BookingState.WAITING_FOR_DATE
-    assert resp.reply == "What day would work best for your appointment?"
+    # CHECKPOINT B rev2: the complete stored legacy preference
+    # ("Tuesday morning", the fixture default) is CONSUMED, not re-asked.
+    # The Calendar start resolves the stored day word through the
+    # appointment-intent owner and honors the stored "morning"; with no
+    # staff-published slots the availability owner reports no matching
+    # openings and returns to WAITING_FOR_DATE for a different day — it
+    # never asks the generic day question or morning/afternoon again.
+    expected_date = parse_preferred_date("tuesday", datetime.now(NY).date())
+    assert conversation.booking_preferred_date == expected_date.isoformat()
+    assert conversation.booking_time_preference == "morning"
+    assert resp.reply != "What day would work best for your appointment?"
+    assert "morning or afternoon" not in resp.reply.lower()
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
     assert (conversation.lead_status or "").lower() == "completed"
     # The completed-lead office notification ran FIRST (approved temporary
@@ -313,9 +324,14 @@ def test_internal_short_symptom_completion_starts_booking(db, fakes):
     resp = send(db, client, conversation, "tomorrow morning")
 
     assert resp.meta.get("mode") == "booking"
-    # The completing message named a day, so the Calendar start parsed it
-    # and moved straight to the time-preference question.
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    # CHECKPOINT B: the completing message named BOTH the day and the part
+    # of day, and the Calendar start now honors the captured "morning"
+    # preference instead of re-asking it. With no staff-published slots in
+    # this test, the availability owner reports no matching openings and
+    # returns to WAITING_FOR_DATE for a different day.
+    assert conversation.booking_state == BookingState.WAITING_FOR_DATE
+    assert conversation.booking_time_preference == "morning"
+    assert "morning or afternoon" not in resp.reply.lower()
     assert chat_module.time_window_is_complete(conversation.lead_time_window)
     assert (conversation.lead_status or "").lower() == "completed"
     assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
@@ -513,12 +529,26 @@ def test_mid_booking_time_answer_goes_to_state_machine(db, fakes):
     client = make_client(db, calendar_enabled=True)
     conversation = make_conversation(db, client)
     send(db, client, conversation, "returning")           # booking starts
+    # CHECKPOINT B rev2: the completing turn consumed the stored
+    # "Tuesday morning" — owner-resolved date + persisted morning; with no
+    # published slots the availability owner returned to WAITING_FOR_DATE.
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
+    assert conversation.booking_time_preference == "morning"
+
+    # A published slot tomorrow morning: the mid-dialog day answer must be
+    # consumed by the STATE MACHINE together with the persisted preference
+    # (rev2 behavior — morning/afternoon is never re-asked) and reach a
+    # same-turn slot offer.
+    make_slot(db, client, days_ahead=1, hour=10)
+    tomorrow = (datetime.now(NY).date() + timedelta(days=1)).isoformat()
 
     resp = send(db, client, conversation, "tomorrow")
 
     assert resp.meta.get("mode") == "booking"
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert conversation.booking_preferred_date == tomorrow
+    assert conversation.booking_time_preference == "morning"
+    assert "morning or afternoon" not in resp.reply.lower(), resp.reply
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION, resp.reply
     # The intake time-window guard did NOT swallow the booking answer:
     assert conversation.lead_time_window == "Tuesday morning"
 
@@ -544,9 +574,18 @@ def test_information_interruption_pauses_and_resumes(db, fakes):
     assert conversation.booking_state == state_before
     assert conversation.booking_preferred_date == date_before
 
+    # CHECKPOINT B rev2: the resumed day answer combines with the
+    # preference persisted at the "returning" start (consumed from the
+    # stored "Tuesday morning") — the state machine offers a matching slot
+    # without re-asking morning/afternoon.
+    make_slot(db, client, days_ahead=1, hour=10)
+    tomorrow = (datetime.now(NY).date() + timedelta(days=1)).isoformat()
+
     resumed = send(db, client, conversation, "tomorrow")
     assert resumed.meta.get("mode") == "booking"
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert conversation.booking_preferred_date == tomorrow
+    assert conversation.booking_time_preference == "morning"
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION, resumed.reply
 
 
 def test_no_and_no_thanks_at_confirmation_reach_state_machine(db, fakes):
@@ -1014,12 +1053,13 @@ def test_priority_lead_booked_end_to_end_with_priority_urgency(db, fakes):
     # message will seed ("tomorrow") and the "morning" preference.
     slot = make_slot(db, client, days_ahead=1, hour=10)
 
-    # Completion (short-symptom site) starts the booking with the date seeded.
-    send(db, client, conversation, "tomorrow morning")
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-
-    resp = send(db, client, conversation, "morning")
+    # CHECKPOINT B: completion (short-symptom site) starts the booking with
+    # BOTH the date and the captured "morning" preference seeded, so the
+    # dialog offers matching slots in the SAME turn instead of re-asking
+    # morning/afternoon.
+    resp = send(db, client, conversation, "tomorrow morning")
     assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION, resp.reply
+    assert conversation.booking_time_preference == "morning"
 
     resp = send(db, client, conversation, "1")
     assert conversation.booking_state == BookingState.WAITING_FOR_CONFIRMATION, resp.reply

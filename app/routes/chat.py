@@ -63,6 +63,16 @@ from app.services.booking_conversation import (
     handle_booking_message,
 )
 
+# CHECKPOINT B: the time-preference bucket vocabulary stays owned by
+# appointment_intent (Rule 3). chat.py imports the constants only to label
+# the seed it derives from the canonical captured time window; it performs
+# no slot matching of its own.
+from app.services.appointment_intent import (
+    PREF_AFTERNOON,
+    PREF_EVENING,
+    PREF_MORNING,
+)
+
 # PATCH 6 (Senior Audit Recommended #7): notification-output hardening.
 # notification_service is the SINGLE OWNER (Rule 3) of the plain-text
 # field normalizer, the HTML email renderer, the fixed send_failed code,
@@ -1174,12 +1184,145 @@ def _booking_error_reply_text(
     )
 
 
+# CHECKPOINT B rev2: the day word carried by a canonical/legacy stored time
+# window. chat.py owns the canonical stored SHAPE (Checkpoint A), so reading
+# a day word out of it lives here; RESOLVING that word to a real date stays
+# with the appointment-intent date owner (parse_preferred_date), which the
+# Calendar start calls — no weekday arithmetic is implemented anywhere in
+# this file. The vocabulary mirrors time_window_has_specific_day exactly.
+_TW_SEED_DAY_WORD_RE = re.compile(
+    r"\b(today|tomorrow|"
+    r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b",
+    re.IGNORECASE,
+)
+
+# Abbreviated-or-full stored token -> the text parse_preferred_date resolves.
+_TW_SEED_DAY_TEXT = {
+    "mon": "monday",
+    "tue": "tuesday",
+    "wed": "wednesday",
+    "thu": "thursday",
+    "fri": "friday",
+    "sat": "saturday",
+    "sun": "sunday",
+    "today": "today",
+    "tomorrow": "tomorrow",
+}
+
+# CHECKPOINT B rev3: the two established canonical ASAP stored forms,
+# normalized. "ASAP / tomorrow ok" means "earliest available; tomorrow is
+# ACCEPTABLE as a fallback" — the patient did NOT select tomorrow as their
+# appointment date, so no day word may ever be seeded from these values.
+# Single owner (Rule 3): time_window_is_complete and the seed helper both
+# read THIS set, so the vocabulary can never drift between them again —
+# that drift (the composite form containing the word "tomorrow") was the
+# rev2 defect.
+_ASAP_TIME_WINDOW_FORMS = {"asap", "asap / tomorrow ok"}
+
+# Closed vocabulary (Rule 4) for route_completed_lead's seed source. An
+# unknown value is a visible failure (Rule 16), never a silent fallback.
+SEED_SOURCE_STORED_TIME_WINDOW = "stored_time_window"
+SEED_SOURCE_CURRENT_MESSAGE = "current_message"
+
+
+def _booking_seeds_from_time_window(tw: Optional[str]):
+    """
+    Purpose: CHECKPOINT B (rev2) — derive the Calendar start seeds from a
+        canonical time-window value, so the booking dialog consumes what
+        the capture owner validated instead of re-parsing raw patient
+        text. Re-parsing raw text was the proven staging defect:
+        parse_preferred_date read the rating token in "my pain is 7/10 and
+        I can come in on July 28 morning" as July 10 rolled to NEXT YEAR,
+        and that wrong candidate — not the captured July 28 — reached the
+        booking-horizon check, producing the false "booking up to 30 days
+        ahead" rejection. Rev2 extends the derivation to EVERY supported
+        stored form, so a complete legacy preference ("Tuesday morning")
+        collected earlier is consumed — not re-asked — when a later intake
+        answer ("returning") completes the lead. chat.py owns the canonical
+        stored shape (Checkpoint A), so this derivation lives here and
+        nowhere else (Rule 3).
+    Inputs: a canonical time-window value: None, "ASAP", legacy weekday
+        forms ("Tuesday morning", "Tue morning", "Tuesday 3pm",
+        "tomorrow morning", "Weekday morning"), day-only explicit dates
+        ("Tue 2026-07-28"), or complete explicit forms
+        ("Tue 2026-07-28 morning", "Tue 2026-07-28 9am").
+    Returns: (seed_date, seed_date_text, seed_time_preference); any element
+        may be None.
+        seed_date: the explicit ISO date when the value carries one.
+        seed_date_text: when there is NO explicit date, the safe day word
+            ("tuesday", "tomorrow", "today") for the appointment-intent
+            date owner to resolve against the client-local date — never
+            resolved here (no duplicated date parsing, Rule 3).
+        seed_time_preference: one of appointment_intent's PREF_* buckets:
+            part-of-day words map directly; an exact time maps by its
+            minutes with the same boundaries slot_matches_preference
+            applies (before 12:00 morning, 12:00-16:59 afternoon, 17:00+
+            evening). No detail (day-only, ASAP, empty) yields None, so
+            the Calendar asks its own morning/afternoon question as
+            before.
+        "Weekday morning" yields (None, None, morning): the weekday cannot
+        be resolved yet, so the Calendar asks for the day while the
+        preference is preserved. BOTH canonical ASAP forms — "ASAP" and
+        the composite "ASAP / tomorrow ok" — yield (None, None, None):
+        earliest-available is not a calendar day, and the composite's
+        "tomorrow" is a fallback the patient ACCEPTED, not a date they
+        SELECTED, so it must never become a day seed (rev3). Calendar
+        behavior for ASAP completions is unchanged.
+    Database effects: none. External effects: none.
+    Possible failures: none — unrecognized shapes yield (None, None, None).
+    """
+    if not (tw or "").strip():
+        return (None, None, None)
+
+    # rev3: recognize BOTH canonical ASAP forms BEFORE any day-word
+    # extraction — the composite "ASAP / tomorrow ok" contains the word
+    # "tomorrow", and seeding it as a date would silently convert
+    # "tomorrow is acceptable" into "tomorrow was chosen".
+    if (tw or "").strip().lower() in _ASAP_TIME_WINDOW_FORMS:
+        return (None, None, None)
+
+    seed_date = extract_explicit_date_from_time_window(tw)
+
+    seed_date_text = None
+    if seed_date is None:
+        day_word = _TW_SEED_DAY_WORD_RE.search(tw)
+        if day_word:
+            token = day_word.group(1).lower()
+            key = token if token in {"today", "tomorrow"} else token[:3]
+            seed_date_text = _TW_SEED_DAY_TEXT[key]
+
+    preference = None
+    detail = extract_time_window_detail(tw).lower()
+    if detail:
+        if "morning" in detail:
+            preference = PREF_MORNING
+        elif "afternoon" in detail:
+            preference = PREF_AFTERNOON
+        elif "evening" in detail or "night" in detail:
+            preference = PREF_EVENING
+        else:
+            # Exact times ("9am", "4:45pm") bucket by their clock minutes.
+            minutes = _extract_exact_time_minutes_from_tw(tw)
+            if minutes is not None:
+                if minutes < 12 * 60:
+                    preference = PREF_MORNING
+                elif minutes < 17 * 60:
+                    preference = PREF_AFTERNOON
+                else:
+                    preference = PREF_EVENING
+
+    return (seed_date, seed_date_text, preference)
+
+
 def route_completed_lead(
     db: Session,
     client: Client,
     conversation: Conversation,
     user_text: str,
     office_phone: str,
+    *,
+    seed_source: str = SEED_SOURCE_STORED_TIME_WINDOW,
 ) -> Optional[Tuple[str, dict]]:
     """
     PATCH 3 (Senior Audit Critical #5): THE single completion-routing owner.
@@ -1210,8 +1353,49 @@ def route_completed_lead(
             db, client, conversation, user_text, active_service_reason
         )
 
+    # CHECKPOINT B rev2: the Calendar start receives validated seeds instead
+    # of re-deriving day and preference from raw patient text, whose
+    # rating/fraction tokens the intent parser cannot classify.
+    #
+    #   SEED_SOURCE_STORED_TIME_WINDOW (completion sites): the captured
+    #   canonical lead_time_window is the authoritative statement of the
+    #   requested day and part of day — including complete legacy forms
+    #   ("Tuesday morning") collected turns before a later intake answer
+    #   ("returning") completes the lead. The raw-text date parse remains a
+    #   fallback only when the stored value carries no day at all (ASAP).
+    #
+    #   SEED_SOURCE_CURRENT_MESSAGE (post-completion re-engagement): a NEW
+    #   message from an already-completed lead states what the patient
+    #   wants NOW, so the seeds come from THIS message safely canonicalized
+    #   through the rating-aware Checkpoint A pipeline — and they are
+    #   authoritative: the defect-prone raw re-parse is fully suppressed,
+    #   and the historical stored window is neither consulted nor mutated.
+    if seed_source == SEED_SOURCE_STORED_TIME_WINDOW:
+        seed_time_window = getattr(conversation, "lead_time_window", None)
+        seeds_are_authoritative = False
+    elif seed_source == SEED_SOURCE_CURRENT_MESSAGE:
+        seed_time_window = canonicalize_time_window_for_storage(client, user_text)
+        seeds_are_authoritative = True
+    else:
+        # Closed vocabulary (Rule 4): an unknown source is a programming
+        # error and must fail visibly (Rule 16), never guess.
+        raise ValueError(f"route_completed_lead: unknown seed_source {seed_source!r}")
+
+    seed_date, seed_date_text, seed_time_preference = _booking_seeds_from_time_window(
+        seed_time_window
+    )
+
     try:
-        booking_reply = begin_booking_after_intake(db, client, conversation, user_text)
+        booking_reply = begin_booking_after_intake(
+            db,
+            client,
+            conversation,
+            user_text,
+            seed_date=seed_date,
+            seed_date_text=seed_date_text,
+            seed_time_preference=seed_time_preference,
+            seeds_are_authoritative=seeds_are_authoritative,
+        )
     except Exception as e:
         # Visible failure (Rule 16): log the failure (PATCH 6: exception class
         # + conversation UUID only — never the message), roll back the failed
@@ -4471,7 +4655,9 @@ def time_window_is_complete(tw: Optional[str]) -> bool:
         return False
 
     tl = (tw or "").strip().lower()
-    if tl in {"asap", "asap / tomorrow ok"}:
+    # rev3: shared single-owner vocabulary (see _ASAP_TIME_WINDOW_FORMS) —
+    # the same two values as before, so behavior is unchanged.
+    if tl in _ASAP_TIME_WINDOW_FORMS:
         return True
 
     return bool(time_window_has_specific_day(tw) and time_window_has_detail(tw))
@@ -4703,8 +4889,24 @@ def handle_time_window_capture(
         if combine_day_token in {"Sat", "Sun"}:
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
-    # If we have day-only and user provides part-of-day or exact time, combine
-    if current_tw and time_window_has_specific_day(current_tw) and not time_window_has_detail(current_tw) and detected_tw:
+    # If we have day-only and user provides part-of-day or exact time, combine.
+    # CHECKPOINT B: two corrections to this merge.
+    #   1. It only fires when the DETECTED value carries no day of its own —
+    #      a detected value with its own day ("Wed 2026-07-30 morning") is a
+    #      changed mind, not a detail answer, and falls through to the
+    #      normal specificity save below, where the more specific value
+    #      replaces the stored day-only one.
+    #   2. The merged value keeps the FULL stored day portion. Building it
+    #      from _extract_day_token dropped the ISO date, so a stored
+    #      "Tue 2026-07-28" plus a "morning" answer became "Tue morning" —
+    #      the explicit date the patient gave was silently discarded.
+    if (
+        current_tw
+        and time_window_has_specific_day(current_tw)
+        and not time_window_has_detail(current_tw)
+        and detected_tw
+        and not time_window_has_specific_day(detected_tw)
+    ):
         day_tok = _extract_day_token(current_tw)
         dtl = (detected_tw or "").lower().strip()
 
@@ -4718,18 +4920,22 @@ def handle_time_window_capture(
                 else:
                     part = "evening"
 
-                if day_tok == today_tok and part == "morning" and is_after_noon:
+                # rev4: an explicit stored date is compared as a DATE — a
+                # future Monday is not "today" just because today is also a
+                # Monday. Legacy weekday-only values keep the token
+                # comparison via time_window_is_client_today's fallback.
+                if time_window_is_client_today(current_tw, now_local) and part == "morning" and is_after_noon:
                     return (
                         "Since it’s already afternoon, what time later today works best? Or I can help with tomorrow.",
                         False,
                     )
 
-                conversation.lead_time_window = f"{day_tok} {part}"
+                conversation.lead_time_window = f"{current_tw} {part}"
                 return (None, True)
 
             # exact time like 2pm or 14:00
             if re.search(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", dtl) or re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", dtl):
-                conversation.lead_time_window = f"{day_tok} {detected_tw}"
+                conversation.lead_time_window = f"{current_tw} {detected_tw}"
                 return (None, True)
 
         return ("Please choose another day/time that works.", False)
@@ -4763,6 +4969,19 @@ def handle_time_window_capture(
                 return ("Got it — do you prefer morning or afternoon?", saved)
 
             return (f"Please choose another day/time that works. {weekday_example}", False)
+
+        # CHECKPOINT B rev4: a COMPLETE value (day + detail) reaches here
+        # after the specificity save above; the two follow-up conditions
+        # only cover Weekday-form and day-only results. Falling through to
+        # the function's final (None, False) DISCARDED the saved flag — a
+        # mutation the caller was told never happened (proven live
+        # 2026-07-27: the delegating guard fell through on every complete
+        # capture, so completion, office notification, and the Calendar
+        # start never ran and the message drifted to the receptionist
+        # bypass). A silent successful save returns no reply and the HONEST
+        # flag; an equal-or-lower-specificity non-save keeps returning
+        # False exactly as before.
+        return (None, saved)
 
 
     return (None, False)
@@ -8219,24 +8438,52 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # PATCH 3: skipped while an internal Calendar dialog is active — booking
     # answers ("tomorrow", "morning") belong to the Calendar state machine,
     # not to lead_time_window. Always True when no dialog is active.
+    #
+    # CHECKPOINT B (Rule 3): capture is DELEGATED to the one capture owner,
+    # handle_time_window_capture(). This guard previously canonicalized and
+    # overwrote conversation.lead_time_window itself — a second capture
+    # implementation that skipped the owner's established merge and
+    # validation rules. Two live staging consequences: a stored day-only
+    # explicit date ("Tue 2026-07-28") was REPLACED by a later bare
+    # "morning" answer instead of merged with it, and owner-only validation
+    # (Sunday nudge, weekend rejection, same-day rules) never ran on this
+    # path. The canonicalize call below is a GATE only — it decides whether
+    # this guard answers the message at all (priority/ASAP-only phrasings
+    # keep falling through to their existing later owners exactly as
+    # before); the owner re-derives and stores the value itself, so there
+    # is still exactly one capture implementation.
     if (
         not booking_dialog_active(conversation)
         and in_intake_mode
         and not time_window_is_complete(getattr(conversation, "lead_time_window", None))
+        and canonicalize_time_window_for_storage(client, user_text)
     ):
-        canonical_tw = canonicalize_time_window_for_storage(client, user_text)
+        guard_last_msg = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation.id, Message.role == "assistant")
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+        guard_last_text = (guard_last_msg.content or "") if guard_last_msg else ""
 
-        if canonical_tw:
+        tw_reply, tw_saved = handle_time_window_capture(
+            client, conversation, user_text, guard_last_text
+        )
+
+        # The owner neither saved nor answered: fall through unchanged, the
+        # same way the pre-Checkpoint-B guard fell through when it detected
+        # nothing storable.
+        if tw_reply is not None or tw_saved:
             lead_email_error = None
             lead_sms_error = None
 
-            time_issue_reply = build_time_window_issue_reply(client, canonical_tw)
-
-            if time_issue_reply:
-                reply_text = time_issue_reply
+            if not tw_saved:
+                # Owner validation reply (outside hours, already passed
+                # today, Sunday nudge, weekend rejection): nothing was
+                # stored, so nothing is committed — mirroring the previous
+                # time_issue_reply branch.
+                reply_text = tw_reply
             else:
-                conversation.lead_time_window = canonical_tw
-
                 if hasattr(conversation, "lead_outside_hours_note"):
                     conversation.lead_outside_hours_note = None
 
@@ -8244,7 +8491,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(conversation)
 
-                reply_text = _next_intake_prompt(client, conversation)
+                # The owner's follow-up question (e.g. the day-only
+                # "morning or afternoon" ask) takes precedence, exactly as
+                # it does at the established later capture site; otherwise
+                # the next intake prompt continues the capture-first order.
+                reply_text = tw_reply or _next_intake_prompt(client, conversation)
 
                 if mark_priority_if_symptom_lead(conversation):
                     db.add(conversation)
@@ -9072,7 +9323,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             or bool(canonicalize_time_window_for_storage(client, user_text))
         )
     ):
-        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+        # CHECKPOINT B rev2: this is a NEW message from an already-completed
+        # lead, so its seeds come from THIS message canonicalized through
+        # the rating-aware Checkpoint A pipeline — the historical stored
+        # window is neither consulted nor mutated, and the defect-prone raw
+        # date re-parse never runs at this site.
+        routed = route_completed_lead(
+            db, client, conversation, user_text, office_phone,
+            seed_source=SEED_SOURCE_CURRENT_MESSAGE,
+        )
         if routed is not None:
             return _routed_completion_response(db, conversation, routed, show_start_over)
         # routed is None (booking disabled): fall through unchanged.

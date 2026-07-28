@@ -57,6 +57,20 @@ def a_future_date(days_ahead):
     return today() + timedelta(days=days_ahead)
 
 
+def a_future_weekday(days_ahead):
+    """A weekday (Mon-Fri) at least `days_ahead` days out.
+
+    CHECKPOINT B: the early intake guard now delegates to the one capture
+    owner, handle_time_window_capture(), whose weekend validation (Sunday
+    nudge / weekday-only rejection for offices without weekend hours) is
+    live on this path too. Day-only fixture dates that could land on a
+    weekend would make those endpoint tests flaky by run date."""
+    d = today() + timedelta(days=days_ahead)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
 def phrase(d, suffix=""):
     """'July 27' / 'July 27 morning' for a real date, month name spelled out."""
     base = d.strftime("%B %d").replace(" 0", " ")
@@ -1272,7 +1286,7 @@ def test_intake_saves_day_only_when_the_time_belongs_to_the_rating(db):
         lead_reason="tooth pain", lead_name="Kyle", lead_phone="516-555-5555",
         lead_time_window=None, lead_email_opt_out=False, lead_is_new_patient=None,
     )
-    target = datetime.now().date() + timedelta(days=14)
+    target = a_future_weekday(14)
 
     resp = send(db, client, conversation,
                 f"pain 9/10 at 9am and appointment on {target.month}/{target.day}")
@@ -1295,7 +1309,7 @@ def test_intake_does_not_combine_one_dates_day_with_anothers_detail(db):
         lead_reason="tooth pain", lead_name="Kyle", lead_phone="516-555-5555",
         lead_time_window=None, lead_email_opt_out=False, lead_is_new_patient=None,
     )
-    first = datetime.now().date() + timedelta(days=14)
+    first = a_future_weekday(14)
     second = datetime.now().date() + timedelta(days=21)
 
     send(db, client, conversation,
@@ -1393,7 +1407,7 @@ def test_intake_symptom_narration_time_is_never_booked(db):
         lead_reason="tooth pain", lead_name="Kyle", lead_phone="516-555-5555",
         lead_time_window=None, lead_email_opt_out=False, lead_is_new_patient=None,
     )
-    target = datetime.now().date() + timedelta(days=14)
+    target = a_future_weekday(14)
 
     resp = send(db, client, conversation,
                 f"appointment on {target.month}/{target.day} and my pain started at 9am")
