@@ -282,11 +282,14 @@ def test_internal_patient_type_completion_starts_booking(db, fakes):
     assert "morning or afternoon" not in resp.reply.lower()
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
     assert (conversation.lead_status or "").lower() == "completed"
-    # The completed-lead office notification ran FIRST (approved temporary
-    # MVP behavior) and exactly once per channel.
-    assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
-    assert resp.meta.get("lead_email_sent") is True
-    assert resp.meta.get("lead_sms_sent") is True
+    # Dedupe patch: routine native-Calendar completion sends NO generic
+    # lead notification — the exact-time booking notification after a
+    # successful booking is the single office alert.
+    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert resp.meta.get("lead_email_sent") is False
+    assert resp.meta.get("lead_sms_sent") is False
+    assert bool(conversation.lead_email_sent) is False
+    assert bool(conversation.lead_sms_sent) is False
 
 
 def test_internal_lead_complete_branch_starts_booking(db, fakes):
@@ -302,7 +305,11 @@ def test_internal_lead_complete_branch_starts_booking(db, fakes):
     assert resp.meta.get("mode") == "booking"
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
     assert (conversation.lead_status or "").lower() == "completed"
-    assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
+    # Dedupe patch: routine native-Calendar completion — no generic
+    # lead notification; flags stay false through the dialog.
+    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert bool(conversation.lead_email_sent) is False
+    assert bool(conversation.lead_sms_sent) is False
 
 
 def test_internal_short_symptom_completion_starts_booking(db, fakes):
@@ -1080,8 +1087,9 @@ def test_priority_lead_booked_end_to_end_with_priority_urgency(db, fakes):
     assert appointment.urgency == "priority"
     slot_row = refreshed_slot(db, slot.id)
     assert slot_row.status == SlotStatus.BOOKED
-    # The separate booking notification went out (approved temporary MVP:
-    # completed-lead notification earlier + booking notification now).
+    # The separate booking notification went out (INTENTIONAL priority
+    # exception: immediate completed-lead alert earlier + exact-time
+    # booking notification now).
     assert len(fakes.booking_sms) + len(fakes.booking_email) >= 1
 
 
@@ -1515,3 +1523,63 @@ def test_affirmative_after_life_threatening_hits_persistent_stop(db, fakes):
     assert conversation.booking_selected_slot_id is None
     # Start Over remains exposed through the existing response contract.
     assert resp.meta.get("show_start_over") is True
+# ===========================================================================
+# Notification-dedupe patch — full ROUTINE internal booking drive-through
+# ===========================================================================
+
+def test_routine_lead_booked_end_to_end_single_booking_notification(db, fakes):
+    """A routine (non-priority) native-Calendar booking produces EXACTLY
+    ONE office SMS and ONE office email — the exact-time booking
+    notifications — and NO generic completed-lead notification at any
+    turn of the whole flow."""
+    client = make_client(db, calendar_enabled=True,
+                         office_hours=OPEN_ALL_WEEK_HOURS)
+    # Routine lead with a complete stored preference; email is the final
+    # missing intake field. This uses the established LEAD COMPLETION route.
+    conversation = make_conversation(
+        db, client,
+        lead_time_window="tomorrow morning",
+        lead_is_new_patient=True,
+        lead_email_opt_out=False,
+    )
+    slot = make_slot(db, client, days_ahead=1, hour=10)
+
+    # Skipping email completes intake, starts Calendar, and offers the
+    # matching slot without sending a generic lead notification.
+    resp = send(db, client, conversation, "skip")
+    assert resp.meta.get("mode") == "booking", resp.reply
+    assert (conversation.lead_status or "").lower() == "completed"
+    assert conversation.lead_is_priority is not True
+    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert bool(conversation.lead_email_sent) is False
+    assert bool(conversation.lead_sms_sent) is False
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION, resp.reply
+
+    # Drive to the booked appointment; the lead channels stay silent the
+    # whole way.
+    resp = send(db, client, conversation, "1")
+    assert conversation.booking_state == BookingState.WAITING_FOR_CONFIRMATION, resp.reply
+    resp = send(db, client, conversation, "yes")
+    assert resp.meta.get("booked") is True, resp.reply
+    assert (conversation.booking_state or "none") == BookingState.NONE
+
+    appointment = (
+        db.query(Appointment)
+        .filter(
+            Appointment.client_id == client.id,
+            Appointment.conversation_id == conversation.id,
+        )
+        .one()
+    )
+    slot_row = refreshed_slot(db, slot.id)
+    assert slot_row.status == SlotStatus.BOOKED
+
+    # EXACTLY one exact-time booking notification per office channel…
+    assert len(fakes.booking_sms) == 1
+    assert len(fakes.booking_email) == 1
+    assert appointment.office_sms_sent is True
+    assert appointment.office_email_sent is True
+    # …and still NO generic legacy notification anywhere in the flow.
+    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert bool(conversation.lead_email_sent) is False
+    assert bool(conversation.lead_sms_sent) is False

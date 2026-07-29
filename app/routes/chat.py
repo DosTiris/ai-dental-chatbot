@@ -1325,19 +1325,42 @@ def route_completed_lead(
     seed_source: str = SEED_SOURCE_STORED_TIME_WINDOW,
 ) -> Optional[Tuple[str, dict]]:
     """
-    PATCH 3 (Senior Audit Critical #5): THE single completion-routing owner.
-    Every eligible NON-EMERGENCY lead-completion branch calls this AFTER its
-    existing mark_completed_and_notify_office ran unchanged (approved
-    temporary MVP behavior: the office lead notification runs first, so an
-    abandoned Calendar dialog can never become a lost lead; a later
-    successful booking additionally sends the separate booking notification;
-    deduplication stays out of scope under Recommended #1).
+    PATCH 3 (Senior Audit Critical #5): THE single completion-routing
+    owner — and, since the notification-dedupe patch, the single owner
+    of completed-lead notification TIMING (Rule 3). Callers mark the
+    lead completed via mark_lead_completed_silently() BEFORE calling
+    and send NOTHING themselves unless this function returns None.
 
     Ownership is resolved fresh from CURRENT settings — never from
-    booking_link_sent:
-      external_calendar  -> the shared external-handoff owner's response
-      internal_calendar  -> begin_booking_after_intake's reply
-      lead_capture_only  -> None (the caller keeps today's reply unchanged)
+    booking_link_sent — and decides both the reply AND the timing:
+      external_calendar  -> the per-channel-idempotent completed-lead
+                            notification runs here, THEN the shared
+                            external-handoff owner's response is
+                            returned (pre-handoff notification
+                            behavior preserved).
+      internal_calendar  -> PRIORITY lead: the completed-lead
+                            notification runs here BEFORE the Calendar
+                            starts — an urgent lead's office alert
+                            must never wait on a booking dialog. A
+                            later successful booking additionally
+                            sends the exact-time booking notification;
+                            that pair is the INTENTIONAL priority
+                            exception.
+                            ROUTINE lead: NO completed-lead
+                            notification — the successful booking's
+                            exact-time notification is the single
+                            office alert. (Browser-abandonment
+                            detection is explicitly out of scope; an
+                            abandoned routine dialog is a completed
+                            lead visible to staff, with no alert
+                            sent.)
+      lead_capture_only  -> None: the CALLER sends the generic
+                            completed-lead notification and keeps
+                            today's reply unchanged.
+    Every notification call here and in the callers goes through the
+    per-channel-idempotent helpers (a channel whose sent flag is
+    already True is NEVER re-sent), so no path ordering can ever
+    double-send.
 
     On a Calendar delegation failure the fallback is HONEST (Rule 16):
     finalize_and_notify_if_ready is per-channel idempotent (a channel whose
@@ -1346,6 +1369,14 @@ def route_completed_lead(
     success; otherwise the patient is directed to the office phone.
     """
     if has_external_booking(client):
+        # Notification timing (dedupe patch): the generic completed-lead
+        # notification precedes the external handoff exactly as it
+        # always has — only its call site moved into the routing owner
+        # (per-channel idempotent; discard the tuple: handoff wording
+        # never depended on it).
+        mark_completed_and_notify_office(
+            db, client, conversation, "EXTERNAL BOOKING HANDOFF NOTIFY TRIGGERED"
+        )
         active_service_reason = (
             (conversation.lead_reason or "").strip() or "appointment request"
         )
@@ -1384,6 +1415,19 @@ def route_completed_lead(
     seed_date, seed_date_text, seed_time_preference = _booking_seeds_from_time_window(
         seed_time_window
     )
+
+    # INTENTIONAL priority exception (dedupe patch): a priority lead's
+    # immediate office alert is safety behavior and must never wait on
+    # the Calendar dialog. Per-channel idempotency makes this a no-op
+    # when a caller (short-symptom / bypass sites) already notified.
+    # Routine leads send NOTHING here: their single office alert is
+    # the exact-time booking notification after a successful booking,
+    # and on a Calendar-start failure the honest fallback below sends
+    # the generic notification exactly once.
+    if bool(getattr(conversation, "lead_is_priority", False)):
+        mark_completed_and_notify_office(
+            db, client, conversation, "PRIORITY COMPLETION NOTIFY TRIGGERED (routing owner)"
+        )
 
     try:
         booking_reply = begin_booking_after_intake(
@@ -4093,6 +4137,27 @@ def lead_is_ready_for_office_notification(conversation: Conversation) -> bool:
     return is_lead and has_name and has_phone
 
 
+def mark_lead_completed_silently(
+    db: Session,
+    conversation: Conversation,
+) -> None:
+    """
+    THE single owner of the completed-status transition (Rule 3).
+
+    Sets lead_status to "completed" only when it is not already, and
+    persists exactly as the two notification helpers below always
+    have. Contains NO notification provider calls: notification
+    TIMING is owned by route_completed_lead() and by the helpers
+    below, which both reuse this transition so the status logic
+    exists exactly once.
+    """
+    if (getattr(conversation, "lead_status", None) or "").strip().lower() != "completed":
+        conversation.lead_status = "completed"
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+
 def finalize_and_notify_if_ready(
     db: Session,
     client: Client,
@@ -4110,11 +4175,7 @@ def finalize_and_notify_if_ready(
             None,
         )
 
-    if (getattr(conversation, "lead_status", None) or "").strip() != "completed":
-        conversation.lead_status = "completed"
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
+    mark_lead_completed_silently(db, conversation)
 
     if bool(getattr(conversation, "lead_email_sent", False)) and bool(getattr(conversation, "lead_sms_sent", False)):
         return True, True, None, None
@@ -4212,11 +4273,7 @@ def mark_completed_and_notify_office(
     Marks the lead completed, then sends office SMS/email through the single notification helper.
     This prevents duplicate notification logic in multiple chat branches.
     """
-    if (getattr(conversation, "lead_status", None) or "").strip().lower() != "completed":
-        conversation.lead_status = "completed"
-        db.add(conversation)
-        db.commit()
-        db.refresh(conversation)
+    mark_lead_completed_silently(db, conversation)
 
     print(f"✅ {trigger_label}")
 
@@ -8515,10 +8572,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                         "SHORT SYMPTOM FLOW COMPLETION NOTIFY TRIGGERED",
                     )
 
-                    # PATCH 3 (Senior Audit Critical #5): the office lead
-                    # notification above ran FIRST (approved temporary MVP
-                    # behavior); the single routing owner now selects the
-                    # one booking owner for this completed lead.
+                    # Short-symptom leads are PRIORITY: the immediate
+                    # office alert above is the INTENTIONAL priority
+                    # exception (dedupe patch), and the routing owner's
+                    # own priority notify is then a per-channel-
+                    # idempotent no-op.
                     routed = route_completed_lead(db, client, conversation, user_text, office_phone)
                     if routed is not None:
                         return _routed_completion_response(db, conversation, routed, show_start_over)
@@ -9924,18 +9982,26 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         and detect_new_patient_flag(user_text) is not None
         and (conversation.lead_status or "").strip().lower() != "completed"
     ):
+        # Notification-dedupe patch: mark completed WITHOUT notifying;
+        # the routing owner decides timing (routine native Calendar
+        # sends no generic lead alert; priority and external notify
+        # inside the routing owner; capture-only falls through to the
+        # caller send below).
+        mark_lead_completed_silently(db, conversation)
+
+        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+        if routed is not None:
+            return _routed_completion_response(db, conversation, routed, show_start_over)
+
+        # Routing declined ownership (Calendar disabled / not handled):
+        # the generic completed-lead notification is the caller's job,
+        # exactly as before the dedupe patch (per-channel idempotent).
         lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
             db,
             client,
             conversation,
             "NORMAL PATIENT TYPE COMPLETION NOTIFY TRIGGERED",
         )
-
-        # PATCH 3 (Senior Audit Critical #5): lead notification ran first
-        # (approved temporary MVP behavior); route to the one booking owner.
-        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
-        if routed is not None:
-            return _routed_completion_response(db, conversation, routed, show_start_over)
 
         reply_text = build_normal_lead_complete_reply(conversation)
 
@@ -10000,21 +10066,27 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             priority_intake_is_complete(conversation)
             and (conversation.lead_status or "").strip().lower() != "completed"
         ):
+            # Notification-dedupe patch: mark completed WITHOUT notifying
+            # here; the routing owner sends this priority lead's immediate
+            # alert BEFORE starting the Calendar (intentional priority
+            # exception). Priority NON-emergency leads may book, and the
+            # eventual appointment urgency stays "priority" (owned by
+            # booking_conversation._finalize_and_reply).
+            mark_lead_completed_silently(db, conversation)
+
+            routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+            if routed is not None:
+                return _routed_completion_response(db, conversation, routed, show_start_over)
+
+            # Routing declined ownership: the generic notification is the
+            # caller's job, exactly as before (per-channel idempotent — a
+            # channel the routing owner already sent is never re-sent).
             lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
                 db,
                 client,
                 conversation,
                 "PRIORITY TIME WINDOW HANDOFF NOTIFY TRIGGERED",
             )
-
-            # PATCH 3 (Senior Audit Critical #5): lead notification ran
-            # first (approved temporary MVP behavior); route to the one
-            # booking owner. Priority NON-emergency leads may book, and the
-            # eventual appointment urgency stays "priority" (owned by
-            # booking_conversation._finalize_and_reply).
-            routed = route_completed_lead(db, client, conversation, user_text, office_phone)
-            if routed is not None:
-                return _routed_completion_response(db, conversation, routed, show_start_over)
 
             # S5: wording reflects THIS turn's real per-channel results —
             # the values already returned above; no second notification call.
@@ -10352,18 +10424,23 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     if lead_capture_complete and (conversation.lead_status or "").strip().lower() != "completed":
+        # Notification-dedupe patch: mark completed WITHOUT notifying;
+        # the routing owner decides timing (see route_completed_lead).
+        mark_lead_completed_silently(db, conversation)
+
+        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+        if routed is not None:
+            return _routed_completion_response(db, conversation, routed, show_start_over)
+
+        # Routing declined ownership (Calendar disabled / not handled):
+        # the generic completed-lead notification is the caller's job,
+        # exactly as before the dedupe patch (per-channel idempotent).
         lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
             db,
             client,
             conversation,
             "LEAD COMPLETION NOTIFY TRIGGERED",
         )
-
-        # PATCH 3 (Senior Audit Critical #5): lead notification ran first
-        # (approved temporary MVP behavior); route to the one booking owner.
-        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
-        if routed is not None:
-            return _routed_completion_response(db, conversation, routed, show_start_over)
 
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
@@ -10510,9 +10587,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     "PRIORITY BYPASS HANDOFF NOTIFY TRIGGERED",
                 )
 
-                # PATCH 3 (Senior Audit Critical #5): lead notification ran
-                # first (approved temporary MVP behavior); route to the one
-                # booking owner (priority non-emergency leads may book).
+                # Bypass completions are PRIORITY: the immediate alert
+                # above is the INTENTIONAL priority exception (dedupe
+                # patch); the routing owner's priority notify is then an
+                # idempotent no-op (priority non-emergency leads may book).
                 routed = route_completed_lead(db, client, conversation, user_text, office_phone)
                 if routed is not None:
                     return _routed_completion_response(db, conversation, routed, show_start_over)

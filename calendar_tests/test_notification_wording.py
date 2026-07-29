@@ -246,5 +246,9 @@ def test_native_booking_reply_unchanged(db, fakes):
     assert conversation.booking_time_preference == "morning"
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
 
-    # The lead notification still ran exactly once.
-    assert len(fakes.lead_email) == 1 and len(fakes.lead_sms) == 1
+    # Dedupe patch: a ROUTINE native-Calendar completion defers the
+    # office alert to the exact-time booking notification — no generic
+    # lead send, per-channel flags stay false.
+    assert len(fakes.lead_email) == 0 and len(fakes.lead_sms) == 0
+    assert bool(conversation.lead_email_sent) is False
+    assert bool(conversation.lead_sms_sent) is False

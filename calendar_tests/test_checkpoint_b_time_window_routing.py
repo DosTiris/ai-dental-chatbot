@@ -547,7 +547,9 @@ def test_stored_weekday_morning_is_consumed_at_patient_type_completion(db, fakes
     # The captured preference itself is untouched by consumption.
     assert conversation.lead_time_window == f"{word} morning"
     assert (conversation.lead_status or "").lower() == "completed"
-    assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
+    # Dedupe patch: routine native-Calendar completion — no generic
+    # lead notification (the booking notification is the office alert).
+    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
     assert not ISO_IN_TEXT.search(resp.reply)
 
 
@@ -740,6 +742,9 @@ def test_stored_composite_asap_never_becomes_a_tomorrow_booking(db, fakes):
     assert conversation.lead_time_window == "ASAP / tomorrow ok"
     assert conversation.lead_is_priority is True
     assert (conversation.lead_status or "").lower() == "completed"
+    # INTENTIONAL priority exception (dedupe patch): this lead is
+    # PRIORITY, so the immediate legacy alert still runs (from the
+    # routing owner) before the Calendar starts.
     assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
     assert not ISO_IN_TEXT.search(resp.reply)
     for value in meta_strings(resp.meta):
