@@ -258,8 +258,9 @@ ok("action without url rejected", renderCase({ label: "Open in Google Maps" }).l
     // 5. Static file assertions.
     ok("production Render URL preserved",
        sb.html.indexOf("https://ai-dental-chatbot.onrender.com") !== -1);
-    ok("staging Render URL not introduced",
-       sb.html.indexOf("https://ai-dental-chatbot-staging.onrender.com") === -1);
+    ok("staging Render host routes to same-origin backend",
+       sb.html.indexOf('const STAGING_HOSTNAME = "ai-dental-chatbot-staging.onrender.com";') !== -1 &&
+       sb.html.indexOf("window.location.hostname === STAGING_HOSTNAME") !== -1);
     ok("S1 quick-reply functions still present",
        sb.html.indexOf("normalizeQuickReplyOption") !== -1 &&
        sb.html.indexOf("getServiceReplyOptions") !== -1);
