@@ -4584,3 +4584,340 @@ begins.
   record does not claim those unrelated integration credentials were rotated.
 - This closure records S10 only; the production/calendar synchronization
   program is not claimed complete by this record.
+
+# CHECKPOINT B — Time-window seed routing into the Calendar start (CLOSED)
+
+## Goal
+Make the Calendar start consume the time-window value the capture owner
+already validated, instead of re-parsing raw patient text. Two staging
+defects drove this: (1) rating/fraction tokens ("my pain is 7/10 and I can
+come in on July 28 morning") were re-parsed by the pure intent parser into a
+wrong-year date that reached the booking-horizon check and produced a false
+"booking up to 30 days ahead" rejection; (2) a complete legacy stored
+preference ("Tuesday morning") collected turns earlier was re-asked instead
+of consumed when a later intake answer completed the lead.
+
+## Files changed
+- app/routes/chat.py — seed derivation and routing (Checkpoint B rev2/rev3)
+- app/services/booking_conversation.py — seeded start entry
+- calendar_tests/test_checkpoint_b_time_window_routing.py — new (22 tests)
+- calendar_tests/test_notification_wording.py — one fixture-consumption
+  expectation updated (declared adaptation; see Behavior added)
+
+## Functions changed
+- chat.py: `_booking_seeds_from_time_window()` (new single owner of seed
+  derivation from the canonical stored shape; Rule 3 — lives in chat.py
+  because chat.py owns the canonical stored shape from Checkpoint A);
+  `route_completed_lead()` (passes seeds; closed `seed_source` vocabulary
+  `SEED_SOURCE_STORED_TIME_WINDOW` / `SEED_SOURCE_CURRENT_MESSAGE`, unknown
+  values raise — Rule 4/16)
+- booking_conversation.py: `begin_booking_after_intake()` (keyword-only
+  `seed_date`, `seed_date_text`, `seed_time_preference`,
+  `seeds_are_authoritative`; defaults preserve every pre-Checkpoint-B call
+  site byte-identically); `_handle_start()` (honors seeds through the SAME
+  `parse_preferred_date` owner and the SAME `_validate_and_store_date`
+  horizon/past-date rules every start already uses — no duplicated date
+  arithmetic)
+
+## Database changes
+None. No migration. No schema change. No data change.
+
+## Behavior added
+- A stored complete preference ("Tuesday morning", "Tue 3pm",
+  "Tue 2026-07-28 morning") is consumed at lead completion: the day question
+  is not re-asked; the part-of-day is carried into the offer filter.
+- "Weekday morning" seeds the preference only; the Calendar asks for the day.
+- rev3: BOTH canonical ASAP forms — "ASAP" and "ASAP / tomorrow ok" — yield
+  no seeds. The composite's "tomorrow" is a fallback the patient ACCEPTED,
+  not a date they SELECTED, and must never become a day seed.
+- `seeds_are_authoritative=True` (current-message source only) suppresses
+  the raw-text date fallback entirely — that fallback is the wrong-candidate
+  defect vector.
+- Declared adaptation: test_notification_wording.py now expects the stored
+  "Tuesday morning" fixture preference to be consumed rather than the
+  generic day question repeated.
+
+## Behavior intentionally unchanged
+- Every pre-Checkpoint-B `begin_booking_after_intake` call site with no
+  seeds behaves byte-identically.
+- Date validation remains solely owned by `_validate_and_store_date`.
+- ASAP completions reach the Calendar exactly as before.
+- Emergency gating, intake-identity gating, and the active-dialog yield in
+  `begin_booking_after_intake` are untouched.
+
+## Risks
+- Seed derivation depends on the canonical stored time-window grammar; a
+  future change to the Checkpoint A canonical shape must update the single
+  derivation owner or seeds silently stop deriving (they fail to None —
+  the Calendar then asks its own questions; degraded UX, never a wrong
+  booking).
+
+## Tests
+- calendar_tests/test_checkpoint_b_time_window_routing.py — 22 tests
+  (legacy-form consumption, ASAP rev3 non-seeding, authoritative-seed
+  fallback suppression, wrong-year rating-token regression pin).
+- Covered within the full calendar suite runs recorded in the two closure
+  records below.
+
+## Rollback method
+Checkpoint B is code-only. Revert the chat.py and booking_conversation.py
+edits and remove the test file; no database action exists to undo.
+- Verified staging implementation/correction commit:
+  bc755d8f7c6040610696dedf77a1f7695a8c13b8
+  ("Fix Checkpoint B time-window routing").
+- app/routes/chat.py SHA-256 before bc755d8:
+  CA5E06424344A9F47E8512A9DD7F20F7CA84B3C9E48E6454653F7B45A4465460
+- app/routes/chat.py SHA-256 after bc755d8:
+  C1C81DE1C90A5257277426D9D607A212A48D585F33F81AC3AF9EBE81896BBD00
+- The controlled production-main overlay that carries the verified
+  Checkpoint B implementation is integration commit
+  83256de9cd7e7c4d751b1891ea6e1173e5bfa86c.
+
+## Honest record
+- This closure is appended retroactively: the Checkpoint B work was
+  implemented and verified on the staging branch (through bc755d8) before
+  this record was written. The 2026-07-29 release audit identified the
+  missing record; root cause: the closure was deferred pending integration
+  and was not appended when staging verification completed.
+
+---
+
+# MAIN INTEGRATION — Patch 9A calendar and Checkpoint B routing (83256de)
+
+## Goal
+Bring the verified calendar program (Patches 1–9A, Checkpoint B, S-series
+emergency/hybrid fixes) onto a branch created directly from production main
+(425dfca — Fix Root Canal and Dentures service selection), because the old
+staging and main histories could not be safely merged or cherry-picked. The
+integration was applied as a controlled overlay and committed as exactly 60
+changed files on branch checkpoint-b-main-integration.
+
+## Files changed
+60 files; merge-base equals production main 425dfca. Four files modify
+existing production files:
+- app/main.py (+7)
+- app/models.py (+42)
+- app/routes/chat.py (+1,845 / −353)
+- tests/test_life_threatening_interruption.py (+42 / −7)
+The remaining 56 files are additions: app/calendar_models.py,
+app/repositories/* (3), app/routes/calendar.py, app/services/* (9),
+calendar_tests/* (23 including conftest), migrations/001–006 up and down
+(12), docs/INTEGRATION.md, CHANGE_REPORT.md, README.md,
+patch9a_delivery/* (3), and tests/test_map_action.js.
+
+## Functions changed
+chat.py absorbs the verified staging owners: life-threatening predicate
+(`looks_like_life_threatening_emergency`, closed trigger vocabulary, single
+owner), Calendar continuation and completion routing, Checkpoint B seed
+derivation, hybrid capture/post-handoff single owners, verified-maps-URL
+allowlist, sanitized logging (PII-bearing debug prints from the production
+baseline are REMOVED: [LEAD_SUMMARY], raw lead_name/lead_phone reprs,
+[LEAD_NOTIFY_EMAIL]/[LEAD_NOTIFY_PHONE] values — remaining logs carry
+booleans, exception classes, and UUIDs only).
+
+## Database changes
+None executed by the commit itself. The commit ADDS migrations 001–006
+(both directions). Required order for any environment: apply 001→006 BEFORE
+deploying this code. The integrated ORM maps seven booking_* columns on
+conversations; deploying code before 001+003 breaks every Conversation
+query — all chat traffic, not only booking. Old (pre-integration) code
+tolerates the new columns, so migrations-first is safe in both directions
+of the deploy window.
+
+## Behavior added
+- Entire calendar program becomes available, gated per office by the strict
+  JSON-boolean `settings.calendar.booking_enabled` (default False —
+  malformed values fail closed; deploy is behaviorally inert for every
+  existing office until explicitly enabled).
+- Notification-attempt ledger (Patch 9A) with atomic per-channel claim,
+  three-state machine, legacy Option-B suppression.
+- Per-office Calendar admin credentials (X-Admin-Key; global ADMIN_API_KEY
+  is dead on /admin/calendar/*; tenant mismatch is 404, indistinguishable
+  from not-found — Rule 15).
+
+## Behavior intentionally unchanged (verified against the diff)
+- Root Canal and Dentures service-selection fix (production baseline
+  preserved; merge-base is that exact commit).
+- Persistent stop after a life-threatening emergency; input lock contract.
+- Single lead-notification behavior; hybrid booking capture order;
+  capture-first mode; map URL allowlist; tenant isolation.
+- static/chat.html is NOT in the 60 changed files: the production widget is
+  byte-identical to main at this commit. Production Render URL preserved;
+  staging Render URL not introduced AT THIS COMMIT (superseded by 3470c1e —
+  see next record).
+
+## Declared behavior changes (honest record — adaptations)
+1. Production Render URL preserved; no staging URL introduced (at 83256de).
+2. test_notification_wording.py updated for Checkpoint B stored-preference
+   consumption (recorded in the Checkpoint B closure above).
+3. ORDINARY-EMERGENCY FOLLOW-UP: after an ordinary dental emergency reply,
+   a bare-name follow-up now routes to emergency_followup_intake (contact
+   intake continues; meta carries show_call_button / hide_booking_button)
+   instead of the production baseline's service_offer_clarification. The
+   preserved contract is: conversation NOT closed, next turn functional.
+   tests/test_life_threatening_interruption.py's assertion was updated
+   accordingly. The production widget branches only on disable_input /
+   show_booking_button / map_action, so no widget rendering change results.
+   This adaptation was identified during the 2026-07-29 release audit and
+   is acknowledged here explicitly.
+
+## Risks
+- Deploy-before-migrate is a total chat outage (see Database changes).
+- `Base.metadata.create_all()` remains in app/main.py: on a FRESH database
+  where the app starts before migrations, the ORM creates the calendar
+  tables/indexes and migrations 002/005/006 then fail loudly (deliberately
+  no IF NOT EXISTS). Standing finding; unresolved by this integration.
+- Dev CORS posture (localhost origins, origin "null" regex,
+  allow_credentials) ships unchanged from the production baseline —
+  pre-existing, not a regression; standing finding.
+- patch9a_delivery/ (historical delivery diffs) is committed on this
+  branch. Owner decision recorded 2026-07-29: keep it for this release
+  because it is non-executable audit material and removing it would alter
+  the already audited release candidate. Schedule removal as a separate
+  post-release repository-cleanup change.
+- Deferred and still open: quick-action send while input disabled (widget,
+  pre-existing in production), reload/localStorage lock restoration,
+  last_assistant_offered_scheduling_service() over-matching,
+  confirm_appointment not_confirmable raw-status echo (Patch 7 out-of-scope
+  note), chat_rebuild.py dead file, app/_init_.py and app/routes/_init_.py
+  misnamed legacy files. Patch 9B remains deferred and unstarted.
+
+## Tests to perform / performed
+Owner-verified on exact commit 83256de (local, disposable PostgreSQL 16):
+- 344 focused Checkpoint B tests passed (9.02s)
+- 810 complete calendar tests passed (28.79s)
+- 46 life-threatening emergency tests passed; 84 emergency subtests passed
+- 18 JavaScript map-action tests passed
+- Python compilation passed excluding only the two pre-existing misnamed
+  legacy files app/_init_.py and app/routes/_init_.py
+Independent read-only audit (2026-07-29, audit package SHA-256
+841BD0E94A031D171693B705C97CE428AE74C1AB8497B771DF3467326CB7D8AE):
+diff-level review of both production-touching files, all 12 migrations,
+tenancy/auth/notification/hold owners; corrected parametrize-aware AST
+count corroborated the suite at 744 statically countable items + 10
+dynamically parametrized functions, consistent with 810 collected.
+
+## Rollback method
+Production main remains 425dfca; the branch is a single commit ahead of it
+(plus 3470c1e below). Rollback before production deploy: do not merge.
+Rollback after a production deploy: redeploy 425dfca (code-first — pre-9A
+code never references the ledger or booking columns), then optionally run
+the down-migrations 006→001 in that order, exporting appointments and
+appointment_slots first per 001_down's documented backup step.
+
+---
+
+# STAGING WIDGET ROUTING + FINAL STAGING VERIFICATION (3470c1e)
+
+## Goal
+Let the staging-hosted widget call its same-origin staging backend while
+preserving production routing byte-for-byte for every non-staging host, so
+deployed-staging verification could exercise the real widget path.
+
+## Files changed
+- static/chat.html
+- tests/test_map_action.js
+
+## Functions changed
+- chat.html API_BASE selection only: adds
+  `const STAGING_HOSTNAME = "ai-dental-chatbot-staging.onrender.com";` and
+  extends the same-origin condition to that hostname. API_BASE is the
+  single constant used by both /chat/config and /chat, so the change covers
+  every backend call the widget makes. All other hosts (production Render
+  host, embedded production sites, file://) resolve exactly as before to
+  https://ai-dental-chatbot.onrender.com.
+- test_map_action.js: the former "staging Render URL not introduced"
+  assertion is replaced by three assertions — STAGING_HOSTNAME is declared,
+  the staging hostname resolves to the same-origin backend, and the
+  production Render URL remains preserved. This SUPERSEDES declared
+  adaptation #1/#2 of the integration record above: the release candidate
+  now intentionally ships the staging hostname constant in the widget
+  (inert on every production host).
+
+## Database changes
+None.
+
+## Behavior added
+Staging-hosted widget → same-origin staging backend. No other host changes
+behavior.
+
+## Behavior intentionally unchanged
+Production widget behavior on every production host; all quick replies,
+map action, booking button, input-lock rendering.
+
+## Risks
+The staging hostname string is visible in the production widget source —
+disclosure only, no functional effect. If the staging service is ever
+retired, the constant becomes inert.
+
+## Tests / verification (owner-observed on exact commit 3470c1e)
+Automated: Python compilation passed; 810 calendar tests passed (26.22s);
+46 emergency tests passed; 84 emergency subtests passed; 18 JavaScript
+tests passed; `git diff --check` passed; working tree clean.
+
+Manual deployed-staging verification (staging Render + staging Supabase):
+- /chat/config returned the Mia Staging Dental configuration; direct
+  POST /chat succeeded; widget↔backend communication confirmed post-3470c1e;
+  no-opening fallback correct.
+- The previously deferred unavailable-date/suggested-date selection loop
+  (S10 deferred item) was NOT reproduced: three real slots offered
+  correctly. The S10 deferred item is retired as not-reproduced on the
+  integrated code; it was not separately root-caused, so it remains a
+  watch item, not a proven fix.
+- Full booking lifecycle: patient selected and confirmed 11:00 AM;
+  appointment created status=pending; slot available→booked; hold metadata
+  cleared after finalization; a SECOND conversation was not offered the
+  booked 11:00 AM slot and successfully booked 10:00 AM; 10:30 AM remained
+  available (double-booking protection observed live).
+- Ordinary knocked-out-tooth emergency: name and phone collected, request
+  flagged urgent, conversation kept open (declared adaptation #3 behavior
+  observed as designed).
+- Life-threatening "I can't breathe and my throat is swelling": immediate
+  911/ER guidance, no intake begun, further typing blocked; Start Over
+  cleared the persistent closed state.
+- Calendar admin confirmation endpoint: 10:00 AM appointment
+  pending→confirmed; confirmed_at populated; slot remained booked; both
+  hold fields NULL.
+- Production was not modified or deployed.
+
+## Additional live notification verification (completed)
+- The staging tenant was configured with owner-controlled
+  notification_phone and notification_email destinations.
+- One real 10:30 AM staging booking crossed the deployed provider boundary
+  successfully. Twilio delivered one calendar SMS and Resend delivered one
+  calendar email. The existing lead-notification path also delivered its
+  separate lead SMS and lead email; those are distinct notifications, not
+  duplicates of the calendar messages.
+- For appointment 944925f2-d6e2-44c2-8a83-93cf9b8083cc, the
+  notification_attempts ledger contained exactly two rows:
+  office_sms=sent and office_email=sent. Both appointment sent flags were
+  true, notify_error was NULL, and both attempts had resolved_at values.
+- A deliberate second invocation against the same staging appointment,
+  using the exact 3470c1e code with provider-boundary traps, returned
+  office_sms_sent=True, office_email_sent=True, errors=[], ledger_rows=2,
+  provider_calls=0, and ledger_rows_and_timestamps_unchanged=True.
+  Therefore the existing sent rows suppressed both provider calls and no
+  third calendar SMS or email was produced.
+- This satisfies the REQUIRED live notification proof in
+  docs/INTEGRATION.md mixed-version cutover steps 7–9; no waiver is used.
+- Owner attested on 2026-07-29 that the credentials previously exposed via
+  .env.donotuse had already been rotated. The attested scope was:
+  ADMIN_API_KEY, the database password represented by DATABASE_URL,
+  OPENAI_API_KEY, RESEND_API_KEY, and TWILIO_AUTH_TOKEN.
+
+## Rollback method
+Revert 3470c1e (two-file revert restoring the 83256de widget and test);
+no database or state involvement.
+
+## Checkpoint
+- Code release candidate 3470c1e has completed automated, manual
+  deployed-staging, live-provider, and duplicate-invocation verification.
+- Remaining work is production preparation only: (1) inspect the production
+  Supabase schema read-only; (2) apply migrations 001→006 BEFORE any
+  production code deploy; (3) verify production environment variables;
+  (4) keep booking_enabled=false for every office at cutover; and
+  (5) provision per-office Calendar admin credentials only when first
+  needed.
+- patch9a_delivery/ is intentionally retained for this release as
+  non-executable audit material; post-release cleanup is tracked separately.
+- No production merge or deployment has occurred as of this record.
