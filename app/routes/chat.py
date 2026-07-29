@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
+from datetime import date as _date
 from zoneinfo import ZoneInfo
 from difflib import get_close_matches
 from typing import List, Dict, Optional, Any, Tuple
@@ -29,6 +30,9 @@ import json
 import unicodedata
 import random
 import os
+
+# urlparse is used only by get_verified_maps_url() below to validate the
+# manually configured Google Maps share link (S2 Maps backport).
 from urllib.parse import urlparse
 
 from app.config import OPENAI_API_KEY
@@ -47,6 +51,45 @@ from app.services.mia_service_library import (
 )
 from twilio.rest import Client as TwilioClient
 import resend
+
+# PATCH 3 (Senior Audit Critical #5): the Calendar dialog entry points and
+# the Calendar-owned reset. chat.py CALLS these; it contains no calendar
+# logic of its own (Rule 2) and never mutates booking_* fields directly.
+# BookingState is imported only as the single owner of the state constants.
+from app.calendar_models import BookingState
+from app.services.booking_conversation import (
+    begin_booking_after_intake,
+    cancel_active_booking,
+    handle_booking_message,
+)
+
+# CHECKPOINT B: the time-preference bucket vocabulary stays owned by
+# appointment_intent (Rule 3). chat.py imports the constants only to label
+# the seed it derives from the canonical captured time window; it performs
+# no slot matching of its own.
+from app.services.appointment_intent import (
+    PREF_AFTERNOON,
+    PREF_EVENING,
+    PREF_MORNING,
+)
+
+# PATCH 6 (Senior Audit Recommended #7): notification-output hardening.
+# notification_service is the SINGLE OWNER (Rule 3) of the plain-text
+# field normalizer, the HTML email renderer, the fixed send_failed code,
+# the approved field limits, and the safe exception-class log helper.
+# chat.py only APPLIES them at its lead-notification output boundaries.
+from app.services.notification_service import (
+    FIELD_LIMIT_EMAIL,
+    FIELD_LIMIT_FREE_TEXT,
+    FIELD_LIMIT_NAME,
+    FIELD_LIMIT_PHONE,
+    FIELD_LIMIT_PRACTICE_NAME,
+    SEND_FAILED,
+    SUBJECT_MAX_LENGTH,
+    normalize_notification_field,
+    render_email_html,
+    sanitized_exception_class,
+)
 
 router = APIRouter()
 ai = OpenAI(api_key=OPENAI_API_KEY)
@@ -658,18 +701,9 @@ def get_booking_button_label(client) -> str:
     return (get_client_setting(client, "booking_button_label", "") or "").strip() or "Book Online"
 
 
-# ---------------------------------------------------------
-# Verified Google Maps link (per-client, manually approved)
-# ---------------------------------------------------------
-# The written address and the maps link are two separate approved
-# values. Mia must NEVER construct a Google Maps URL from address
-# text. Only a manually verified HTTPS link stored in the client's
-# Supabase settings JSON under "maps_url" may ever be shown, and
-# only when it points at an approved Google Maps domain. Anything
-# missing/blank/malformed/non-HTTPS/unapproved fails safely: the
-# written address is shown with no map button.
-# Map-specific approval rules. Hosts mapping to True accept any HTTPS
-# path; hosts mapping to "/maps" accept only paths beginning with /maps.
+# Approved hosts for the manually verified "Open in Google Maps" link.
+# Hosts mapped to True accept any HTTPS path; hosts mapped to "/maps"
+# accept only paths beginning with /maps.
 # goo.gl is intentionally NOT approved (no legacy links in use;
 # Timeless Smiles uses a current maps.app.goo.gl share link).
 APPROVED_MAPS_HOSTS = {
@@ -734,7 +768,6 @@ def build_map_action(client) -> Optional[dict]:
         "target": "_blank",
         "rel": "noopener noreferrer",
     }
-
 
 def get_client_timezone_name(client) -> str:
     """Return the practice timezone, defaulting to New York for current demos."""
@@ -808,37 +841,99 @@ def should_capture_before_booking_link(
         return True
 
     # hybrid
-    # Hybrid mode must always capture the patient's name and a valid phone
-    # number before the external booking link is shown, regardless of the
-    # service reason. ("direct" above intentionally skips capture, and
-    # "capture_first" keeps its own behavior.)
+    # S9-2 (decision D-1, approved): hybrid ALWAYS captures before the
+    # external booking link is shown. This replaces — rather than sits beside
+    # — the previous conditional policy (urgent / emergency / high-value /
+    # routine), so exactly ONE hybrid capture policy exists (Rule 3). It now
+    # covers generic, "Other", unmapped, routine, high-value, urgent and
+    # emergency-compatible lead paths; every earlier emergency owner in
+    # chat() still claims the message before this owner is consulted. The
+    # dead is_after_hours local was removed with the conditional it fed.
+    # "direct" (above) still skips capture; "capture_first" (above) keeps its
+    # own behavior. Both are unchanged.
     return True
+
+def conversation_is_ordinary_hybrid_lead(conversation: Conversation) -> bool:
+    """
+    S9-1 (decision D-2, S3 preservation condition): THE single owner of the
+    ordinary-vs-priority split used by hybrid pre-handoff capture.
+
+    Purpose: An ORDINARY hybrid lead uses the short production capture
+             sequence (first name -> phone -> external booking link). A
+             PRIORITY/ASAP lead must NOT use it: the S3 sequence
+             (reason -> name -> phone -> email or skip -> complete time
+             window -> new/returning) stays calendar-authoritative and its
+             completion is owned by priority_intake_is_complete(). Emergency
+             leads are excluded too and keep the behavior they have today.
+    Inputs:  conversation - the active Conversation row.
+    Returns: True only when the lead is neither priority/ASAP nor emergency.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none - missing attributes read as absent.
+
+    Documented duplication (Rule 3 note): the priority expression below is the
+    same one already computed inline inside priority_intake_is_complete() and
+    receptionist_bypass_reply(). S9 does not refactor those S3 owners (Rule
+    12: no refactor plus feature in one patch), so it is stated once here and
+    unifying the three sites is recorded as deferred drift.
+    """
+    time_window = (getattr(conversation, "lead_time_window", None) or "").strip()
+
+    is_priority = (
+        bool(getattr(conversation, "lead_is_priority", False))
+        or time_window in {"ASAP", "ASAP / tomorrow ok"}
+    )
+    is_emergency = bool(getattr(conversation, "lead_is_emergency", False))
+
+    return not is_priority and not is_emergency
+
 
 def next_booking_capture_prompt(
     conversation: Conversation,
     service_reason: Optional[str] = None,
     booking_mode: Optional[str] = None,
+    client: Optional[Client] = None,
 ) -> Optional[str]:
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
 
+    # PATCH 6 (Recommended #7): controlled fields only — patient name and
+    # phone must not appear in server logs.
     print(
         "[NEXT_BOOKING_CAPTURE_PROMPT]",
-        "lead_name=", repr(conversation.lead_name),
-        "lead_phone=", repr(conversation.lead_phone),
-        "service_reason=", repr(service_reason),
-        "booking_mode=", repr(booking_mode),
         "has_name=", has_name,
         "has_phone=", has_phone,
+        "service_reason_present=", bool(service_reason),
+        "conversation=", conversation.id,
     )
 
-    # 🔥 HYBRID → ALWAYS NAME FIRST, THEN PHONE, ONE QUESTION AT A TIME.
-    # The external booking link may only be shown once both are captured.
+    # S9-1 (decision D-2, approved): HYBRID -> first name, then phone, ONE
+    # question per response, then the external link. The combined
+    # "name and phone number" prompt is never used in hybrid, and email, time
+    # window and new/returning are never asked before an ordinary hybrid
+    # handoff. Wording is the verified production wording.
     if booking_mode == "hybrid":
-        if not has_name:
-            return "Before I send you to online booking, what’s your first name?"
-        if not has_phone:
-            return "Before I send you to online booking, what’s the best phone number to reach you?"
+        if conversation_is_ordinary_hybrid_lead(conversation):
+            if not has_name:
+                return "Before I send you to online booking, what’s your first name?"
+            if not has_phone:
+                return "Before I send you to online booking, what’s the best phone number to reach you?"
+            return None
+
+        # S9 CALENDAR ADAPTATION (decision D-2, S3 preservation condition):
+        # a priority/ASAP lead is NEVER handed off on name + phone alone.
+        # Until priority_intake_is_complete() - the existing S3 completeness
+        # owner - is True, the next required question is produced by the
+        # existing S3 owner receptionist_bypass_reply() rather than by a
+        # second copy of the S3 sequence here (Rule 3). This call runs ONLY
+        # while priority_intake_is_complete() is False, so at least one field
+        # is missing and a field-question tuple branch of that owner always
+        # answers it. A "complete" stage is not a capture question, so it
+        # releases the handoff instead of being echoed as a prompt.
+        if not priority_intake_is_complete(conversation):
+            priority_prompt, priority_stage = receptionist_bypass_reply(conversation, client)
+            if priority_stage != "complete" and priority_prompt:
+                return priority_prompt
         return None
 
     # 🔥 ROUTINE SERVICES → PHONE ONLY
@@ -866,17 +961,42 @@ def build_booking_handoff_reply(client: Client, conversation: Conversation, serv
     return "You can book your appointment online here."
 
 
+def build_booking_handoff_meta(client: Client, service_reason: Optional[str]) -> dict:
+    return {
+        "mode": "external_booking_handoff",
+        "faq_match": False,
+        "show_booking_button": True,
+        "booking_url": get_booking_url(client),
+        "booking_cta_label": get_booking_button_label(client),
+        "booking_type": "external_calendar",
+        "booking_service_reason": service_reason or "appointment request",
+        "open_booking_in_new_tab": True,
+    }
+
+
 def conversation_is_hybrid_post_handoff(client: Client, conversation: Conversation) -> bool:
     """
+    S9-3 (decision D-5, approved): ported from the verified production owner.
+
     True once a hybrid conversation has finished its booking capture:
-    name + phone stored, office notified, and the external booking link
-    already displayed (booking_link_sent).
+    name + phone stored and the external booking link already displayed
+    (booking_link_sent).
 
     In this state intake is FINISHED. Follow-up messages must be treated as
-    ordinary questions (FAQ / info / ending guards keep working), intake must
-    never resume, the link must never be re-sent, and the conversation must
-    not be auto-closed. Conversations already marked "completed" or
-    final-closed keep their existing dedicated handling.
+    ordinary questions (FAQ / info / safety / ending owners keep working),
+    intake must never resume, and the conversation must not be auto-closed.
+    Conversations already marked "completed" or final-closed keep their
+    existing dedicated handling.
+
+    Calendar note: this predicate is READ-ONLY. It never repeats the booking
+    link, never mutates a captured field, never starts native booking, and
+    never triggers a notification.
+
+    Inputs:  client - the tenant row; conversation - the active Conversation.
+    Returns: bool.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none - missing attributes read as absent.
     """
     return (
         get_booking_mode(client) == "hybrid"
@@ -891,13 +1011,27 @@ def conversation_is_hybrid_post_handoff(client: Client, conversation: Conversati
 
 def build_hybrid_post_handoff_reply(conversation: Conversation, office_phone: str = "") -> str:
     """
-    Deterministic reply for follow-ups after the hybrid booking handoff
-    (e.g. "I don't see any times", "the link isn't working", "please have
-    the office call me", or a repeated booking request).
+    S9-3 (decision D-5, approved): ported from the verified production owner.
+
+    Deterministic reply for the NON-SCHEDULING residue after the hybrid
+    booking handoff (e.g. "I don't see any times", "the link isn't working",
+    "please have the office call me").
 
     States that the office already has the captured info and can follow up.
-    Never re-asks intake questions, never repeats the booking link, and
-    never triggers a notification.
+    Never re-asks intake questions, never repeats the booking link, and never
+    triggers a notification.
+
+    Post-link SCHEDULING requests are NOT routed here: decision D-5 keeps the
+    calendar's repeatable external_booking_link_reminder authoritative for
+    those, and its owner (send_external_booking_handoff) runs earlier in
+    chat().
+
+    Inputs:  conversation - the active Conversation; office_phone - already
+             resolved by the caller.
+    Returns: the reply text.
+    Database effects: none.
+    External effects: none.
+    Possible failures: none.
     """
     name = (getattr(conversation, "lead_name", None) or "").strip()
     name_part = f", {name}" if name else ""
@@ -918,17 +1052,394 @@ def build_hybrid_post_handoff_reply(conversation: Conversation, office_phone: st
     return reply
 
 
-def build_booking_handoff_meta(client: Client, service_reason: Optional[str]) -> dict:
-    return {
-        "mode": "external_booking_handoff",
-        "faq_match": False,
-        "show_booking_button": True,
-        "booking_url": get_booking_url(client),
-        "booking_cta_label": get_booking_button_label(client),
-        "booking_type": "external_calendar",
-        "booking_service_reason": service_reason or "appointment request",
-        "open_booking_in_new_tab": True,
-    }
+def booking_dialog_active(conversation: Conversation) -> bool:
+    """PATCH 3: True while an internal Calendar booking dialog is in
+    progress. The single chat.py READER of booking_state; the field itself
+    is owned and mutated only by app/services/booking_conversation.py."""
+    state = getattr(conversation, "booking_state", BookingState.NONE) or BookingState.NONE
+    return state != BookingState.NONE
+
+
+def is_information_interruption(user_text: str) -> bool:
+    """PATCH 3: True when a mid-booking message is an office-information
+    question (hours, location, phone, insurance, pricing, services,
+    question-permission) that chat.py's existing paths should answer (the
+    Calendar dialog yields without touching state). Composes ONLY existing
+    single-owner detectors — nothing is re-implemented here — and none of
+    them match normal booking answers such as "tomorrow", "morning", "2",
+    "yes", or "no" (proven by calendar_tests/test_chat_integration.py).
+    Documented coupling: a future information guard that should interrupt
+    booking must be added to this list as well."""
+    return bool(
+        looks_like_general_hours_request(user_text)
+        or looks_like_location_request(user_text)
+        or looks_like_office_phone_request(user_text)
+        or looks_like_insurance_request(user_text)
+        or looks_like_pricing_request(user_text)
+        or looks_like_question_request(user_text)
+        or detect_specific_hours_day(user_text)
+        or looks_like_info_intent(user_text)
+    )
+
+
+def send_external_booking_handoff(
+    db: Session,
+    client: Client,
+    conversation: Conversation,
+    user_text: str,
+    active_service_reason: Optional[str],
+) -> Tuple[str, dict]:
+    """
+    PATCH 3 (Senior Audit Critical #5): THE single owner of the external
+    booking handoff, extracted from the former inline block. It reuses the
+    existing rule/builder owners unmodified: should_capture_before_booking_link,
+    next_booking_capture_prompt, build_booking_handoff_reply, and
+    build_booking_handoff_meta — external precedence, capture-mode rules,
+    link wording, meta, and booking_link_sent behavior have exactly one home.
+
+    booking_link_sent == False: today's capture-first/hybrid rules decide
+        between a capture prompt and the link; sending the link sets
+        booking_link_sent = True exactly once (attribute only — the caller
+        commits it together with its Message row, as the old block did).
+    booking_link_sent == True: no new "first" handoff, no second booking
+        owner, and never a claim that a new link was sent — a truthful
+        acknowledgment that the link was already provided, with the existing
+        booking button/meta preserved and the conversation left open.
+
+    Returns (reply_text, meta). The caller adds show_start_over, persists
+    conversation + Message, commits, and returns the ChatResponse.
+    """
+    if bool(getattr(conversation, "booking_link_sent", False)):
+        meta = build_booking_handoff_meta(client, active_service_reason)
+        meta["mode"] = "external_booking_link_reminder"
+        return "The online booking link is still available below.", meta
+
+    capture_first = should_capture_before_booking_link(
+        client=client,
+        conversation=conversation,
+        user_text=user_text,
+        service_reason=active_service_reason,
+    )
+
+    if capture_first:
+        capture_prompt = next_booking_capture_prompt(
+            conversation,
+            service_reason=active_service_reason,
+            # S9-1: the capture policy owner needs the resolved mode and the
+            # client; both are read through their existing single owners.
+            booking_mode=get_booking_mode(client),
+            client=client,
+        )
+
+        # PATCH 6 (Recommended #7): controlled fields only — no patient
+        # values, and no prompt text (it can embed the patient name).
+        # Supersedes the Patch 3 byte-identical preservation of this
+        # print, per the approved Patch 6 logging contract.
+        print(
+            "[BOOKING_CAPTURE]",
+            "has_name=", bool((conversation.lead_name or "").strip()),
+            "has_phone=", bool((conversation.lead_phone or "").strip()),
+            "capture_prompt_issued=", bool(capture_prompt),
+            "conversation=", conversation.id,
+        )
+
+        if capture_prompt:
+            return capture_prompt, {"mode": "booking_capture_first", "faq_match": False}
+
+    handoff_reply = build_booking_handoff_reply(
+        client=client,
+        conversation=conversation,
+        service_reason=active_service_reason,
+    )
+
+    # Exactly-once transition: this is the only writer of booking_link_sent.
+    conversation.booking_link_sent = True
+
+    return handoff_reply, build_booking_handoff_meta(client, active_service_reason)
+
+
+def _booking_error_reply_text(
+    db: Session,
+    client: Client,
+    conversation: Conversation,
+    office_phone: str,
+) -> str:
+    """PATCH 3 correction pass: THE single owner of the honest
+    Calendar-failure wording (Rule 3 + Rule 16). Consults the per-channel
+    idempotent finalize_and_notify_if_ready — a channel whose sent flag is
+    already True is NEVER re-sent — and claims office follow-up only when
+    at least one office channel actually recorded success; otherwise the
+    patient is directed to the office phone with no false claim."""
+    email_sent, sms_sent, _email_err, _sms_err = finalize_and_notify_if_ready(
+        db, client, conversation
+    )
+    if email_sent or sms_sent:
+        return (
+            "I’m sorry, I couldn’t open the booking calendar right now. "
+            "The office has your request and will follow up."
+        )
+    return (
+        "I’m sorry, I couldn’t open the booking calendar right now. "
+        f"Please call the office at {office_phone} to schedule."
+    )
+
+
+# CHECKPOINT B rev2: the day word carried by a canonical/legacy stored time
+# window. chat.py owns the canonical stored SHAPE (Checkpoint A), so reading
+# a day word out of it lives here; RESOLVING that word to a real date stays
+# with the appointment-intent date owner (parse_preferred_date), which the
+# Calendar start calls — no weekday arithmetic is implemented anywhere in
+# this file. The vocabulary mirrors time_window_has_specific_day exactly.
+_TW_SEED_DAY_WORD_RE = re.compile(
+    r"\b(today|tomorrow|"
+    r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b",
+    re.IGNORECASE,
+)
+
+# Abbreviated-or-full stored token -> the text parse_preferred_date resolves.
+_TW_SEED_DAY_TEXT = {
+    "mon": "monday",
+    "tue": "tuesday",
+    "wed": "wednesday",
+    "thu": "thursday",
+    "fri": "friday",
+    "sat": "saturday",
+    "sun": "sunday",
+    "today": "today",
+    "tomorrow": "tomorrow",
+}
+
+# CHECKPOINT B rev3: the two established canonical ASAP stored forms,
+# normalized. "ASAP / tomorrow ok" means "earliest available; tomorrow is
+# ACCEPTABLE as a fallback" — the patient did NOT select tomorrow as their
+# appointment date, so no day word may ever be seeded from these values.
+# Single owner (Rule 3): time_window_is_complete and the seed helper both
+# read THIS set, so the vocabulary can never drift between them again —
+# that drift (the composite form containing the word "tomorrow") was the
+# rev2 defect.
+_ASAP_TIME_WINDOW_FORMS = {"asap", "asap / tomorrow ok"}
+
+# Closed vocabulary (Rule 4) for route_completed_lead's seed source. An
+# unknown value is a visible failure (Rule 16), never a silent fallback.
+SEED_SOURCE_STORED_TIME_WINDOW = "stored_time_window"
+SEED_SOURCE_CURRENT_MESSAGE = "current_message"
+
+
+def _booking_seeds_from_time_window(tw: Optional[str]):
+    """
+    Purpose: CHECKPOINT B (rev2) — derive the Calendar start seeds from a
+        canonical time-window value, so the booking dialog consumes what
+        the capture owner validated instead of re-parsing raw patient
+        text. Re-parsing raw text was the proven staging defect:
+        parse_preferred_date read the rating token in "my pain is 7/10 and
+        I can come in on July 28 morning" as July 10 rolled to NEXT YEAR,
+        and that wrong candidate — not the captured July 28 — reached the
+        booking-horizon check, producing the false "booking up to 30 days
+        ahead" rejection. Rev2 extends the derivation to EVERY supported
+        stored form, so a complete legacy preference ("Tuesday morning")
+        collected earlier is consumed — not re-asked — when a later intake
+        answer ("returning") completes the lead. chat.py owns the canonical
+        stored shape (Checkpoint A), so this derivation lives here and
+        nowhere else (Rule 3).
+    Inputs: a canonical time-window value: None, "ASAP", legacy weekday
+        forms ("Tuesday morning", "Tue morning", "Tuesday 3pm",
+        "tomorrow morning", "Weekday morning"), day-only explicit dates
+        ("Tue 2026-07-28"), or complete explicit forms
+        ("Tue 2026-07-28 morning", "Tue 2026-07-28 9am").
+    Returns: (seed_date, seed_date_text, seed_time_preference); any element
+        may be None.
+        seed_date: the explicit ISO date when the value carries one.
+        seed_date_text: when there is NO explicit date, the safe day word
+            ("tuesday", "tomorrow", "today") for the appointment-intent
+            date owner to resolve against the client-local date — never
+            resolved here (no duplicated date parsing, Rule 3).
+        seed_time_preference: one of appointment_intent's PREF_* buckets:
+            part-of-day words map directly; an exact time maps by its
+            minutes with the same boundaries slot_matches_preference
+            applies (before 12:00 morning, 12:00-16:59 afternoon, 17:00+
+            evening). No detail (day-only, ASAP, empty) yields None, so
+            the Calendar asks its own morning/afternoon question as
+            before.
+        "Weekday morning" yields (None, None, morning): the weekday cannot
+        be resolved yet, so the Calendar asks for the day while the
+        preference is preserved. BOTH canonical ASAP forms — "ASAP" and
+        the composite "ASAP / tomorrow ok" — yield (None, None, None):
+        earliest-available is not a calendar day, and the composite's
+        "tomorrow" is a fallback the patient ACCEPTED, not a date they
+        SELECTED, so it must never become a day seed (rev3). Calendar
+        behavior for ASAP completions is unchanged.
+    Database effects: none. External effects: none.
+    Possible failures: none — unrecognized shapes yield (None, None, None).
+    """
+    if not (tw or "").strip():
+        return (None, None, None)
+
+    # rev3: recognize BOTH canonical ASAP forms BEFORE any day-word
+    # extraction — the composite "ASAP / tomorrow ok" contains the word
+    # "tomorrow", and seeding it as a date would silently convert
+    # "tomorrow is acceptable" into "tomorrow was chosen".
+    if (tw or "").strip().lower() in _ASAP_TIME_WINDOW_FORMS:
+        return (None, None, None)
+
+    seed_date = extract_explicit_date_from_time_window(tw)
+
+    seed_date_text = None
+    if seed_date is None:
+        day_word = _TW_SEED_DAY_WORD_RE.search(tw)
+        if day_word:
+            token = day_word.group(1).lower()
+            key = token if token in {"today", "tomorrow"} else token[:3]
+            seed_date_text = _TW_SEED_DAY_TEXT[key]
+
+    preference = None
+    detail = extract_time_window_detail(tw).lower()
+    if detail:
+        if "morning" in detail:
+            preference = PREF_MORNING
+        elif "afternoon" in detail:
+            preference = PREF_AFTERNOON
+        elif "evening" in detail or "night" in detail:
+            preference = PREF_EVENING
+        else:
+            # Exact times ("9am", "4:45pm") bucket by their clock minutes.
+            minutes = _extract_exact_time_minutes_from_tw(tw)
+            if minutes is not None:
+                if minutes < 12 * 60:
+                    preference = PREF_MORNING
+                elif minutes < 17 * 60:
+                    preference = PREF_AFTERNOON
+                else:
+                    preference = PREF_EVENING
+
+    return (seed_date, seed_date_text, preference)
+
+
+def route_completed_lead(
+    db: Session,
+    client: Client,
+    conversation: Conversation,
+    user_text: str,
+    office_phone: str,
+    *,
+    seed_source: str = SEED_SOURCE_STORED_TIME_WINDOW,
+) -> Optional[Tuple[str, dict]]:
+    """
+    PATCH 3 (Senior Audit Critical #5): THE single completion-routing owner.
+    Every eligible NON-EMERGENCY lead-completion branch calls this AFTER its
+    existing mark_completed_and_notify_office ran unchanged (approved
+    temporary MVP behavior: the office lead notification runs first, so an
+    abandoned Calendar dialog can never become a lost lead; a later
+    successful booking additionally sends the separate booking notification;
+    deduplication stays out of scope under Recommended #1).
+
+    Ownership is resolved fresh from CURRENT settings — never from
+    booking_link_sent:
+      external_calendar  -> the shared external-handoff owner's response
+      internal_calendar  -> begin_booking_after_intake's reply
+      lead_capture_only  -> None (the caller keeps today's reply unchanged)
+
+    On a Calendar delegation failure the fallback is HONEST (Rule 16):
+    finalize_and_notify_if_ready is per-channel idempotent (a channel whose
+    sent flag is already True is NEVER re-sent), and the reply claims office
+    follow-up only when at least one office channel actually recorded
+    success; otherwise the patient is directed to the office phone.
+    """
+    if has_external_booking(client):
+        active_service_reason = (
+            (conversation.lead_reason or "").strip() or "appointment request"
+        )
+        return send_external_booking_handoff(
+            db, client, conversation, user_text, active_service_reason
+        )
+
+    # CHECKPOINT B rev2: the Calendar start receives validated seeds instead
+    # of re-deriving day and preference from raw patient text, whose
+    # rating/fraction tokens the intent parser cannot classify.
+    #
+    #   SEED_SOURCE_STORED_TIME_WINDOW (completion sites): the captured
+    #   canonical lead_time_window is the authoritative statement of the
+    #   requested day and part of day — including complete legacy forms
+    #   ("Tuesday morning") collected turns before a later intake answer
+    #   ("returning") completes the lead. The raw-text date parse remains a
+    #   fallback only when the stored value carries no day at all (ASAP).
+    #
+    #   SEED_SOURCE_CURRENT_MESSAGE (post-completion re-engagement): a NEW
+    #   message from an already-completed lead states what the patient
+    #   wants NOW, so the seeds come from THIS message safely canonicalized
+    #   through the rating-aware Checkpoint A pipeline — and they are
+    #   authoritative: the defect-prone raw re-parse is fully suppressed,
+    #   and the historical stored window is neither consulted nor mutated.
+    if seed_source == SEED_SOURCE_STORED_TIME_WINDOW:
+        seed_time_window = getattr(conversation, "lead_time_window", None)
+        seeds_are_authoritative = False
+    elif seed_source == SEED_SOURCE_CURRENT_MESSAGE:
+        seed_time_window = canonicalize_time_window_for_storage(client, user_text)
+        seeds_are_authoritative = True
+    else:
+        # Closed vocabulary (Rule 4): an unknown source is a programming
+        # error and must fail visibly (Rule 16), never guess.
+        raise ValueError(f"route_completed_lead: unknown seed_source {seed_source!r}")
+
+    seed_date, seed_date_text, seed_time_preference = _booking_seeds_from_time_window(
+        seed_time_window
+    )
+
+    try:
+        booking_reply = begin_booking_after_intake(
+            db,
+            client,
+            conversation,
+            user_text,
+            seed_date=seed_date,
+            seed_date_text=seed_date_text,
+            seed_time_preference=seed_time_preference,
+            seeds_are_authoritative=seeds_are_authoritative,
+        )
+    except Exception as e:
+        # Visible failure (Rule 16): log the failure (PATCH 6: exception class
+        # + conversation UUID only — never the message), roll back the failed
+        # operation, and never pretend the calendar opened.
+        print(f"CALENDAR ERROR: exc_class={sanitized_exception_class(e)} conversation={conversation.id}")
+        try:
+            db.rollback()
+        except Exception as rollback_error:
+            print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+        reply_text = _booking_error_reply_text(db, client, conversation, office_phone)
+        return reply_text, {"mode": "booking_error", "faq_match": False}
+
+    if booking_reply is not None and booking_reply.handled:
+        meta = {"faq_match": False}
+        meta.update(booking_reply.meta)
+        return booking_reply.text, meta
+
+    return None
+
+
+def _routed_completion_response(
+    db: Session,
+    conversation: Conversation,
+    routed: Tuple[str, dict],
+    show_start_over,
+) -> ChatResponse:
+    """PATCH 3: shared persistence for a routed completion — save the
+    conversation (booking_link_sent may have changed) and the assistant
+    Message in ONE commit, then build the ChatResponse. Pure plumbing;
+    contains no routing or calendar logic."""
+    routed_reply, routed_meta = routed
+    db.add(conversation)
+    db.add(Message(conversation_id=conversation.id, role="assistant", content=routed_reply))
+    db.commit()
+    db.refresh(conversation)
+    routed_meta["show_start_over"] = show_start_over
+    routed_meta.setdefault("lead_email_sent", bool(getattr(conversation, "lead_email_sent", False)))
+    routed_meta.setdefault("lead_sms_sent", bool(getattr(conversation, "lead_sms_sent", False)))
+    return ChatResponse(
+        reply=routed_reply,
+        conversation_id=str(conversation.id),
+        meta=routed_meta,
+    )
+
 
 def _tokenize(s: str) -> List[str]:
     return [t for t in _norm_text(s).split(" ") if t]
@@ -2010,6 +2521,22 @@ def looks_like_general_hours_request(user_text: str) -> bool:
 
     return any(p in t for p in phrases)
 
+
+def looks_like_location_request(user_text: str) -> bool:
+    """Detect office location/address/directions questions. PATCH 3
+    correction pass: extracted from the Operational-override inline list so
+    there is exactly ONE owner of the location phrases (Rule 3) — used by
+    the override below AND by is_information_interruption so an active
+    Calendar dialog yields for location questions."""
+    t = _norm_text(user_text)
+    if not t:
+        return False
+    return any(p in t for p in [
+        "where are you", "where r you", "where are you located", "where is your office",
+        "location", "address", "parking", "directions", "located"
+    ])
+
+
 def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
     if not hhmm or ":" not in hhmm:
         return None
@@ -2018,6 +2545,298 @@ def _parse_hhmm_to_minutes(hhmm: Optional[str]) -> Optional[int]:
         return int(hh) * 60 + int(mm)
     except Exception:
         return None
+
+
+# =========================================================
+# Explicit calendar dates in time windows
+#
+# Canonical stored shape (internal only, never shown to a patient or to
+# the office):
+#     Mon 2026-07-27
+#     Mon 2026-07-27 morning
+#     Mon 2026-07-27 9am
+#
+# The leading weekday token keeps every existing consumer working
+# (time_window_has_specific_day, _extract_day_token,
+# _get_day_key_from_time_window). The ISO token carries the REAL date so
+# nothing downstream has to re-derive it from the weekday, which is wrong
+# for anything more than a week out.
+# =========================================================
+
+_MONTH_NAME_TO_NUMBER = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+# Longest month names first so "july" wins over "jul".
+_MONTH_NAME_DATE_RE = re.compile(
+    r"\b(" + "|".join(sorted(_MONTH_NAME_TO_NUMBER, key=len, reverse=True)) + r")\.?\s+"
+    r"(\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+
+_NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+
+_ISO_DATE_IN_TW_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
+# Dental patients routinely say "pain 9/10". A slash token in that context
+# is a severity score or a ratio, never an appointment date.
+_RATING_CONTEXT_RE = re.compile(
+    r"\b(?:pain|painful|hurt|hurts|hurting|ache|aches|aching|"
+    r"severity|severe|score|scored|scoring|rating|ratings|rate|rated|"
+    r"scale|out\s+of|ratio|people|patients|persons)\b",
+    re.IGNORECASE,
+)
+
+# A date preposition immediately before the token settles it as a date,
+# so "come in on 7/27" survives even next to symptom language. "of" is
+# deliberately NOT here: "severity of 6/10" and "pain score of 8/10" are
+# rating language, and no supported numeric date form needs it.
+_DATE_PREPOSITION_RE = re.compile(r"\b(?:on|for)\s+$", re.IGNORECASE)
+
+# Bounded windows. Wide enough for "my pain is 7/10" and "9/10 people",
+# narrow enough that an unrelated word elsewhere in a long message cannot
+# veto a genuine date.
+# A slash token read as a FRACTION: "2/3 of my tooth broke". Immediately
+# following "of" / "of my" / "of the" marks the token as a part-of-whole,
+# never a calendar date.
+_FRACTION_FOLLOW_RE = re.compile(r"^\s*of\b", re.IGNORECASE)
+
+_RATING_LOOKBEHIND_CHARS = 24
+_RATING_LOOKAHEAD_CHARS = 16
+
+# Detail-association boundaries. A time detail may only be attached to the
+# SELECTED date when it provably belongs to that date's own region:
+#   * a hard sentence boundary always cuts the region;
+#   * any OTHER date/rating/fraction candidate span always cuts it;
+#   * a comma is natural punctuation ("7/27, morning please") and does not;
+#   * a coordination word cuts BOTH directions: it ends the post-date
+#     region ("appointment on 7/27 and my pain started at 9am" is
+#     day-only) and it cuts the pre-date fallback ("pain 9/10 at 9am and
+#     appointment on 7/27").
+_HARD_BOUNDARY_RE = re.compile(r"[;.!?]")
+_COORDINATION_BOUNDARY_RE = re.compile(r"\b(?:and|but|or)\b", re.IGNORECASE)
+
+
+def _numeric_slash_is_rating_or_ratio(text: str, start: int, end: int) -> bool:
+    """True when a date-shaped slash token is really a rating or ratio.
+
+    Inputs: the full phrase plus the span _NUMERIC_DATE_RE matched. The
+        regex itself is NOT re-declared here; this only classifies the
+        surrounding text.
+    Returns: True for "pain 9/10", "I rate it 8/10", "9/10 people",
+        "severity of 6/10", and fractions like "2/3 of my tooth broke";
+        False for "7/27", "on 7/27 at 9am", "for 7/27".
+    """
+    # "2/3 of my tooth broke": a part-of-whole immediately after the token
+    # is a fraction regardless of any preposition earlier in the phrase.
+    if _FRACTION_FOLLOW_RE.search(text[end:end + _RATING_LOOKAHEAD_CHARS]):
+        return True
+
+    immediately_before = text[max(0, start - 8):start]
+    if _DATE_PREPOSITION_RE.search(immediately_before):
+        return False
+
+    before = text[max(0, start - _RATING_LOOKBEHIND_CHARS):start]
+    after = text[end:end + _RATING_LOOKAHEAD_CHARS]
+    return bool(_RATING_CONTEXT_RE.search(before) or _RATING_CONTEXT_RE.search(after))
+
+
+def _resolve_calendar_date(year, month, day, today):
+    """Turn a month/day (and optional year) into a real date.
+
+    Inputs: year may be None. today is the CLIENT-LOCAL current date.
+    Returns: a date, or None.
+    Rules:
+        * An impossible date (month 13, Feb 30) returns None. Nothing is
+          guessed or clamped.
+        * With no year: the client-local current year when that date is
+          today or later, otherwise the next year.
+    """
+    if not (1 <= month <= 12) or not (1 <= day <= 31):
+        return None
+
+    if year is not None:
+        # A stated past date is a mistake, not a booking. Reject rather than
+        # guess. The current-year / next-year rollover below applies ONLY
+        # when the patient did not state a year.
+        try:
+            supplied = _date(year, month, day)
+        except ValueError:
+            return None
+        return supplied if supplied >= today else None
+
+    for candidate_year in (today.year, today.year + 1):
+        try:
+            candidate = _date(candidate_year, month, day)
+        except ValueError:
+            continue
+        if candidate >= today:
+            return candidate
+
+    return None
+
+
+def _explicit_date_candidates(text: str):
+    """Every explicit-date candidate span, in textual order.
+
+    The ONLY consumer of the two date regexes. Used both to choose the
+    date and to bound detail association, so the two can never disagree
+    about where candidates sit.
+    """
+    candidates = []
+    for match in _MONTH_NAME_DATE_RE.finditer(text):
+        candidates.append(("month", match))
+    for match in _NUMERIC_DATE_RE.finditer(text):
+        candidates.append(("numeric", match))
+    candidates.sort(key=lambda item: item[1].start())
+    return candidates
+
+
+def find_explicit_calendar_date(text: str, now_local: datetime):
+    """Locate ONE explicit calendar date in free text.
+
+    Inputs: text is the raw user phrase; now_local is client-local now.
+    Returns THREE distinguishable states:
+        None                       - NO_DATE_MATCH: no date syntax at all.
+        (date, start, end)         - VALID_DATE_MATCH.
+        (None, start, end)         - INVALID_OR_REJECTED_DATE_MATCH: date
+                                     syntax was present but the date is
+                                     impossible, explicitly in the past, or
+                                     a pain/severity score ("pain 9/10").
+    The caller MUST distinguish the third state. Treating it as "no date"
+    lets the legacy parser keep only the part of day, which silently drops
+    the rejected date and recreates the never-complete time-window loop.
+    Database effects: none.
+
+    Numeric forms use U.S. month/day order. Month-name forms are tried
+    first so "July 27, 2026" is never read as 7/27 inside a longer string.
+    This is the ONLY place explicit-date text is parsed.
+    """
+    if not text:
+        return None
+
+    today = now_local.date()
+
+    # EVERY candidate is examined in textual order. Stopping at the first
+    # rejected token starved real dates later in the same message:
+    # "pain 9/10, appointment on 7/27 morning" must book July 27, while
+    # "pain 9/10 morning" (no valid date anywhere) must still reject.
+    candidates = _explicit_date_candidates(text)
+    if not candidates:
+        return None
+
+    first_rejected_span = None
+    for kind, match in candidates:
+        if kind == "numeric" and _numeric_slash_is_rating_or_ratio(
+            text, match.start(), match.end()
+        ):
+            # A pain score / fraction is a REJECTED candidate, never a
+            # date - but a valid date later in the message may still win.
+            if first_rejected_span is None:
+                first_rejected_span = (match.start(), match.end())
+            continue
+
+        if kind == "month":
+            month = _MONTH_NAME_TO_NUMBER[match.group(1).lower()]
+            day = int(match.group(2))
+            year = int(match.group(3)) if match.group(3) else None
+        else:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            raw_year = match.group(3)
+            year = None
+            if raw_year:
+                year = int(raw_year)
+                if year < 100:
+                    year += 2000
+
+        resolved = _resolve_calendar_date(year, month, day, today)
+        if resolved is not None:
+            return (resolved, match.start(), match.end())
+        if first_rejected_span is None:
+            first_rejected_span = (match.start(), match.end())
+
+    return (None, first_rejected_span[0], first_rejected_span[1])
+
+
+def parse_explicit_calendar_date(text: str, now_local: datetime):
+    """The resolved date for a VALID match only.
+
+    Returns None for both NO_DATE_MATCH and INVALID_OR_REJECTED_DATE_MATCH.
+    Callers that must tell those apart use find_explicit_calendar_date().
+    """
+    found = find_explicit_calendar_date(text, now_local)
+    return found[0] if found else None
+
+
+def extract_explicit_date_from_time_window(tw: Optional[str]):
+    """The real date carried by a canonical stored value, or None for a
+    legacy weekday-only value like "Mon morning"."""
+    if not tw:
+        return None
+    match = _ISO_DATE_IN_TW_RE.search(tw)
+    if not match:
+        return None
+    try:
+        return _date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def extract_time_window_detail(tw: Optional[str]) -> str:
+    """Everything except the weekday token and the ISO date.
+
+    "Mon 2026-07-27 morning" -> "morning";  "Mon morning" -> "morning".
+    Used for rendering, so the raw ISO date can never reach a patient or
+    the office.
+    """
+    if not tw:
+        return ""
+    rest = _ISO_DATE_IN_TW_RE.sub(" ", tw)
+    rest = re.sub(r"^\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", " ", rest.strip(), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", rest).strip()
+
+
+def time_window_day_only_weekday_token(tw: Optional[str]) -> Optional[str]:
+    """The weekday token of a DAY-ONLY value, else None.
+
+    Replaces exact-string checks like `detected_tw in {"Mon", ...}`, which
+    silently stopped matching once a value could carry an ISO date. The
+    day-only requirement preserves the original meaning of those checks:
+    "Mon" and "Mon 2026-07-27" qualify, "Mon morning" does not.
+    """
+    if not tw:
+        return None
+    if not time_window_has_specific_day(tw) or time_window_has_detail(tw):
+        return None
+    return _extract_day_token(tw)
+
+
+def time_window_is_client_today(tw: Optional[str], now_local: datetime) -> bool:
+    """True when the value refers to the client-local current date.
+
+    An explicit date is compared as a DATE. A legacy weekday-only value
+    still falls back to the weekday token, so existing behavior is
+    unchanged for values like "Mon morning".
+    """
+    if not tw:
+        return False
+    explicit = extract_explicit_date_from_time_window(tw)
+    if explicit is not None:
+        return explicit == now_local.date()
+    return _extract_day_token(tw) == now_local.strftime("%a")
 
 
 def _extract_exact_time_minutes_from_tw(tw: Optional[str]) -> Optional[int]:
@@ -2316,7 +3135,8 @@ def check_outside_hours(client: Client, time_window: Optional[str]) -> Tuple[boo
     start = row.get("start")
     end = row.get("end")
 
-    pretty_tw = pretty_time_window(time_window)
+    # Staff-facing note: classify Today / Tomorrow in the CLIENT's timezone.
+    pretty_tw = pretty_time_window(time_window, get_client_now(client).date())
 
     if not is_open:
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
@@ -2360,11 +3180,16 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     start_minutes = _parse_hhmm_to_minutes(row.get("start"))
     end_minutes = _parse_hhmm_to_minutes(row.get("end"))
 
-    if not is_open:
-        now_local = get_client_now(client)
-        today_key = now_local.strftime("%a").lower()[:3]
+    # Client-local now is read ONCE, and whether the request is really
+    # today is delegated to the single explicit-date-aware owner. Comparing
+    # weekday keys alone treated a Monday three weeks out as today whenever
+    # today also happened to be a Monday, producing a false "already passed
+    # today" rejection and a false "closed today".
+    now_local = get_client_now(client)
+    requested_is_today = time_window_is_client_today(time_window, now_local)
 
-        if day_key == today_key:
+    if not is_open:
+        if requested_is_today:
             return "The office is closed today. What day/time works better for you?"
 
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
@@ -2374,11 +3199,9 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
         if req_minutes < start_minutes or req_minutes >= end_minutes:
             return "That time is outside normal office hours. What day/time works better for you?"
 
-    now_local = get_client_now(client)
-    today_key = now_local.strftime("%a").lower()[:3]
     now_minutes = now_local.hour * 60 + now_local.minute
 
-    if day_key == today_key and req_minutes <= now_minutes:
+    if requested_is_today and req_minutes <= now_minutes:
         return "That time has already passed today. What later time today or another day works better for you?"
 
     return None
@@ -2490,9 +3313,42 @@ def is_saturday_open(client) -> bool:
     return bool(row.get("open", False))
 
 
-def pretty_time_window(tw: Optional[str]) -> str:
+def _fmt_month_day(d) -> str:
+    """'Jul 27', 'Aug 1' - the existing outward date format."""
+    return d.strftime("%b %d").replace(" 0", " ")
+
+
+def pretty_time_window(tw: Optional[str], reference_date=None) -> str:
+    """Outward wording for a stored time window.
+
+    Inputs:
+        reference_date: the CLIENT-LOCAL current date, used to classify the
+            Today / Tomorrow labels. Every caller holding a Client must
+            pass get_client_now(client).date(); server-local time is wrong
+            on either side of the office's midnight. Omitting it keeps the
+            previous server-local behavior, so legacy callers are
+            byte-for-byte unchanged.
+    Returns: patient- and staff-safe text. The raw ISO date is never
+        emitted.
+    """
     if not tw:
         return ""
+
+    today_date = reference_date or datetime.now().date()
+
+    # Explicit date: render THAT date. Never re-derive one from the
+    # weekday (wrong beyond a week) and never emit the raw ISO token.
+    explicit = extract_explicit_date_from_time_window(tw)
+    if explicit is not None:
+        detail = extract_time_window_detail(tw)
+
+        if explicit == today_date:
+            label = f"Today ({_fmt_month_day(explicit)})"
+        elif explicit == today_date + timedelta(days=1):
+            label = f"Tomorrow ({_fmt_month_day(explicit)})"
+        else:
+            label = f"{explicit.strftime('%a')} ({_fmt_month_day(explicit)})"
+        return f"{label} {detail}" if detail else label
 
     tl = (tw or "").strip().lower()
     parts = tl.split()
@@ -2503,7 +3359,7 @@ def pretty_time_window(tw: Optional[str]) -> str:
     day_token = parts[0]  # e.g. "thu"
     rest = " ".join(parts[1:])  # e.g. "morning"
 
-    today_dt = datetime.now()
+    today_dt = today_date
     today_str = today_dt.strftime("%a").lower()
     tomorrow_dt = today_dt + timedelta(days=1)
     tomorrow_str = tomorrow_dt.strftime("%a").lower()
@@ -2961,7 +3817,12 @@ def lead_is_same_day_without_explicit_urgency(conversation: Conversation) -> boo
     return True
 
 
-def pretty_staff_time_window(conversation: Conversation) -> str:
+def pretty_staff_time_window(
+    conversation: Conversation,
+    client: Optional[Client] = None,
+) -> str:
+    """Staff-facing time window. Pass the Client so Today / Tomorrow are
+    classified in the office's timezone rather than the server's."""
     tw = (getattr(conversation, "lead_time_window", None) or "").strip()
     if not tw:
         return ""
@@ -2970,10 +3831,17 @@ def pretty_staff_time_window(conversation: Conversation) -> str:
     if tw.strip().lower() == "asap" and lead_is_same_day_without_explicit_urgency(conversation):
         return "Today / same-day request"
 
-    return pretty_time_window(tw)
+    reference_date = get_client_now(client).date() if client is not None else None
+    return pretty_time_window(tw, reference_date)
 
 def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
-    practice_name = getattr(client, "practice_name", None) or "Dental Office"
+    # PATCH 6 (Recommended #7): every untrusted VALUE below is normalized
+    # and bounded at this output boundary (control characters flattened,
+    # approved per-field limits). Labels, field order, wording, and the
+    # structural newline joins are unchanged; stored data is untouched.
+    practice_name = normalize_notification_field(
+        getattr(client, "practice_name", None), FIELD_LIMIT_PRACTICE_NAME
+    ) or "Dental Office"
 
     if bool(getattr(conversation, "lead_is_emergency", False)):
         lines = [f"🚨 EMERGENCY dental concern  for {practice_name}"]
@@ -2983,31 +3851,31 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
         lines = [f"✅ Appointment request for {practice_name}"]
 
     if (conversation.lead_name or "").strip():
-        lines.append(f"Name: {conversation.lead_name}")
+        lines.append(f"Name: {normalize_notification_field(conversation.lead_name, FIELD_LIMIT_NAME)}")
 
     if (conversation.lead_phone or "").strip():
-        lines.append(f"Phone: {conversation.lead_phone}")
+        lines.append(f"Phone: {normalize_notification_field(conversation.lead_phone, FIELD_LIMIT_PHONE)}")
 
     if (conversation.lead_email or "").strip():
-        lines.append(f"Email: {conversation.lead_email}")
+        lines.append(f"Email: {normalize_notification_field(conversation.lead_email, FIELD_LIMIT_EMAIL)}")
     elif bool(getattr(conversation, "lead_email_opt_out", False)):
         lines.append("Email: Not provided")
 
     if (conversation.lead_reason or "").strip():
-        lines.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
+        lines.append(f"Reason: {normalize_notification_field(pretty_lead_reason(conversation.lead_reason), FIELD_LIMIT_FREE_TEXT)}")
 
     reason_detail = get_other_reason_detail(conversation)
     if reason_detail:
-        lines.append(f"Reason detail: {reason_detail}")
+        lines.append(f"Reason detail: {normalize_notification_field(reason_detail, FIELD_LIMIT_FREE_TEXT)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        lines.append(f"Preferred time: {pretty_staff_time_window(conversation)}")
+        lines.append(f"Preferred time: {normalize_notification_field(pretty_staff_time_window(conversation, client), FIELD_LIMIT_FREE_TEXT)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         lines.append("Outside hours: Yes")
 
     if (getattr(conversation, "lead_outside_hours_note", None) or "").strip():
-        lines.append(f"Outside-hours note: {conversation.lead_outside_hours_note}")
+        lines.append(f"Outside-hours note: {normalize_notification_field(conversation.lead_outside_hours_note, FIELD_LIMIT_FREE_TEXT)}")
 
     np = getattr(conversation, "lead_is_new_patient", None)
     if np is True:
@@ -3018,7 +3886,13 @@ def build_staff_lead_summary(client: Client, conversation: Conversation) -> str:
     return "\n".join(lines)
 
 def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
-    practice_name = getattr(client, "practice_name", None) or "Dental Office"
+    # PATCH 6 (Recommended #7): untrusted VALUES normalized and bounded,
+    # exactly as in build_staff_lead_summary; the " | " structural
+    # separators, labels, order, and wording are unchanged. Plain text is
+    # deliberately NOT HTML-escaped.
+    practice_name = normalize_notification_field(
+        getattr(client, "practice_name", None), FIELD_LIMIT_PRACTICE_NAME
+    ) or "Dental Office"
 
     if bool(getattr(conversation, "lead_is_emergency", False)):
         parts = [f"🚨 EMERGENCY dental concern for {practice_name}"]
@@ -3028,25 +3902,25 @@ def build_staff_lead_sms(client: Client, conversation: Conversation) -> str:
         parts = [f"✅ Appointment request for {practice_name}"]
 
     if (conversation.lead_name or "").strip():
-        parts.append(f"Name: {conversation.lead_name}")
+        parts.append(f"Name: {normalize_notification_field(conversation.lead_name, FIELD_LIMIT_NAME)}")
 
     if (conversation.lead_phone or "").strip():
-        parts.append(f"Phone: {conversation.lead_phone}")
+        parts.append(f"Phone: {normalize_notification_field(conversation.lead_phone, FIELD_LIMIT_PHONE)}")
 
     if (conversation.lead_reason or "").strip():
-        parts.append(f"Reason: {pretty_lead_reason(conversation.lead_reason)}")
+        parts.append(f"Reason: {normalize_notification_field(pretty_lead_reason(conversation.lead_reason), FIELD_LIMIT_FREE_TEXT)}")
 
     reason_detail = get_other_reason_detail(conversation)
     if reason_detail:
-        parts.append(f"Detail: {reason_detail}")
+        parts.append(f"Detail: {normalize_notification_field(reason_detail, FIELD_LIMIT_FREE_TEXT)}")
 
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        parts.append(f"Time: {pretty_staff_time_window(conversation)}")
+        parts.append(f"Time: {normalize_notification_field(pretty_staff_time_window(conversation, client), FIELD_LIMIT_FREE_TEXT)}")
 
     if bool(getattr(conversation, "lead_is_outside_hours", False)):
         note = (getattr(conversation, "lead_outside_hours_note", None) or "").strip()
         if note:
-            parts.append(f"Outside hours: {note}")
+            parts.append(f"Outside hours: {normalize_notification_field(note, FIELD_LIMIT_FREE_TEXT)}")
         else:
             parts.append("Outside hours")
 
@@ -3098,13 +3972,18 @@ def send_office_lead_sms(to_phone: str, body: str) -> None:
 
 
 def send_office_lead_email(to_email: str, subject: str, body_text: str) -> None:
+    # PATCH 6 (Recommended #7): one of the two live HTML email boundaries.
+    # body_text is PLAIN TEXT; render_email_html (single owner in
+    # notification_service) escapes it exactly once inside the fixed <pre>
+    # wrapper. The COMPLETE subject is normalized so CR/LF can never reach
+    # an email header. Recipient, provider, and wording are unchanged.
     resend.api_key = os.environ["RESEND_API_KEY"]
 
     params: resend.Emails.SendParams = {
         "from": os.environ["RESEND_FROM_EMAIL"],   # e.g. "Demo Dental <leads@yourdomain.com>"
         "to": [to_email],
-        "subject": subject,
-        "html": "<pre style='font-family:Arial,sans-serif;white-space:pre-wrap'>" + body_text + "</pre>",
+        "subject": normalize_notification_field(subject, SUBJECT_MAX_LENGTH),
+        "html": render_email_html(body_text),
     }
 
     resend.Emails.send(params)
@@ -3125,10 +4004,16 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
     office_notify_email = (getattr(client, "notification_email", None) or "").strip()
     office_notify_phone = (getattr(client, "notification_phone", None) or "").strip()
 
-    print("[LEAD_NOTIFY_EMAIL]", office_notify_email)
-    print("[LEAD_NOTIFY_PHONE]", office_notify_phone)
-    print("[LEAD_SUMMARY]\n" + staff_summary)
-    print("[LEAD_SMS]\n" + staff_sms)
+    # PATCH 6 (Recommended #7): controlled event log only. The previous
+    # diagnostics printed the office contact values and the COMPLETE
+    # patient summary and SMS bodies into server logs; logs now carry
+    # configuration booleans and UUIDs only.
+    print(
+        f"[LEAD_NOTIFY] event=begin client={client.id} "
+        f"conversation={conversation.id} "
+        f"email_configured={bool(office_notify_email)} "
+        f"sms_configured={bool(office_notify_phone)}"
+    )
 
     email_send_error = None
     sms_send_error = None
@@ -3142,7 +4027,12 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
     elif bool(getattr(conversation, "lead_is_priority", False)):
         subject_prefix = "Priority appointment request"
 
-    practice_name = getattr(client, "practice_name", "Dental Office") or "Dental Office"
+    # PATCH 6 correction pass: the approved 120-char practice-name limit is
+    # enforced by the shared owner BEFORE subject assembly; the complete
+    # subject is still normalized to 160 inside send_office_lead_email.
+    practice_name = normalize_notification_field(
+        getattr(client, "practice_name", None), FIELD_LIMIT_PRACTICE_NAME
+    ) or "Dental Office"
 
     try:
         if office_notify_email and not email_sent:
@@ -3155,8 +4045,15 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
             email_sent = True
             print("✅ LEAD EMAIL SENT")
     except Exception as e:
-        email_send_error = str(e)
-        print("[LEAD_EMAIL_ERROR]", email_send_error)
+        # PATCH 6 (Recommended #7): the fixed code is the ONLY error
+        # detail that may reach ChatResponse meta; logs carry controlled
+        # fields only (never str(e)/repr(e)).
+        email_send_error = SEND_FAILED
+        print(
+            f"[LEAD_NOTIFY] event=send_failed channel=office_email "
+            f"code={SEND_FAILED} exc_class={sanitized_exception_class(e)} "
+            f"conversation={conversation.id}"
+        )
 
     try:
         if office_notify_phone and not sms_sent:
@@ -3168,8 +4065,14 @@ def notify_office_of_completed_lead(db: Session, client: Client, conversation: C
             sms_sent = True
             print("✅ LEAD SMS SENT")
     except Exception as e:
-        sms_send_error = str(e)
-        print("[LEAD_SMS_ERROR]", sms_send_error)
+        # PATCH 6 (Recommended #7): fixed code + controlled-field log,
+        # mirroring the email channel above.
+        sms_send_error = SEND_FAILED
+        print(
+            f"[LEAD_NOTIFY] event=send_failed channel=office_sms "
+            f"code={SEND_FAILED} exc_class={sanitized_exception_class(e)} "
+            f"conversation={conversation.id}"
+        )
 
     db.add(conversation)
     db.commit()
@@ -3425,6 +4328,41 @@ def detect_new_patient_flag(user_text: str) -> Optional[bool]:
     return None
 
 
+def _detect_detail_for_explicit_date(
+    remainder: str,
+    client: Optional[Client],
+    day_key: Optional[str],
+) -> Optional[str]:
+    """The time detail attached to an explicit date, or None.
+
+    Inputs: remainder is the phrase with the date text already removed, so
+        the date's own digits can never be misread as a clock time.
+    Returns: "morning" / "afternoon" / "evening", or a normalized time
+        label such as "9am", or None when only a date was given.
+    """
+    tl = (remainder or "").lower()
+
+    time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b([01]?\d|2[0-3]):([0-5]\d)\b", tl)
+    if time_match:
+        if time_match.group(1):
+            hh = int(time_match.group(1))
+            mm = time_match.group(2) or "00"
+            ap = time_match.group(3)
+            time_label = f"{hh}:{mm}{ap}" if mm != "00" else f"{hh}{ap}"
+        else:
+            time_label = f"{time_match.group(4)}:{time_match.group(5)}"
+        return _resolve_ambiguous_time_label_for_client(client, day_key, time_label)
+
+    if re.search(r"\b(morning|morn)\b", tl):
+        return "morning"
+    if re.search(r"\b(afternoon|aft)\b", tl):
+        return "afternoon"
+    if re.search(r"\b(evening|eve|night)\b", tl):
+        return "evening"
+
+    return None
+
+
 def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optional[str]:
     user_text = normalize_tomorrow_shorthand_for_time(user_text)
 
@@ -3468,6 +4406,81 @@ def detect_time_window(user_text: str, client: Optional[Client] = None) -> Optio
             return f"{day} evening"
 
         return day
+
+    # Explicit calendar date. Checked after today/tomorrow (those are more
+    # specific to the patient) and before the weekday map, so "Monday
+    # July 27" resolves by its real date rather than the bare weekday.
+    now_local_for_date = get_client_now(client) if client is not None else datetime.now()
+    explicit = find_explicit_calendar_date(t, now_local_for_date)
+    if explicit is not None:
+        explicit_date, match_start, match_end = explicit
+
+        # Date syntax matched but the date is impossible or in the past.
+        # Falling through to the legacy parser would keep only the part of
+        # day ("February 30 morning" -> "morning"), silently discarding the
+        # rejected date and rebuilding the original loop. Return nothing so
+        # the caller stores nothing and asks again.
+        if explicit_date is None:
+            return None
+
+        # Detail association is bounded by the ALREADY-SCANNED candidate
+        # spans: the region after the selected date ends at the next
+        # candidate (valid, invalid, rating, or fraction) or at a hard
+        # sentence boundary, whichever comes first. An adjacent comma is
+        # natural punctuation ("7/27, morning please"). A time can
+        # therefore never be borrowed across another date or a rating
+        # clause: "7/27 and 8/3 at 9am" stays day-only.
+        candidate_spans = [
+            (m.start(), m.end()) for _, m in _explicit_date_candidates(t)
+        ]
+
+        after_end = len(t)
+        for span_start, _span_end in candidate_spans:
+            if match_end <= span_start < after_end:
+                after_end = span_start
+        hard = _HARD_BOUNDARY_RE.search(t, match_end, after_end)
+        if hard:
+            after_end = hard.start()
+        # A coordination word also ends the region: what follows "and" /
+        # "but" / "or" is a different clause, and its time belongs to that
+        # clause ("appointment on 7/27 and my pain started at 9am" is
+        # day-only, while "7/27 morning and my pain started at 9am" keeps
+        # the morning that sits BEFORE the coordination). Nothing beyond
+        # the boundary is ever scanned for a detail; a safe extra
+        # morning/afternoon question beats guessing detail ownership.
+        coordination = _COORDINATION_BOUNDARY_RE.search(t, match_end, after_end)
+        if coordination:
+            after_end = coordination.start()
+
+        day_key_for_time = explicit_date.strftime("%a").lower()[:3]
+        detail = _detect_detail_for_explicit_date(
+            t[match_end:after_end], client, day_key_for_time
+        )
+
+        # Pre-date fallback ("morning on 7/27"): only when NO other
+        # candidate shares the unpunctuated segment - an earlier rating's
+        # 9am must never be borrowed - and never across the coordination
+        # that introduces the selected-date clause. When ownership is
+        # ambiguous the date is saved day-only and the existing
+        # morning/afternoon follow-up asks for the time.
+        if detail is None:
+            pre_start = 0
+            for b in _HARD_BOUNDARY_RE.finditer(t, 0, match_start):
+                pre_start = b.end()
+            earlier_candidate_in_segment = any(
+                span_start < match_start and span_end > pre_start
+                for span_start, span_end in candidate_spans
+                if (span_start, span_end) != (match_start, match_end)
+            )
+            if not earlier_candidate_in_segment:
+                for b in _COORDINATION_BOUNDARY_RE.finditer(t, pre_start, match_start):
+                    pre_start = b.end()
+                detail = _detect_detail_for_explicit_date(
+                    t[pre_start:match_start], client, day_key_for_time
+                )
+        day_token = explicit_date.strftime("%a")
+        iso = explicit_date.isoformat()
+        return f"{day_token} {iso} {detail}" if detail else f"{day_token} {iso}"
 
     day_map = {
         "mon": "Mon",
@@ -3642,7 +4655,9 @@ def time_window_is_complete(tw: Optional[str]) -> bool:
         return False
 
     tl = (tw or "").strip().lower()
-    if tl in {"asap", "asap / tomorrow ok"}:
+    # rev3: shared single-owner vocabulary (see _ASAP_TIME_WINDOW_FORMS) —
+    # the same two values as before, so behavior is unchanged.
+    if tl in _ASAP_TIME_WINDOW_FORMS:
         return True
 
     return bool(time_window_has_specific_day(tw) and time_window_has_detail(tw))
@@ -3699,7 +4714,13 @@ def handle_time_window_capture(
             base = base + timedelta(days=1)
         detected_tw = base.strftime("%a")
 
-    is_today_request = ("today" in norm_user_text) or (detected_tw == today_tok)
+    # An explicit date is compared as a date, so a future Monday is not
+    # mistaken for today just because today is also a Monday.
+    is_today_request = (
+        ("today" in norm_user_text)
+        or (detected_tw == today_tok)
+        or time_window_is_client_today(detected_tw, now_local)
+    )
 
     time_issue_reply = build_time_window_issue_reply(client, detected_tw)
     if time_issue_reply:
@@ -3860,15 +4881,32 @@ def handle_time_window_capture(
 
     # If we already have Weekday morning/afternoon and user gives a day, combine
     if current_tw in {"Weekday morning", "Weekday afternoon"} and detected_tw:
-        if detected_tw in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
+        combine_day_token = time_window_day_only_weekday_token(detected_tw)
+        if combine_day_token in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
             part = "morning" if current_tw == "Weekday morning" else "afternoon"
             conversation.lead_time_window = f"{detected_tw} {part}"
             return (None, True)
-        if detected_tw in {"Sat", "Sun"}:
+        if combine_day_token in {"Sat", "Sun"}:
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
-    # If we have day-only and user provides part-of-day or exact time, combine
-    if current_tw and time_window_has_specific_day(current_tw) and not time_window_has_detail(current_tw) and detected_tw:
+    # If we have day-only and user provides part-of-day or exact time, combine.
+    # CHECKPOINT B: two corrections to this merge.
+    #   1. It only fires when the DETECTED value carries no day of its own —
+    #      a detected value with its own day ("Wed 2026-07-30 morning") is a
+    #      changed mind, not a detail answer, and falls through to the
+    #      normal specificity save below, where the more specific value
+    #      replaces the stored day-only one.
+    #   2. The merged value keeps the FULL stored day portion. Building it
+    #      from _extract_day_token dropped the ISO date, so a stored
+    #      "Tue 2026-07-28" plus a "morning" answer became "Tue morning" —
+    #      the explicit date the patient gave was silently discarded.
+    if (
+        current_tw
+        and time_window_has_specific_day(current_tw)
+        and not time_window_has_detail(current_tw)
+        and detected_tw
+        and not time_window_has_specific_day(detected_tw)
+    ):
         day_tok = _extract_day_token(current_tw)
         dtl = (detected_tw or "").lower().strip()
 
@@ -3882,24 +4920,30 @@ def handle_time_window_capture(
                 else:
                     part = "evening"
 
-                if day_tok == today_tok and part == "morning" and is_after_noon:
+                # rev4: an explicit stored date is compared as a DATE — a
+                # future Monday is not "today" just because today is also a
+                # Monday. Legacy weekday-only values keep the token
+                # comparison via time_window_is_client_today's fallback.
+                if time_window_is_client_today(current_tw, now_local) and part == "morning" and is_after_noon:
                     return (
                         "Since it’s already afternoon, what time later today works best? Or I can help with tomorrow.",
                         False,
                     )
 
-                conversation.lead_time_window = f"{day_tok} {part}"
+                conversation.lead_time_window = f"{current_tw} {part}"
                 return (None, True)
 
             # exact time like 2pm or 14:00
             if re.search(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", dtl) or re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", dtl):
-                conversation.lead_time_window = f"{day_tok} {detected_tw}"
+                conversation.lead_time_window = f"{current_tw} {detected_tw}"
                 return (None, True)
 
         return ("Please choose another day/time that works.", False)
     # Normal save path: only save if it improves specificity
     if detected_tw:
-        if detected_tw in {"Sat", "Sun"} and not is_saturday_open(client):
+        # Day-only weekend values are rejected here whether they arrive as
+        # "Sat" or as "Sat 2026-08-01".
+        if time_window_day_only_weekday_token(detected_tw) in {"Sat", "Sun"} and not is_saturday_open(client):
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
         new_score = _time_window_specificity_score(detected_tw)
@@ -3918,13 +4962,26 @@ def handle_time_window_capture(
         if time_window_has_specific_day(current_tw) and not time_window_has_detail(current_tw):
             day_tok = _extract_day_token(current_tw)
 
-            if day_tok == today_tok and is_after_noon:
+            if time_window_is_client_today(current_tw, now_local) and is_after_noon:
                 return ("Got it — what time later today works best?", saved)
 
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
                 return ("Got it — do you prefer morning or afternoon?", saved)
 
             return (f"Please choose another day/time that works. {weekday_example}", False)
+
+        # CHECKPOINT B rev4: a COMPLETE value (day + detail) reaches here
+        # after the specificity save above; the two follow-up conditions
+        # only cover Weekday-form and day-only results. Falling through to
+        # the function's final (None, False) DISCARDED the saved flag — a
+        # mutation the caller was told never happened (proven live
+        # 2026-07-27: the delegating guard fell through on every complete
+        # capture, so completion, office notification, and the Calendar
+        # start never ran and the message drifted to the receptionist
+        # bypass). A silent successful save returns no reply and the HONEST
+        # flag; an equal-or-lower-specificity non-save keeps returning
+        # False exactly as before.
+        return (None, saved)
 
 
     return (None, False)
@@ -4460,6 +5517,13 @@ def build_unclear_dental_reason_reply() -> str:
     )
 
 
+# S7 APPROVED CALENDAR DEVIATIONS (D1-D5): the vocabulary entries marked
+# "S7 deviation" below are deliberate calendar-branch additions to the
+# production classifier vocabulary, approved by the owner in the S7 decision
+# record. They extend existing production patterns only; the classifier
+# structure, rules A/B, verdict vocabulary, and all other entries are
+# verbatim production. A future production back-sync must preserve or
+# consciously retire them.
 # Generic dental anchor words for free-text "Other" reasons that do not match
 # a specific library service, e.g. "a dental issue not listed".
 # Generic dental EVIDENCE words ("jaw", "mouth", "oral", "tooth", "gum",
@@ -4532,6 +5596,16 @@ DENTAL_REASON_AUTO_ACCEPT_TERMS = [
     "oral cancer screening",
     "preventive care",
     "preventative care",
+    # S7 deviation D1: preserve the locked S6 fixture and ordinary
+    # oral-symptom wording ("sore spot since my last visit"); pattern
+    # precedent: "mouth sore(s)". Coverage rule B still rejects
+    # "sore spot on my arm".
+    "sore spot",
+    "sore spots",
+    # S7 deviation D5: dental symptom wording ("metallic taste in my
+    # mouth"); coverage rule B still rejects "metallic taste in music"
+    # and "metallic paint". "bad taste" intentionally NOT added in S7.
+    "metallic taste",
 ]
 
 # Phrases whose tokens become explainable ONLY when the complete phrase is
@@ -4588,6 +5662,10 @@ DENTAL_REASON_PROBLEM_TERMS = {
     "pulled", "pull", "pulls",
     "extract", "extracted", "removal", "remove", "removed",
     "whiten", "whitened",
+    # S7 deviation D2: accept anatomy-supported wording ("gum irritation");
+    # pattern precedent: "inflamed"/"inflammation". Rules A/B still reject
+    # "knee irritation" and "skin irritation".
+    "irritation", "irritated",
 }
 
 # Dental activities: combine with a complaint word to form a dental reason
@@ -4622,6 +5700,10 @@ DENTAL_REASON_MODIFIER_TOKENS = {
     "new", "old", "temporary", "permanent", "regular", "routine", "general",
     "urgent", "urgently", "asap", "soon", "now", "today", "tomorrow",
     "week", "days", "day", "night", "morning", "recently", "lately",
+    # S7 deviation D4: "last" as a harmless time modifier ("since my last
+    # visit"); pattern precedent: "recently"/"lately". Rule A still rejects
+    # "last minute meeting" (no dental core signal).
+    "last",
     "started", "starting", "getting", "feels", "feel", "feeling",
     "out", "off", "up", "down", "between", "under", "around", "near",
     "while", "during", "every", "each", "at", "after", "before",
@@ -4687,6 +5769,10 @@ DENTAL_REASON_REQUEST_FILLER_TOKENS = {
     "appointment", "appointments", "appt", "visit",
     "for", "to", "in", "on", "of", "about", "with",
     "looking", "get", "schedule", "scheduling",
+    # S7 deviation D3: booking-language variants, mirroring production's
+    # existing "schedule"/"scheduling" filler. Coverage rule B still
+    # rejects "book a hotel", "book club last week", "booking a flight".
+    "book", "booking", "booked",
     "am", "is", "are", "was", "were",
     "interested", "please", "hi", "hello", "thanks",
     "listed",
@@ -5008,14 +6094,6 @@ def classify_other_reason_detail(
     return "non_dental"
 
 
-def looks_like_dental_reason_detail(
-    user_text: str,
-    enabled_service_keys: Optional[List[str]] = None,
-) -> bool:
-    """True only when classify_other_reason_detail() fully accepts the text
-    as a dental appointment reason (fail closed)."""
-    return classify_other_reason_detail(user_text, enabled_service_keys) == "dental"
-
 def get_other_reason_detail(conversation: Conversation) -> str:
     """
     Return the most specific service detail for staff notifications.
@@ -5083,6 +6161,14 @@ def get_other_reason_detail(conversation: Conversation) -> str:
     if source_norm in generic_sources:
         return ""
 
+    # S6 rev6: the SINGLE narrow generic-wording owner. Scheduling-only
+    # phrases ("appointment please", "book a visit") are no detail at all;
+    # meaningful Other detail that merely contains a scheduling token
+    # ("sore spot since my last visit") has non-vocabulary tokens, is not
+    # generic, and is preserved.
+    if source_text_is_generic_appointment_wording(source):
+        return ""
+
     if looks_like_scheduling_intent(source) and not detect_appointment_reason(source):
         return ""
 
@@ -5124,34 +6210,68 @@ def lead_reason_can_be_replaced(current_reason: Optional[str], new_reason: Optio
 
     return False
 
+# Core scheduling words plus the filler vocabulary of short "just book me"
+# phrasings. Used ONLY by source_text_is_generic_appointment_wording().
+SCHEDULING_CORE_TOKENS = {
+    "appointment",
+    "appointments",
+    "appt",
+    "schedule",
+    "scheduling",
+    "scheduled",
+    "book",
+    "booking",
+    "visit",
+}
+
+SCHEDULING_FILLER_TOKENS = {
+    "i", "a", "an", "the", "to", "for", "my", "me", "us", "in", "up",
+    "need", "needs", "want", "wants", "would", "like", "please",
+    "can", "could", "get", "make", "set", "come", "really", "just",
+}
+
 
 def source_text_is_generic_appointment_wording(source_text: Optional[str]) -> bool:
     """
-    True when lead_reason_source_text is blank or merely generic scheduling
-    wording ("I need an appointment", "book a visit") that names no real
-    service — safe to replace with the patient's specific service message.
+    The SINGLE generic-wording owner (S6 revision 6). True ONLY for blank
+    text or short scheduling-only phrases — "I need an appointment",
+    "appointment please", "book a visit", "please schedule an appointment"
+    — where every token is scheduling or filler vocabulary and at least
+    one core scheduling token is present.
+
+    False the moment the text names a real library service (Root Canal,
+    Dentures) OR carries any meaningful non-vocabulary token ("sore spot
+    since my last visit" keeps "sore", "spot", "since", "last").
+
+    Both consumers rely on the same contract:
+    - the S6 service-detail enrichment gate: a stored source may be
+      REPLACED by the patient's specific service message only when it is
+      generic by this definition, so meaningful Other detail is never
+      silently overwritten;
+    - get_other_reason_detail(): a source that is generic by this
+      definition is no detail at all and is filtered to "".
+
+    NOTE: deliberately NARROWER than the production helper of the same
+    name (production classifies any scheduling-token text as generic).
+    The calendar branch tightened it after the broad rule was shown to
+    erase meaningful Other detail; recorded as a documented divergence.
     """
     s = (source_text or "").strip()
     if not s:
         return True
 
     if detect_library_dental_service(s):
-        return False  # already names a real service — never overwrite
+        return False  # names a real service — never generic
 
     tokens = set(_norm_text(s).split())
-    return bool(
-        tokens
-        & {
-            "appointment",
-            "appointments",
-            "appt",
-            "schedule",
-            "scheduling",
-            "book",
-            "booking",
-            "visit",
-        }
-    )
+    if not tokens:
+        return True
+
+    if not (tokens & SCHEDULING_CORE_TOKENS):
+        return False
+
+    return tokens <= (SCHEDULING_CORE_TOKENS | SCHEDULING_FILLER_TOKENS)
+
 
 def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
     """
@@ -5410,7 +6530,29 @@ def user_accepted_scheduling(user_text: str) -> bool:
     t = _norm_text(user_text)
     return t in {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "sounds good", "please", "lets do it", "let s do it"}
 
-def build_lead_context(conversation: Conversation) -> Optional[Dict[str, str]]:
+def _render_time_window_for_client(client: Optional[Client], tw: Optional[str]) -> str:
+    """The single client-aware human rendering used at output boundaries.
+
+    Every place a stored time window leaves the backend - browser meta,
+    model context, staff email/SMS, outside-hours notes - goes through a
+    client-local render so the raw canonical ISO value is never exposed.
+    """
+    if not tw:
+        return ""
+    reference_date = get_client_now(client).date() if client is not None else None
+    return pretty_time_window(tw, reference_date)
+
+
+def build_lead_context(
+    conversation: Conversation,
+    client: Optional[Client] = None,
+) -> Optional[Dict[str, str]]:
+    """Lead facts handed to the model as system context.
+
+    The time window is rendered for humans before it leaves this
+    boundary: the canonical stored value can carry an ISO date, and
+    anything placed here can be echoed back to the patient.
+    """
     parts: List[str] = []
     if (conversation.lead_name or "").strip():
         parts.append(f"Lead name: {conversation.lead_name}")
@@ -5425,7 +6567,10 @@ def build_lead_context(conversation: Conversation) -> Optional[Dict[str, str]]:
     if getattr(conversation, "lead_is_new_patient", None) is False:
         parts.append("New patient: no (returning)")
     if (getattr(conversation, "lead_time_window", None) or "").strip():
-        parts.append(f"Preferred time window: {conversation.lead_time_window}")
+        parts.append(
+            f"Preferred time window: "
+            f"{_render_time_window_for_client(client, conversation.lead_time_window)}"
+        )
     if getattr(conversation, "lead_email_opt_out", False):
         parts.append("Email opt-out: yes")
     if not parts:
@@ -5482,13 +6627,13 @@ EMERGENCY_TRIGGERS = [
     "tooth fell out",
     "won t stop bleeding",
     "wont stop bleeding",
+    "uncontrolled bleeding",
     "can t stop bleeding",
     "cant stop bleeding",
     "cannot stop bleeding",
     "bleeding won t stop",
     "bleeding wont stop",
     "bleeding will not stop",
-    "uncontrolled bleeding",
     "blood everywhere",
     "bleeding everywhere",
     "bleeding a lot",
@@ -5544,81 +6689,67 @@ def looks_like_emergency(text: str) -> bool:
     return False
 
 
+LIFE_THREATENING_TRIGGERS = [
+    # Airway — breathing
+    "can t breathe",
+    "cant breathe",
+    "cannot breathe",
+    "trouble breathing",
+    "difficulty breathing",
+    # Airway — swallowing
+    "can t swallow",
+    "cant swallow",
+    "cannot swallow",
+    "trouble swallowing",
+    "difficulty swallowing",
+    # Uncontrolled bleeding
+    "uncontrolled bleeding",
+    "won t stop bleeding",
+    "wont stop bleeding",
+    "can t stop bleeding",
+    "cant stop bleeding",
+    "cannot stop bleeding",
+    "bleeding won t stop",
+    "bleeding wont stop",
+    "bleeding will not stop",
+    "blood everywhere",
+    "bleeding everywhere",
+    # Rapidly worsening swelling
+    "rapidly worsening swelling",
+    "worsening swelling",
+]
+
 def looks_like_life_threatening_emergency(text: str) -> bool:
     """
-    Narrow 911-tier classifier.
-
-    Distinguishes immediate 911-tier messages from ordinary dental
-    emergencies. True only when the CURRENT message indicates trouble
-    breathing, trouble swallowing, uncontrolled bleeding, or
-    rapidly/worsening swelling (including the existing swelling +
-    breathing/swallowing combination heuristic).
-
-    When True, the three emergency response paths (dangerous dental
-    self-treatment guard, urgent trauma/bleeding safety guard, and
-    emergency_booking_mode):
-      * suppress the same-response emergency intake prompt so the
-        911/ER safety instruction stands alone, and
-      * persistently close the conversation by setting its final_closed
-        flag, so every later turn on that
-        conversation is intercepted by the existing top-level
-        final_closed guard (Start Over is required to begin a new
-        conversation).
-
-    It does not replace the broad looks_like_emergency() classifier,
-    and it does not change normal non-life-threatening emergency
-    intake behavior (severe pain, knocked-out tooth, dental trauma
-    without airway danger or uncontrolled bleeding continue their
-    existing emergency contact flow).
+    Purpose: Decide whether a message describes a LIFE-THREATENING (911-tier)
+             symptom — trouble breathing, trouble swallowing, uncontrolled
+             bleeding, or rapidly worsening swelling — as opposed to a dental
+             emergency the office can handle by phone (severe pain,
+             knocked-out tooth). A True result means the emergency safety
+             instruction must be the ENTIRE reply: no intake or contact
+             question may be appended to the same message.
+             (EMERGENCY INTERRUPTION PATCH — staging regression where the
+             emergency-contact phone question was appended to the 911
+             instruction while normal intake was waiting for a phone number.)
+    Inputs:  the raw patient message text.
+    Returns: True only for the closed LIFE_THREATENING_TRIGGERS list above,
+             or for facial swelling combined with any airway complaint
+             (e.g. "my face is swelling and I'm having trouble breathing").
+    Database effects: none.
+    External effects: none.
+    Possible failures: none — empty or None input returns False.
     """
     t = _norm_text(text)
     if not t:
         return False
 
-    breathing_terms = [
-        "can t breathe",
-        "cant breathe",
-        "cannot breathe",
-        "trouble breathing",
-        "difficulty breathing",
-    ]
-
-    swallowing_terms = [
-        "can t swallow",
-        "cant swallow",
-        "cannot swallow",
-        "trouble swallowing",
-        "difficulty swallowing",
-    ]
-
-    uncontrolled_bleeding_terms = [
-        "uncontrolled bleeding",
-        "won t stop bleeding",
-        "wont stop bleeding",
-        "can t stop bleeding",
-        "cant stop bleeding",
-        "cannot stop bleeding",
-        "bleeding won t stop",
-        "bleeding wont stop",
-        "bleeding will not stop",
-        "blood everywhere",
-        "bleeding everywhere",
-    ]
-
-    swelling_terms = [
-        "rapidly worsening swelling",
-        "worsening swelling",
-    ]
-
-    if any(p in t for p in breathing_terms):
-        return True
-    if any(p in t for p in swallowing_terms):
-        return True
-    if any(p in t for p in uncontrolled_bleeding_terms):
-        return True
-    if any(p in t for p in swelling_terms):
+    if any(k in t for k in LIFE_THREATENING_TRIGGERS):
         return True
 
+    # Facial swelling combined with any airway complaint is treated as
+    # life-threatening even when no exact trigger phrase matched. This is
+    # the same combination rule looks_like_emergency already uses, so the
+    # two classifiers can never disagree on this pattern.
     if any(p in t for p in ["swollen", "swelling", "face swelling", "face swollen"]) and any(
         p in t for p in ["swallow", "breathe", "breathing"]
     ):
@@ -6639,19 +7770,32 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     name = (conversation.lead_name or "").strip()
     name_prefix = f"{name}, " if name else ""
 
-    # Active hybrid pre-booking capture resumes its own name/phone questions
-    # (in that order) instead of the full intake sequence. Hybrid intake is
-    # only name + phone, then the booking link — never email/time/new-patient.
+    # S9-4 (decision D-2, approved): an ACTIVE ordinary hybrid pre-booking
+    # capture resumes its OWN name/phone questions, in that order, instead of
+    # the full intake sequence - hybrid intake is only name + phone, then the
+    # booking link, never email / time window / new-returning. This keeps
+    # _next_intake_prompt() and next_booking_capture_prompt() in agreement on
+    # the hybrid sequence, with next_booking_capture_prompt() as the single
+    # wording owner.
+    #
+    # S9 CALENDAR ADAPTATION (S3 preservation condition): the shortcut is
+    # taken ONLY for an ordinary lead. A priority/ASAP lead falls through to
+    # the full sequence below, so S3 completeness and ordering are unchanged.
+    # conversation_is_ordinary_hybrid_lead() is the single owner of that
+    # split, so the two prompt owners can never disagree, and the shortcut it
+    # gates never calls back into this function (no recursion).
     if (
         has_external_booking(client)
         and get_booking_mode(client) == "hybrid"
         and not bool(getattr(conversation, "booking_link_sent", False))
         and bool((getattr(conversation, "lead_reason", "") or "").strip())
+        and conversation_is_ordinary_hybrid_lead(conversation)
     ):
         hybrid_prompt = next_booking_capture_prompt(
             conversation,
             service_reason=(conversation.lead_reason or "").strip(),
             booking_mode="hybrid",
+            client=client,
         )
         return hybrid_prompt or ""
 
@@ -6876,7 +8020,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
     offered_library_service = last_assistant_offered_library_service(db, conversation.id) if accepted_schedule else None
 
-    if offered_service_reason and service_offer_name and not accepted_schedule:
+    # S10: A symptom reply can contain service aliases while also asking for
+    # the patient's name. Let the existing name-capture owner handle that
+    # response instead of the service-offer clarification owner.
+    if (
+        offered_service_reason
+        and service_offer_name
+        and not accepted_schedule
+        and not last_assistant_asked_for_name(db, conversation.id)
+    ):
         offered_service_for_clarification = last_assistant_offered_library_service(db, conversation.id)
 
         if offered_service_for_clarification:
@@ -6932,23 +8084,33 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         "has_any_lead_data=", has_any_lead_data,
         "in_intake_mode=", in_intake_mode,
         "resume_after_answer=", resume_intake_after_answer,
-        "text=", user_text[:80]
+        # PATCH 6 correction pass: never log the raw patient message —
+        # controlled derived fields + conversation UUID only.
+        "text_present=", bool((user_text or "").strip()),
+        "text_length=", len(user_text or ""),
+        "conversation=", conversation.id,
     )
 
     # =========================================================
-    # Hybrid post-handoff state
+    # Hybrid post-handoff state (S9-3, decision D-5)
     # =========================================================
-    # Once a hybrid conversation has captured name + phone, notified the
-    # office, and displayed the booking link, intake is finished. Treat
-    # follow-ups as ordinary questions so the FAQ, info, and conversation-
-    # ending guards keep working — and so the bypass/intake continuation
-    # logic can never resume asking for email, time window, patient type,
-    # or the service reason.
+    # Once a hybrid conversation has captured name + phone and displayed the
+    # external booking link, intake is FINISHED. Treat follow-ups as ordinary
+    # questions so the FAQ, info, safety and conversation-ending owners keep
+    # working - and so the bypass / intake-continuation logic can never resume
+    # asking for email, time window, patient type, or the service reason.
+    # This flag is read-only state: it repeats no link, mutates no captured
+    # field, starts no native booking, and sends no notification.
     hybrid_post_handoff = conversation_is_hybrid_post_handoff(client, conversation)
     if hybrid_post_handoff:
         in_intake_mode = False
         resume_intake_after_answer = False
-        print("[HYBRID POST-HANDOFF] intake disabled for follow-up handling")
+        # PATCH 6 logging contract: controlled fields + conversation UUID only.
+        print(
+            "[HYBRID_POST_HANDOFF]",
+            "intake_disabled=", True,
+            "conversation=", conversation.id,
+        )
 
     # =========================================================
     # Self-harm / suicide crisis guard
@@ -7161,7 +8323,36 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         and last_assistant_was_final_handoff(db, conversation.id)
     )
 
-    if explicit_done or simple_thanks_done or ack_after_final:
+    # PATCH 3 (Senior Audit Critical #5): at the Calendar CONFIRMATION step,
+    # "no" / "no thanks" / "no thank you" are slot rejections that belong to
+    # the Calendar state machine's change-handling path, not conversation
+    # endings. Narrowest possible carve-out: every other ending phrase, and
+    # these phrases in every other state, still end the chat exactly as
+    # before.
+    booking_rejection_at_confirmation = (
+        booking_dialog_active(conversation)
+        and getattr(conversation, "booking_state", None) == BookingState.WAITING_FOR_CONFIRMATION
+        and _norm_text(user_text) in {"no", "no thanks", "no thank you"}
+    )
+
+    if (explicit_done or simple_thanks_done or ack_after_final) and not booking_rejection_at_confirmation:
+        # PATCH 3: a genuine ending during an active Calendar dialog must not
+        # strand the dialog or its held slot. The Calendar-owned reset
+        # releases the conversation's hold and clears every booking field;
+        # Mia's existing ending reply below is preserved unchanged and no
+        # Calendar question is re-asked. A cleanup failure is logged and
+        # rolled back — it never replaces the ending reply with a 500 and is
+        # never claimed to have succeeded.
+        if booking_dialog_active(conversation):
+            try:
+                cancel_active_booking(db, client, conversation)
+            except Exception as cleanup_error:
+                print(f"CALENDAR ENDING CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+
         # Single safety-net call FIRST (duplicate-safe via the persisted
         # lead_email_sent / lead_sms_sent flags), then the ending wording is
         # built from that call's real per-channel values — never a second
@@ -7197,7 +8388,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # Time-only outside-hours guard
     # =========================================================
     if (
-        (
+        # PATCH 3: while an internal Calendar dialog is active, its state
+        # machine owns time answers; this guard must not consume them.
+        # Always True for every conversation without an active dialog.
+        not booking_dialog_active(conversation)
+        and (
             looks_like_scheduling_intent(user_text)
             or bool(detect_service_selection(user_text))
             or bool(detect_appointment_reason(user_text))
@@ -7240,20 +8435,55 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # =========================================================
     # Intake time-window capture guard
     # =========================================================
-    if in_intake_mode and not time_window_is_complete(getattr(conversation, "lead_time_window", None)):
-        canonical_tw = canonicalize_time_window_for_storage(client, user_text)
+    # PATCH 3: skipped while an internal Calendar dialog is active — booking
+    # answers ("tomorrow", "morning") belong to the Calendar state machine,
+    # not to lead_time_window. Always True when no dialog is active.
+    #
+    # CHECKPOINT B (Rule 3): capture is DELEGATED to the one capture owner,
+    # handle_time_window_capture(). This guard previously canonicalized and
+    # overwrote conversation.lead_time_window itself — a second capture
+    # implementation that skipped the owner's established merge and
+    # validation rules. Two live staging consequences: a stored day-only
+    # explicit date ("Tue 2026-07-28") was REPLACED by a later bare
+    # "morning" answer instead of merged with it, and owner-only validation
+    # (Sunday nudge, weekend rejection, same-day rules) never ran on this
+    # path. The canonicalize call below is a GATE only — it decides whether
+    # this guard answers the message at all (priority/ASAP-only phrasings
+    # keep falling through to their existing later owners exactly as
+    # before); the owner re-derives and stores the value itself, so there
+    # is still exactly one capture implementation.
+    if (
+        not booking_dialog_active(conversation)
+        and in_intake_mode
+        and not time_window_is_complete(getattr(conversation, "lead_time_window", None))
+        and canonicalize_time_window_for_storage(client, user_text)
+    ):
+        guard_last_msg = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation.id, Message.role == "assistant")
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+        guard_last_text = (guard_last_msg.content or "") if guard_last_msg else ""
 
-        if canonical_tw:
+        tw_reply, tw_saved = handle_time_window_capture(
+            client, conversation, user_text, guard_last_text
+        )
+
+        # The owner neither saved nor answered: fall through unchanged, the
+        # same way the pre-Checkpoint-B guard fell through when it detected
+        # nothing storable.
+        if tw_reply is not None or tw_saved:
             lead_email_error = None
             lead_sms_error = None
 
-            time_issue_reply = build_time_window_issue_reply(client, canonical_tw)
-
-            if time_issue_reply:
-                reply_text = time_issue_reply
+            if not tw_saved:
+                # Owner validation reply (outside hours, already passed
+                # today, Sunday nudge, weekend rejection): nothing was
+                # stored, so nothing is committed — mirroring the previous
+                # time_issue_reply branch.
+                reply_text = tw_reply
             else:
-                conversation.lead_time_window = canonical_tw
-
                 if hasattr(conversation, "lead_outside_hours_note"):
                     conversation.lead_outside_hours_note = None
 
@@ -7261,7 +8491,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(conversation)
 
-                reply_text = _next_intake_prompt(client, conversation)
+                # The owner's follow-up question (e.g. the day-only
+                # "morning or afternoon" ask) takes precedence, exactly as
+                # it does at the established later capture site; otherwise
+                # the next intake prompt continues the capture-first order.
+                reply_text = tw_reply or _next_intake_prompt(client, conversation)
 
                 if mark_priority_if_symptom_lead(conversation):
                     db.add(conversation)
@@ -7280,6 +8514,17 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                         conversation,
                         "SHORT SYMPTOM FLOW COMPLETION NOTIFY TRIGGERED",
                     )
+
+                    # PATCH 3 (Senior Audit Critical #5): the office lead
+                    # notification above ran FIRST (approved temporary MVP
+                    # behavior); the single routing owner now selects the
+                    # one booking owner for this completed lead.
+                    routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+                    if routed is not None:
+                        return _routed_completion_response(db, conversation, routed, show_start_over)
+
+                    # S5: wording reflects THIS turn's real per-channel
+                    # results; no second notification call.
                     reply_text = apply_notification_outcome_to_completion_reply(
                         reply_text,
                         lead_email_sent,
@@ -7294,7 +8539,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 meta={
                     "mode": "intake_time_window_capture",
                     "faq_match": False,
-                    "saved_time_window": getattr(conversation, "lead_time_window", None),
+                    # Human-readable and client-local. The canonical stored
+                    # value can carry an ISO date and must never cross this
+                    # boundary. Sole producer of this key; no repository
+                    # consumer reads the raw form.
+                    "saved_time_window": _render_time_window_for_client(
+                        client, getattr(conversation, "lead_time_window", None)
+                    ) or None,
                     "show_service_menu": reply_should_show_service_menu(reply_text),
                     "show_start_over": show_start_over,
                 },
@@ -7451,6 +8702,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(conversation)
 
+        # PATCH 3 (Senior Audit Critical #5): a true emergency mid-booking
+        # stops the Calendar dialog in THIS request — owned hold released,
+        # state cleared by the Calendar-owned reset — while the emergency
+        # reply below stays the patient-facing response. A cleanup failure
+        # is logged and rolled back: never a 500, never a false success.
+        if is_true_emergency and booking_dialog_active(conversation):
+            try:
+                cancel_active_booking(db, client, conversation)
+            except Exception as cleanup_error:
+                print(f"CALENDAR EMERGENCY CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+
         reply_text = build_dangerous_dental_self_treatment_reply(user_text)
 
         if is_true_emergency:
@@ -7460,6 +8726,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "please call 911 or go to the ER now.\n\n"
                 f"Our office number is {office_phone}."
             )
+            # EMERGENCY INTERRUPTION PATCH: same rule as the main
+            # emergency routing block — a life-threatening symptom
+            # suppresses the contact question in this reply.
             if looks_like_life_threatening_emergency(user_text):
                 next_prompt = None
             else:
@@ -7514,6 +8783,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(conversation)
 
+        # PATCH 3 (Senior Audit Critical #5): same-request Calendar cleanup;
+        # the emergency reply below remains the patient-facing response.
+        if booking_dialog_active(conversation):
+            try:
+                cancel_active_booking(db, client, conversation)
+            except Exception as cleanup_error:
+                print(f"CALENDAR EMERGENCY CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+
         reply_text = (
             "This may require prompt attention.\n\n"
             "If you have trouble breathing or swallowing, uncontrolled bleeding, or rapidly worsening swelling, "
@@ -7521,6 +8802,9 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             f"Our office number is {office_phone}."
         )
 
+        # EMERGENCY INTERRUPTION PATCH: same rule as the main emergency
+        # routing block — a life-threatening symptom suppresses the contact
+        # question so the safety instruction stands alone in this reply.
         if looks_like_life_threatening_emergency(user_text):
             next_prompt = None
         else:
@@ -7643,6 +8927,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     if looks_like_emergency(user_text):
+        # PATCH 3 (Senior Audit Critical #5): same-request Calendar cleanup;
+        # the emergency reply below remains the patient-facing response.
+        if booking_dialog_active(conversation):
+            try:
+                cancel_active_booking(db, client, conversation)
+            except Exception as cleanup_error:
+                print(f"CALENDAR EMERGENCY CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+
         default_during, default_after = get_emergency_defaults()
 
         accepts_emergencies = bool(getattr(client, "accepts_emergencies", True))
@@ -7685,6 +8981,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if accepts_walkins:
                     reply_text += "\n\nWalk-ins may be available, but please call first so we can direct you."
 
+            # EMERGENCY INTERRUPTION PATCH: a life-threatening symptom
+            # (trouble breathing/swallowing, uncontrolled bleeding, rapidly
+            # worsening swelling) must end the reply at the 911/ER
+            # instruction — no intake or contact question in the same
+            # message. Dental emergencies WITHOUT a life-threatening symptom
+            # (severe pain, knocked-out tooth) keep the existing contact
+            # prompt so the office can still reach the patient quickly.
             if not looks_like_life_threatening_emergency(user_text):
                 reply_text += "\n\n" + _next_emergency_prompt(conversation)
 
@@ -7818,10 +9121,15 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(conversation)
 
-        print("DEBUG:",
-            conversation.lead_is_emergency,
-            conversation.lead_name,
-            conversation.lead_phone)
+        # PATCH 6 correction pass: controlled fields only — the actual
+        # patient name and phone must never appear in server logs.
+        print(
+            "[EMERGENCY_FOLLOWUP]",
+            "emergency=", bool(conversation.lead_is_emergency),
+            "has_name=", bool((conversation.lead_name or "").strip()),
+            "has_phone=", bool((conversation.lead_phone or "").strip()),
+            "conversation=", conversation.id,
+        )
 
        # If we already have name + phone → STOP intake and send handoff message
         if (conversation.lead_name or "").strip() and (conversation.lead_phone or "").strip():
@@ -7884,6 +9192,151 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     # =========================================================
+    # CALENDAR BOOKING CONTINUATION (PATCH 3 — Senior Audit Critical #5)
+    # Runs only while an internal Calendar dialog is active, and only after
+    # every safety/emergency guard above has had first claim on the message.
+    # Ownership is re-resolved on every message: an office that NOW has an
+    # active external booking URL owns booking externally, so any in-flight
+    # internal dialog is cancelled (Calendar-owned reset: hold released,
+    # state cleared) and the shared external-handoff owner answers THIS
+    # request directly — even for internal-dialog answers like "yes" or "2"
+    # that would never satisfy the external trigger's intent conditions.
+    # SAFETY (PATCH 3 correction pass): medical-advice questions make this
+    # whole hook yield — booking state and any held slot stay byte-unchanged
+    # (medical advice is not necessarily an emergency) and the EXISTING
+    # medical-advice guard later in the flow answers; if an external URL
+    # appeared on that same message, the ownership transition also waits
+    # for the next appropriate message. The detector never matches normal
+    # booking answers ("yes"/"no"/"2"/"tomorrow"/"morning") because those
+    # contain no advice phrasing, and booking words force it False.
+    # =========================================================
+    if booking_dialog_active(conversation) and not looks_like_medical_advice(user_text):
+        if has_external_booking(client):
+            try:
+                cancel_active_booking(db, client, conversation)
+            except Exception as cleanup_error:
+                # PATCH 3 correction pass: a FAILED cancellation must never
+                # be followed by the external handoff — internal state (and
+                # possibly its hold) still exists, so handing off anyway
+                # would create two booking owners and falsely imply the
+                # internal state was cleared. Log, roll back, answer with
+                # the honest fallback (persisted per-channel flags; zero
+                # duplicate sends), leave booking_link_sent untouched, and
+                # let the next message retry the transition.
+                print(f"CALENDAR OWNERSHIP CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                try:
+                    db.rollback()
+                except Exception as rollback_error:
+                    print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+                reply_text = _booking_error_reply_text(db, client, conversation, office_phone)
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+                db.commit()
+                return ChatResponse(
+                    reply=reply_text,
+                    conversation_id=str(conversation.id),
+                    meta={"faq_match": False, "mode": "booking_error", "show_start_over": show_start_over},
+                )
+
+            transition_service_reason = (
+                (conversation.lead_reason or "").strip() or "appointment request"
+            )
+            handoff_reply, handoff_meta = send_external_booking_handoff(
+                db, client, conversation, user_text, transition_service_reason
+            )
+
+            db.add(conversation)
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=handoff_reply))
+            db.commit()
+            db.refresh(conversation)
+
+            handoff_meta["show_start_over"] = show_start_over
+
+            return ChatResponse(
+                reply=handoff_reply,
+                conversation_id=str(conversation.id),
+                meta=handoff_meta,
+            )
+
+        try:
+            booking_reply = handle_booking_message(
+                db,
+                client,
+                conversation,
+                user_text,
+                information_interruption=is_information_interruption(user_text),
+            )
+        except Exception as e:
+            # Visible failure (Rule 16): log, roll back, never pretend the
+            # booking advanced, and never claim an office notification that
+            # did not happen (finalize_and_notify_if_ready is per-channel
+            # idempotent — already-sent channels are NEVER re-sent).
+            print(f"CALENDAR ERROR: exc_class={sanitized_exception_class(e)} conversation={conversation.id}")
+            try:
+                db.rollback()
+            except Exception as rollback_error:
+                print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+            reply_text = _booking_error_reply_text(db, client, conversation, office_phone)
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={"faq_match": False, "mode": "booking_error", "show_start_over": show_start_over},
+            )
+
+        if booking_reply is not None and booking_reply.handled:
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=booking_reply.text))
+            db.commit()
+            meta = {"faq_match": False, "show_start_over": show_start_over}
+            meta.update(booking_reply.meta)
+            return ChatResponse(
+                reply=booking_reply.text,
+                conversation_id=str(conversation.id),
+                meta=meta,
+            )
+        # handled=False (information interruption, emergency, or booking
+        # disabled): fall through — the existing flow answers as before.
+
+    # =========================================================
+    # POST-COMPLETION FRESH-OWNERSHIP ROUTING (PATCH 3 correction pass)
+    # Booking ownership is resolved fresh on every relevant message. A
+    # COMPLETED lead with no active dialog and no external URL may start a
+    # NEW internal Calendar dialog when the current message expresses
+    # scheduling or date intent — e.g. after an internal -> external
+    # transition whose URL was later removed, or after a genuine ending.
+    # booking_link_sent is NOT an ownership signal and never blocks this.
+    # This is the single post-completion routing point (Rule 3): it reuses
+    # route_completed_lead, and the duplicate-appointment defense lives in
+    # the Calendar start itself (_handle_start restates an existing
+    # appointment instead of creating a second one).
+    # =========================================================
+    if (
+        not booking_dialog_active(conversation)
+        and not has_external_booking(client)
+        and (conversation.lead_status or "").strip().lower() == "completed"
+        and not bool(getattr(conversation, "final_closed", False))
+        and not bool(getattr(conversation, "lead_is_emergency", False))
+        and not looks_like_medical_advice(user_text)
+        and not is_information_interruption(user_text)
+        and (
+            looks_like_scheduling_intent(user_text)
+            or bool(canonicalize_time_window_for_storage(client, user_text))
+        )
+    ):
+        # CHECKPOINT B rev2: this is a NEW message from an already-completed
+        # lead, so its seeds come from THIS message canonicalized through
+        # the rating-aware Checkpoint A pipeline — the historical stored
+        # window is neither consulted nor mutated, and the defect-prone raw
+        # date re-parse never runs at this site.
+        routed = route_completed_lead(
+            db, client, conversation, user_text, office_phone,
+            seed_source=SEED_SOURCE_CURRENT_MESSAGE,
+        )
+        if routed is not None:
+            return _routed_completion_response(db, conversation, routed, show_start_over)
+        # routed is None (booking disabled): fall through unchanged.
+
+    # =========================================================
     # Operational override
     # =========================================================
     faq = None
@@ -7896,10 +9349,10 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     ]
     looks_like_booking_only = any(p in t for p in booking_phrases)
 
-    is_location_intent = any(p in t for p in [
-        "where are you", "where r you", "where are you located", "where is your office",
-        "location", "address", "parking", "directions", "located"
-    ])
+    # PATCH 3 correction pass: the phrase list moved into
+    # looks_like_location_request (single owner); behavior is identical —
+    # the detector applies the same _norm_text normalization as `t`.
+    is_location_intent = looks_like_location_request(user_text)
 
     hours_phrases = [
         "hours", "office hours", "when are you open", "what time do you open",
@@ -8249,17 +9702,14 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         lead_captured_now = True
         updated = True
 
-        # Keep lead_reason = "appointment request"; record the specific
-        # service as the detail. Never overwrite an already captured
-        # different specific service detail.
-        if (
-            hasattr(conversation, "lead_reason_detail")
-            and not (getattr(conversation, "lead_reason_detail", "") or "").strip()
-        ):
-            setattr(conversation, "lead_reason_detail", matched_library_service.display_name[:120])
-
-        # Replace the source only when it is blank or merely generic
-        # appointment wording ("I need an appointment").
+        # Keep lead_reason = "appointment request". In the calendar branch the
+        # detail is DERIVED, not stored: replacing the generic source text
+        # below is the persistence, and get_other_reason_detail() (the single
+        # existing detail owner) turns that source into the clean display
+        # label ("Root Canal", "Dentures"). The single narrow owner below is
+        # False for any source naming a real service OR carrying meaningful
+        # non-vocabulary tokens, so neither an existing specific service nor
+        # meaningful Other free-text detail is ever overwritten.
         if source_text_is_generic_appointment_wording(
             getattr(conversation, "lead_reason_source_text", "")
         ):
@@ -8481,11 +9931,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             "NORMAL PATIENT TYPE COMPLETION NOTIFY TRIGGERED",
         )
 
-        if priority_intake_is_complete(conversation):
-            reply_text = build_priority_handoff_reply(conversation)
-        else:
-            reply_text = build_normal_lead_complete_reply(conversation)
+        # PATCH 3 (Senior Audit Critical #5): lead notification ran first
+        # (approved temporary MVP behavior); route to the one booking owner.
+        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+        if routed is not None:
+            return _routed_completion_response(db, conversation, routed, show_start_over)
 
+        reply_text = build_normal_lead_complete_reply(conversation)
+
+        # S5: wording reflects THIS turn's real per-channel results —
+        # the values already returned above; no second notification call.
         reply_text = apply_notification_outcome_to_completion_reply(
             reply_text,
             lead_email_sent,
@@ -8505,7 +9960,6 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
                 "lead_email_error": lead_email_error,
                 "lead_sms_error": lead_sms_error,
-                "office_notified": bool(lead_email_sent or lead_sms_sent),
                 "show_start_over": show_start_over,
             },
         )   
@@ -8552,6 +10006,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 conversation,
                 "PRIORITY TIME WINDOW HANDOFF NOTIFY TRIGGERED",
             )
+
+            # PATCH 3 (Senior Audit Critical #5): lead notification ran
+            # first (approved temporary MVP behavior); route to the one
+            # booking owner. Priority NON-emergency leads may book, and the
+            # eventual appointment urgency stays "priority" (owned by
+            # booking_conversation._finalize_and_reply).
+            routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+            if routed is not None:
+                return _routed_completion_response(db, conversation, routed, show_start_over)
+
+            # S5: wording reflects THIS turn's real per-channel results —
+            # the values already returned above; no second notification call.
             combined_reply = apply_notification_outcome_to_completion_reply(
                 combined_reply,
                 lead_email_sent,
@@ -8580,105 +10046,56 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             }
         )
 
-        # =========================================================
-    # External booking / calendar handoff
+    # =========================================================
+    # External booking / calendar handoff (PATCH 3 — Senior Audit Critical
+    # #5: the routing body moved into send_external_booking_handoff, the
+    # single external-handoff owner; capture rules, link wording, meta, and
+    # the exactly-once booking_link_sent transition are the same functions
+    # as before. The former "not booking_link_sent" clause moved INTO the
+    # owner: post-link scheduling messages now receive a truthful "link
+    # already provided" acknowledgment instead of silently falling through,
+    # so external ownership keeps its voice for the whole conversation.)
     # =========================================================
     active_service_reason = (
         (conversation.lead_reason or "").strip()
         or service_reason_now
         or reason
     )
+    external_link_already_sent = bool(getattr(conversation, "booking_link_sent", False))
     if (
         has_external_booking(client)
-        and not bool(getattr(conversation, "booking_link_sent", False))
-        and (is_scheduling_now or service_reason_now or active_service_reason)
-    ):
-        capture_first = should_capture_before_booking_link(
-            client=client,
-            conversation=conversation,
-            user_text=user_text,
-            service_reason=active_service_reason,
-        )
-
-        if capture_first:
-            capture_prompt = next_booking_capture_prompt(
-                conversation,
-                service_reason=active_service_reason,
-                booking_mode=get_booking_mode(client),
-            )
-
-            print(
-                "[BOOKING_CAPTURE]",
-                "lead_name=", repr(conversation.lead_name),
-                "lead_phone=", repr(conversation.lead_phone),
-                "capture_prompt=", repr(capture_prompt),
-            )
-
-            if capture_prompt:
-                db.add(Message(conversation_id=conversation.id, role="assistant", content=capture_prompt))
-                db.commit()
-
-                return ChatResponse(
-                    reply=capture_prompt,
-                    conversation_id=str(conversation.id),
-                    meta={
-                        "mode": "booking_capture_first",
-                        "faq_match": False,
-                        "show_start_over": show_start_over,
-                    },
-                )
-
-        handoff_reply = build_booking_handoff_reply(
-            client=client,
-            conversation=conversation,
-            service_reason=active_service_reason,
-        )
-
-        # Hybrid mode: name + valid phone are now guaranteed captured above.
-        # Notify the office exactly once through the existing notification
-        # helper (it has its own duplicate guards, and this branch can only
-        # run once because booking_link_sent gates re-entry). The lead is NOT
-        # marked "completed" here — doing so made the post-completion guard
-        # close the conversation on the patient's next ordinary message.
-        if (
-            capture_first
-            and get_booking_mode(client) == "hybrid"
-            and (conversation.lead_name or "").strip()
-            and (conversation.lead_phone or "").strip()
-        ):
-            if not bool(getattr(conversation, "is_lead", False)):
-                conversation.is_lead = True
-
+        # PATCH 3 correction pass: while an internal Calendar dialog is
+        # active, ownership routing — including the internal -> external
+        # transition — belongs solely to the CALENDAR BOOKING CONTINUATION
+        # hook above; this block engaging too would create a second owner
+        # (Rule 3). Always True for every conversation without a dialog.
+        and not booking_dialog_active(conversation)
+        and (
+            # First handoff: today's trigger, unchanged — a stored service
+            # reason is enough to offer the link once.
             (
-                hybrid_email_sent,
-                hybrid_sms_sent,
-                hybrid_email_error,
-                hybrid_sms_error,
-            ) = notify_office_of_completed_lead(db, client, conversation)
-
-            print(
-                "[HYBRID BOOKING CAPTURE NOTIFY]",
-                "email_sent=", hybrid_email_sent,
-                "sms_sent=", hybrid_sms_sent,
-                "email_error=", hybrid_email_error,
-                "sms_error=", hybrid_sms_error,
+                not external_link_already_sent
+                and (is_scheduling_now or service_reason_now or active_service_reason)
             )
+            # After the link was sent: only ACTUAL scheduling or service-
+            # selection intent in the CURRENT message earns the truthful
+            # reminder — the stored lead_reason must not hijack unrelated
+            # messages (PATCH 3 correction pass).
+            or (
+                external_link_already_sent
+                and (is_scheduling_now or bool(service_reason_now))
+            )
+        )
+    ):
+        handoff_reply, handoff_meta = send_external_booking_handoff(
+            db, client, conversation, user_text, active_service_reason
+        )
 
-            # Only claim the info was "sent" if a channel actually succeeded.
-            if hybrid_email_sent or hybrid_sms_sent:
-                hybrid_intro = "Thank you. Your information has been sent to the office."
-            else:
-                hybrid_intro = "Thank you. Your information has been saved for the office."
-
-            handoff_reply = f"{hybrid_intro}\n\n{handoff_reply}"
-
-        conversation.booking_link_sent = True
         db.add(conversation)
         db.add(Message(conversation_id=conversation.id, role="assistant", content=handoff_reply))
         db.commit()
         db.refresh(conversation)
 
-        handoff_meta = build_booking_handoff_meta(client, active_service_reason)
         handoff_meta["show_start_over"] = show_start_over
 
         return ChatResponse(
@@ -8838,15 +10255,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         )
 
     # =========================================================
-    # Hybrid post-handoff follow-up guard
+    # Hybrid post-handoff follow-up guard (S9-3, decision D-5)
     # =========================================================
-    # Anything reaching this point after the hybrid booking handoff was not
-    # an FAQ / info / safety / ending message (those all returned above).
-    # Typical examples: "I don't see any times", "the link isn't working",
-    # "please have the office call me", or a repeated booking request.
-    # Acknowledge that the office already has the captured info. Never
-    # resume intake, never re-send the booking link, never re-notify, and
-    # never final-close the conversation here.
+    # Anything reaching this point after the hybrid booking handoff was NOT a
+    # scheduling request, FAQ, info, safety or ending message - every one of
+    # those owners runs earlier and returned already. In particular the
+    # calendar's repeatable external_booking_link_reminder owner
+    # (send_external_booking_handoff) runs earlier and keeps post-link
+    # SCHEDULING requests, per decision D-5. What is left is the residue this
+    # guard owns: "I don't see any times", "the link isn't working",
+    # "please have the office call me".
+    #
+    # Contract: acknowledge that the office already has the captured info.
+    # Never resume intake, never repeat the booking link (no booking meta and
+    # no booking button), never re-notify, never mutate a captured field,
+    # never begin native booking, and never final-close the conversation.
     if hybrid_post_handoff:
         reply_text = build_hybrid_post_handoff_reply(conversation, office_phone)
 
@@ -8936,10 +10359,18 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             "LEAD COMPLETION NOTIFY TRIGGERED",
         )
 
+        # PATCH 3 (Senior Audit Critical #5): lead notification ran first
+        # (approved temporary MVP behavior); route to the one booking owner.
+        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+        if routed is not None:
+            return _routed_completion_response(db, conversation, routed, show_start_over)
+
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
 
         reply_text = f"Thanks{name_part}! We’ve got your request—our team will contact you shortly to confirm the appointment time."
+        # S5: wording reflects THIS turn's real per-channel results —
+        # the values already returned above; no second notification call.
         reply_text = apply_notification_outcome_to_completion_reply(
             reply_text,
             lead_email_sent,
@@ -8987,30 +10418,81 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             and not (conversation.lead_reason or "").strip()
             and "can you briefly tell me what you need help with" in last_assistant_norm
         ):
-            mapped_reason = None
-            is_dental_detail = looks_like_dental_reason_detail(user_text, enabled_service_keys)
-            if is_dental_detail:
-                mapped_reason = map_reason_detail_to_enum(user_text)
+            # S9-5 (decision D-4, revision 2): this legacy bypass consumer
+            # previously mapped the free-text "Other" reason with NO
+            # dental-relevance gate at all. It now delegates DIRECTLY to the
+            # one existing calendar classifier - no second classifier, no
+            # production vocabulary constants, no wrapper - and preserves the
+            # SAME three-verdict result contract as the primary S7 owner,
+            # including its exact reply builders and response modes. The
+            # rejection modes are returned here directly so the shared
+            # "bypass" response below can never flatten them.
+            #
+            # HONEST REACHABILITY (recorded per the revision-2 review): under
+            # the current detector graph this branch is statically
+            # unreachable - a message that sets service_reason_now == "other"
+            # is returned earlier by the other_service_prompt owner, and its
+            # follow-up free text is claimed by the primary S7 Other-capture
+            # block. The contract is completed here as an instructed
+            # defensive cleanup so that, if routing ever changes, this
+            # consumer already matches the primary owner instead of silently
+            # skipping the dental-relevance gate.
+            reason_verdict = classify_other_reason_detail(user_text, enabled_service_keys)
 
-            if mapped_reason:
-                conversation.lead_reason = mapped_reason
-                if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
-                    conversation.lead_reason_source_text = user_text[:120]
-                db.add(conversation)
+            if reason_verdict == "unclear":
+                # Same builder and mode as the primary S7 owner: neutral
+                # clarification, nothing persisted, reason step stays pending.
+                reply_text = build_unclear_dental_reason_reply()
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
                 db.commit()
-                db.refresh(conversation)
-
-                # Re-enter bypass flow now that reason is safely captured
-                bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
-            elif looks_like_safe_reason_detail(user_text) and not is_dental_detail:
-                bypass_text = build_non_dental_reason_detail_reply()
-                bypass_stage = "reason_detail"
-            else:
-                bypass_text = (
-                    "Please briefly describe the issue using plain words only, like "
-                    "'chipped tooth', 'tooth pain', or 'consultation'."
+                return ChatResponse(
+                    reply=reply_text,
+                    conversation_id=str(conversation.id),
+                    meta={
+                        "mode": "unclear_other_reason_detail",
+                        "faq_match": False,
+                        "show_start_over": show_start_over,
+                    },
                 )
-                bypass_stage = "reason_detail"
+
+            if reason_verdict == "non_dental":
+                # Same builder and mode as the primary S7 owner: nothing
+                # persisted, reason step stays pending.
+                reply_text = build_non_dental_reason_detail_reply()
+                db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+                db.commit()
+                return ChatResponse(
+                    reply=reply_text,
+                    conversation_id=str(conversation.id),
+                    meta={
+                        "mode": "non_dental_other_reason_detail",
+                        "faq_match": False,
+                        "show_start_over": show_start_over,
+                    },
+                )
+
+            # Dental verdict: persist through the same contract as the
+            # primary S7 owner - the mapped enum when one maps, otherwise the
+            # generic "appointment request" with the exact accepted detail
+            # carried by lead_reason_source_text (this consumer's existing
+            # no-overwrite rule preserved), plus the primary flow's priority
+            # marking owner - then continue through this consumer's existing
+            # intake owner.
+            mapped_reason = map_reason_detail_to_enum(user_text)
+
+            conversation.lead_reason = mapped_reason or "appointment request"
+            if not (getattr(conversation, "lead_reason_source_text", "") or "").strip():
+                conversation.lead_reason_source_text = user_text[:120]
+
+            if mark_priority_if_symptom_lead(conversation):
+                pass
+
+            db.add(conversation)
+            db.commit()
+            db.refresh(conversation)
+
+            # Re-enter bypass flow now that reason is safely captured
+            bypass_text, bypass_stage = receptionist_bypass_reply(conversation, client)
 
         if bypass_text:
             lead_email_error = None
@@ -9027,6 +10509,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     conversation,
                     "PRIORITY BYPASS HANDOFF NOTIFY TRIGGERED",
                 )
+
+                # PATCH 3 (Senior Audit Critical #5): lead notification ran
+                # first (approved temporary MVP behavior); route to the one
+                # booking owner (priority non-emergency leads may book).
+                routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+                if routed is not None:
+                    return _routed_completion_response(db, conversation, routed, show_start_over)
+
+                # S5: wording reflects THIS turn's real per-channel results —
+                # the values already returned above; no second notification call.
                 bypass_text = apply_notification_outcome_to_completion_reply(
                     bypass_text,
                     lead_email_sent,
@@ -9077,7 +10569,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     start = time.time()
     try:
         context_messages = build_context_messages(db, conversation.id)
-        lead_context = build_lead_context(conversation)
+        lead_context = build_lead_context(conversation, client)
 
         openai_input: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if lead_context:

@@ -7,6 +7,12 @@ from app.database import Base, engine  # Import SQLAlchemy Base and engine so we
 from app.routes.chat import router as chat_router  # Import the chat router (the /chat endpoint)
 from app.routes.admin import router as admin_router  # Import the admin router (the /admin/* endpoints)
 from app.routes.demo import router as demo_router
+# PATCH 3 (Senior Audit Critical #5): Calendar wiring per docs/INTEGRATION.md.
+# The models import registers the calendar tables with SQLAlchemy's Base so
+# Base.metadata.create_all below (and the booking delegation in chat.py) can
+# see them; the router import mounts the X-Admin-Key calendar admin routes.
+from app.routes import calendar as calendar_routes  # Calendar admin endpoints
+import app.calendar_models  # noqa: F401  (registers calendar tables)
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -50,6 +56,7 @@ app.add_middleware(
 app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(demo_router)
+app.include_router(calendar_routes.router)  # PATCH 3: calendar admin routes
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

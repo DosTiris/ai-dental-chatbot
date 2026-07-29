@@ -1,0 +1,152 @@
+PATCH 9A v4 — TENANT-SOURCE CORRECTION DIFF (v3 -> v4)
+
+=== app/services/notification_service.py ===
+--- /mnt/user-data/outputs/patch9a_v3/app/services/notification_service.py	2026-07-14 19:52:12.347278000 +0000
++++ app/services/notification_service.py	2026-07-14 20:01:40.970351540 +0000
+@@ -323,7 +323,9 @@
+     is read again during claim/provider orchestration, and no ORM object
+     ever crosses the provider boundary — so an expired attribute can never
+     silently reopen a transaction there. The two UUIDs are the only
+-    identifiers permitted in controlled logs."""
++    identifiers permitted in controlled logs. client_id is ALWAYS the id of
++    the SUPPLIED client whose notification configuration and recipients are
++    used — the tenant the atomic claim verifies the appointment against."""
+     appointment_id: uuid.UUID
+     client_id: uuid.UUID
+     office_phone: str
+@@ -367,7 +369,14 @@
+     )
+     return NotificationSnapshot(
+         appointment_id=appointment.id,
+-        client_id=appointment.client_id,
++        # TENANT SOURCE (v4 correction): ALWAYS the SUPPLIED client — the
++        # office whose notification configuration and recipients are being
++        # used. The atomic claim's join (appointments.id = appointment_id
++        # AND appointments.client_id = client_id) then genuinely verifies
++        # that the appointment belongs to that client; sourcing this from
++        # appointment.client_id would let a mismatched call authenticate
++        # itself with the appointment's own tenant id (Rule 15).
++        client_id=client.id,
+         office_phone=office_phone,
+         office_email=office_email,
+         sms_configured=bool(office_phone),
+
+=== calendar_tests/test_notification_idempotency.py ===
+--- /mnt/user-data/outputs/patch9a_v3/calendar_tests/test_notification_idempotency.py	2026-07-14 19:52:12.748412000 +0000
++++ calendar_tests/test_notification_idempotency.py	2026-07-14 20:01:57.578352527 +0000
+@@ -1487,3 +1487,60 @@
+                       "build_patient_sms"):
+         assert formatter in top_level, formatter
+         assert calls_format_local(formatter), formatter
++
++
++def test_service_mismatched_client_and_appointment_suppresses_all_channels(
++        db, client_row, monkeypatch, capsys):
++    """v4 tenant-source security test: entering the SERVICE with Office B's
++    client object but Office A's appointment must suppress everything. The
++    snapshot carries the SUPPLIED client's id (never the appointment's own
++    tenant id), so the atomic claim's tenant join inserts zero rows, no
++    provider runs, no Office A patient data can reach Office B's
++    recipients, reconciliation cannot lock or mutate the foreign
++    appointment, and the service returns normally with an empty outcome."""
++    from app.services import notification_service
++    office_a = client_row
++    sms = _recording_sms(monkeypatch)
++    email = _recording_email(monkeypatch)
++    _set_office_contacts(db, office_a, OFFICE_PHONE, OFFICE_EMAIL)
++    appointment = _make_appointment(db, office_a)     # Office A's appointment
++
++    office_b = _foreign_client(db)
++    office_b.notification_phone = "516-555-0999"      # distinct recipients
++    office_b.notification_email = "frontdesk@otheroffice.example"
++    db.add(office_b)
++    db.commit()
++
++    db.refresh(appointment)
++    before = (appointment.office_sms_sent, appointment.office_email_sent,
++              appointment.patient_sms_sent, appointment.notify_error,
++              appointment.status, appointment.patient_name,
++              appointment.patient_phone, appointment.start_datetime)
++
++    settings = _settings(office_b)
++    # Direct snapshot assertion: client_id is the SUPPLIED client's id.
++    snapshot = notification_service.build_notification_snapshot(
++        office_b, appointment, settings)
++    assert snapshot.client_id == office_b.id
++    assert snapshot.appointment_id == appointment.id
++    db.rollback()      # End test-owned snapshot/settings-read transaction.
++
++    outcome = notification_service.send_booking_notifications(
++        db, office_b, appointment, settings)          # must not raise
++
++    assert sms == [] and email == []                  # zero provider calls
++    assert _attempt_rows(db, appointment.id) == {}    # zero claim rows
++    db.expire_all()
++    after = (appointment.office_sms_sent, appointment.office_email_sent,
++             appointment.patient_sms_sent, appointment.notify_error,
++             appointment.status, appointment.patient_name,
++             appointment.patient_phone, appointment.start_datetime)
++    assert after == before                            # foreign row untouched
++    assert appointment.patient_sms_sent is False
++    assert (outcome.office_sms_sent, outcome.office_email_sent,
++            outcome.patient_sms_sent, outcome.errors) == (
++        False, False, False, [])                      # no raw detail
++    out = capsys.readouterr().out
++    for forbidden in ("Kevin", PATIENT_PHONE, "516-555-0999",
++                      "otheroffice.example"):
++        assert forbidden not in out
+
+=== CHANGE_REPORT.md (appended record) ===
+--- /mnt/user-data/outputs/patch9a_v3/CHANGE_REPORT.md	2026-07-14 19:52:13.520398000 +0000
++++ CHANGE_REPORT.md	2026-07-14 20:02:29.782354441 +0000
+@@ -3307,3 +3307,50 @@
+ database-classification mechanism was added). Expected collection remains
+ 242 (no test added or removed). The PostgreSQL suite has NOT run; Patch 9A
+ remains LOCAL VERIFICATION PENDING. 9B, 9C, and Patch 10 not started.
++
++--------------------------------------------------------------------------------
++# PATCH 9A — TENANT-SOURCE CORRECTION (v4), 2026-07-14
++# STATUS: IMPLEMENTED — LOCAL VERIFICATION PENDING
++--------------------------------------------------------------------------------
++v3 passed the five previous static-blocker checks and the remaining static
++package checks; one tenant-isolation defect remained: the SOURCE of
++NotificationSnapshot.client_id. build_notification_snapshot set
++client_id=appointment.client_id, which made a mismatched call (Office A's
++appointment with Office B's client object and recipients) authenticate the
++claim's tenant join with the appointment's OWN tenant id — defeating the
++check and allowing Office A patient details to be sent to Office B's
++recipients.
++
++CORRECTION (production, one line + documentation):
++build_notification_snapshot now sets client_id=client.id — always the id
++of the SUPPLIED client whose notification configuration and recipients are
++used. snapshot.appointment_id remains appointment.id. No second tenant id
++was introduced, no pre-query was added, and the repository tenant join is
++unchanged: the existing atomic claim (appointments.id = appointment_id AND
++appointments.client_id = client_id) now genuinely enforces ownership. With
++a mismatch: zero rows inserted, no provider called, no attempt row exists,
++and reconciliation cannot lock or mutate the foreign appointment
++(get_appointment_for_update returns None for the foreign tenant; the
++mutation-free controlled-log path handles it).
++
++SECURITY TEST ADDED:
++test_service_mismatched_client_and_appointment_suppresses_all_channels —
++Office A appointment + Office B client with distinct recipients, provider
++traps, clean-session entry (test-owned snapshot/settings-read transaction
++ended before invocation): zero SMS/email calls, zero attempt rows, Office
++A's appointment field-for-field unchanged (flags, patient_sms_sent False,
++notify_error, status, patient fields, start), empty NotificationOutcome
++with no raw detail, normal return, and a direct assertion that
++build_notification_snapshot(office_b, office_a_appointment, settings)
++.client_id == office_b.id. Existing repository-level tenant tests are
++untouched.
++
++COUNT (parametrization-aware AST, actual result): idempotency file 44
++functions -> 48 collected (4 parametrized x2); migration 5; baseline 190.
++EXPECTED COLLECTION: 243.
++
++FILES CHANGED IN v4: app/services/notification_service.py,
++calendar_tests/test_notification_idempotency.py, CHANGE_REPORT.md,
++delivery artifacts — nothing else. PostgreSQL verification had not begun
++and is not claimed; Patch 9A remains LOCAL VERIFICATION PENDING. 9B, 9C,
++and Patch 10 not started.

@@ -65,6 +65,48 @@ class Conversation(Base):
     lead_is_emergency = Column(Boolean, nullable=False, server_default="false", default=False)
     final_closed = Column(Boolean, nullable=False, server_default="false", default=False)
     booking_link_sent = Column(Boolean, nullable=False, server_default="false", default=False)
+    # -----------------------------
+    # CALENDAR BOOKING STATE (Calendar MVP)
+    # Owned exclusively by app/services/booking_conversation.py.
+    # Valid booking_state values are defined in app/calendar_models.py.
+    # -----------------------------
+    booking_state = Column(
+        String,
+        nullable=False,
+        server_default="none",
+        default="none",
+    )
+    booking_preferred_date = Column(
+        String,
+        nullable=True,
+    )  # ISO date, for example "2026-07-16"
+    booking_time_preference = Column(
+        String,
+        nullable=True,
+    )  # morning / afternoon / evening / any
+    booking_offered_slot_ids = Column(
+        JSONB,
+        nullable=True,
+    )  # UUID strings in the exact display order
+    booking_selected_slot_id = Column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    # -----------------------------
+    # CALENDAR OFFER STATE (Patch 2C — Senior Audit Critical #8)
+    # Owned exclusively by app/services/booking_conversation.py.
+    # -----------------------------
+    booking_offer_expires_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )  # Pre-hold offer deadline (aware UTC). Cleared when a hold succeeds:
+    #    from then on the slot's held_until is the only expiration authority.
+    booking_effective_time_preference = Column(
+        String,
+        nullable=True,
+    )  # The preference the offer was ACTUALLY filtered with ("any" when the
+    #    offer was relaxed). Survives the hold so finalization revalidates
+    #    against what was truly offered; cleared after booking/reset.
     # -----------------------------  # comment
     # ABUSE / SPAM GUARD RAILS  # comment
     # -----------------------------  # comment

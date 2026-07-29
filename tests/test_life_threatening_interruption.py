@@ -208,6 +208,42 @@ class _FakeChatResponse:
 
 _module("app.schemas", ChatRequest=_FakeChatRequest, ChatResponse=_FakeChatResponse)
 
+# Calendar integration compatibility stubs. The focused emergency test keeps
+# exercising the real app.routes.chat routing, but calendar dependencies are
+# outside this test's scope and are replaced with inert stand-ins just like
+# the DB-bound app modules above.
+class _FakeBookingState:
+    NONE = "none"
+    WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
+
+
+_module("app.calendar_models", BookingState=_FakeBookingState)
+_module(
+    "app.services.booking_conversation",
+    begin_booking_after_intake=lambda *a, **k: None,
+    cancel_active_booking=lambda *a, **k: True,
+    handle_booking_message=lambda *a, **k: (False, None),
+)
+_module(
+    "app.services.appointment_intent",
+    PREF_AFTERNOON="afternoon",
+    PREF_EVENING="evening",
+    PREF_MORNING="morning",
+)
+_module(
+    "app.services.notification_service",
+    FIELD_LIMIT_EMAIL=254,
+    FIELD_LIMIT_FREE_TEXT=2000,
+    FIELD_LIMIT_NAME=120,
+    FIELD_LIMIT_PHONE=40,
+    FIELD_LIMIT_PRACTICE_NAME=160,
+    SEND_FAILED="send_failed",
+    SUBJECT_MAX_LENGTH=200,
+    normalize_notification_field=lambda value, limit=None, **k: (str(value or "")[:limit] if limit else str(value or "")),
+    render_email_html=lambda *a, **k: "",
+    sanitized_exception_class=lambda exc: exc.__class__.__name__,
+)
+
 # ---------------------------------------------------------------------------
 # 3) Import the REAL module under test
 # ---------------------------------------------------------------------------
@@ -964,12 +1000,11 @@ class TestNonLifeThreateningEmergenciesNotClosed(unittest.TestCase):
                 self.assertIn("To help quickly, what\u2019s your first name?", resp.reply)
 
     def test_normal_emergency_next_turn_remains_open_and_unchanged(self):
-        # PRE-EXISTING LIVE BEHAVIOR (verified byte-identical against the
-        # original unpatched chat.py): after a knocked-out-tooth emergency
-        # reply, a bare name routes through the intake-mode gate to
-        # service_offer_clarification. Both patches must preserve this
-        # exactly; the key regression assertions are that the conversation
-        # is NOT closed and next-turn interaction still functions.
+        # Calendar integration preserves the important contract: an ordinary
+        # dental emergency remains open and the next turn continues the
+        # emergency contact intake. The newer integrated owner reports the
+        # explicit emergency_followup_intake mode instead of the older generic
+        # service_offer_clarification mode.
         conv = FakeConversation()
         db = FakeDB(FakeClient(), conv)
         run_chat("My tooth got knocked out", db=db)
@@ -978,7 +1013,7 @@ class TestNonLifeThreateningEmergenciesNotClosed(unittest.TestCase):
         resp2, _, _, _ = run_chat("Kevin", db=db)
         self.assertFalse(bool(getattr(conv, "final_closed", False)))
         self.assertNotEqual(resp2.meta.get("mode"), "final_closed")
-        self.assertEqual(resp2.meta.get("mode"), "service_offer_clarification")
+        self.assertEqual(resp2.meta.get("mode"), "emergency_followup_intake")
 
     def test_normal_emergency_affirmative_next_turn_still_continues(self):
         # The dedicated affirmative-continuation path must stay open and
