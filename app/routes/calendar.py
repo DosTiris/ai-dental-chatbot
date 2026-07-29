@@ -9,6 +9,7 @@
 # determines the authenticated tenant; the request's client_id must equal it,
 # and the global ADMIN_API_KEY has no access here. Staff tooling, never the
 # public widget):
+#   GET    /admin/calendar/me                    office portal bootstrap
 #   POST   /admin/calendar/slots                 publish bookable slots
 #   GET    /admin/calendar/slots                 list slots for a local day
 #   POST   /admin/calendar/slots/{id}/block      remove a slot from booking
@@ -40,6 +41,7 @@ from app.services.notification_service import sanitize_stored_notify_error
 from app.repositories import appointment_repository
 from app.services import booking_service
 from app.services.calendar_settings_service import (
+    client_now,
     ensure_utc,
     load_calendar_settings,
     local_day_utc_window,
@@ -142,6 +144,20 @@ class AppointmentView(BaseModel):
     notify_error: Optional[str]
 
 
+class PortalBootstrapView(BaseModel):
+    """The office portal's bootstrap payload (Portal MVP) — the ONLY
+    fields the portal needs before listing appointments. Nothing
+    sensitive belongs here BY CONSTRUCTION: no credentials or hashes,
+    no settings JSON, no notification recipients, no database metadata.
+    Adding a field to this model is a reviewed contract change."""
+    client_id: uuid.UUID
+    practice_name: str
+    timezone_name: str
+    # A date serializes as YYYY-MM-DD — exactly the approved wire form.
+    today_local: date
+    booking_enabled: bool
+
+
 def _require_aware(dt: datetime, field_name: str) -> datetime:
     """Reject naive datetimes loudly instead of guessing a timezone."""
     if dt.tzinfo is None:
@@ -156,6 +172,43 @@ def _require_aware(dt: datetime, field_name: str) -> datetime:
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/me", response_model=PortalBootstrapView)
+def portal_me(
+    authenticated_client: Client = Depends(require_calendar_admin),
+):
+    """
+    Purpose: Office-portal bootstrap (Portal MVP). Identifies WHICH office
+        a presented per-office key belongs to, so the portal never asks
+        staff for a client_id. Deliberately takes NO client_id parameter:
+        the credential ALONE determines the tenant (Rule 15 — nothing on
+        this endpoint can be pointed at another office).
+    Inputs: only the X-Admin-Key header, consumed by the existing
+        require_calendar_admin dependency (authorization stays with its
+        single owner, calendar_admin_auth — nothing is duplicated here).
+    Returns: PortalBootstrapView — client_id, practice_name,
+        timezone_name, today_local (the office's CURRENT local calendar
+        date, computed through client_now in the OFFICE timezone — never
+        server time and never browser time), and booking_enabled as a
+        strict boolean from the settings owner (load_calendar_settings).
+        booking_enabled=false is INFORMATIONAL: the endpoint still
+        succeeds, so staff can review and confirm existing requests
+        while online booking stays paused.
+    Database effects: none beyond the authorization dependency's
+        credential SELECT (read-only endpoint).
+    Possible failures: 401 "Invalid admin key." for every credential
+        failure — missing/empty/malformed/unknown/revoked/inactive
+        client — indistinguishable by design (single owner's rule).
+    """
+    settings = load_calendar_settings(authenticated_client)
+    return PortalBootstrapView(
+        client_id=authenticated_client.id,
+        practice_name=authenticated_client.practice_name,
+        timezone_name=settings.timezone_name,
+        today_local=client_now(settings).date(),
+        booking_enabled=settings.booking_enabled,
+    )
+
 
 @router.post("/slots", response_model=List[SlotView])
 def create_slots(

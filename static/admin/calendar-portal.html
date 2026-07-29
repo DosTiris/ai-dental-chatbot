@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mia Office Calendar Portal</title>
+<!--
+  static/admin/calendar-portal.html
+
+  Simple Office Calendar Portal MVP.
+
+  A dedicated OFFICE-FACING page: staff sign in with their per-office
+  Calendar admin key (X-Admin-Key header only — the key never appears in a
+  URL, in page text, in an error message, or in any log), see the next 30
+  days of pending/confirmed appointments, and confirm pending ones.
+
+  Deliberately self-contained: no third-party JavaScript, CSS, fonts,
+  analytics, or CDN resources, and only same-origin relative API URLs.
+  Every patient- or server-provided value is rendered through textContent —
+  string values are never interpreted as HTML.
+-->
+<style>
+  :root {
+    --ink: #1c2430; --muted: #5b6675; --line: #d9dee5; --bg: #f4f6f8;
+    --card: #ffffff; --accent: #0f6a5f; --accent-ink: #ffffff;
+    --pending: #8a5a00; --pending-bg: #fdf0d7;
+    --confirmed: #1e6b34; --confirmed-bg: #ddf2e2;
+    --priority: #8f1d2c; --priority-bg: #fbdfe3;
+    --routine: #33506b; --routine-bg: #e2ebf4;
+    --paused: #8a5a00; --paused-bg: #fdf0d7;
+    --error: #8f1d2c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 14px 16px; display: flex; flex-wrap: wrap;
+    align-items: center; gap: 10px;
+  }
+  header h1 { font-size: 1.15rem; margin: 0; flex: 1 1 auto; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .hidden { display: none !important; }
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 0.8rem; font-weight: 600; white-space: nowrap;
+  }
+  .badge-paused { color: var(--paused); background: var(--paused-bg); }
+  .badge-pending { color: var(--pending); background: var(--pending-bg); }
+  .badge-confirmed { color: var(--confirmed); background: var(--confirmed-bg); }
+  .badge-priority { color: var(--priority); background: var(--priority-bg); }
+  .badge-routine { color: var(--routine); background: var(--routine-bg); }
+  button {
+    font: inherit; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--card); color: var(--ink); padding: 8px 14px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  #loginView {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px; max-width: 420px; margin: 40px auto;
+  }
+  #loginView label { display: block; font-weight: 600; margin-bottom: 6px; }
+  #portalKeyInput {
+    font: inherit; width: 100%; padding: 10px; border: 1px solid var(--line);
+    border-radius: 8px; margin-bottom: 12px;
+  }
+  .error-text { color: var(--error); font-weight: 600; }
+  #rangeLabel { color: var(--muted); margin: 4px 0 14px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  .card-top {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .card-when { font-weight: 700; flex: 1 1 auto; }
+  .field-row { display: flex; gap: 8px; margin: 3px 0; flex-wrap: wrap; }
+  .field-label { color: var(--muted); min-width: 118px; }
+  .field-value { flex: 1 1 auto; overflow-wrap: anywhere; }
+  .notify-error { color: var(--error); }
+  .card-actions { margin-top: 10px; }
+  @media (max-width: 480px) {
+    .field-label { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="practiceName">Office Calendar Portal</h1>
+  <span id="bookingPausedBadge" class="badge badge-paused hidden">Online booking paused</span>
+  <button id="refreshBtn" class="hidden" type="button">Refresh</button>
+  <button id="logoutBtn" class="hidden" type="button">Log out</button>
+</header>
+<main>
+  <section id="loginView">
+    <label for="portalKeyInput">Office Portal Key</label>
+    <input id="portalKeyInput" type="password" autocomplete="off"
+           spellcheck="false" placeholder="Paste your office portal key">
+    <button id="loginBtn" class="primary" type="button">Sign in</button>
+    <p id="loginError" class="error-text hidden"></p>
+  </section>
+
+  <section id="portalView" class="hidden">
+    <p id="rangeLabel"></p>
+    <p id="errorState" class="error-text hidden"></p>
+    <p id="emptyState" class="hidden">No pending or confirmed appointments in the next 30 days.</p>
+    <div id="appointmentsList"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Session key handling.
+//
+// The per-office key lives ONLY in sessionStorage (approved: a refresh in the
+// same tab stays signed in; closing the tab forgets the key). It is sent ONLY
+// as the X-Admin-Key request header — never in a URL, query string, page
+// text, or error message, and nothing in this file writes it anywhere else.
+// ---------------------------------------------------------------------------
+
+var SESSION_KEY_NAME = "miaCalendarPortalKey";
+
+function getStoredKey() {
+  try { return window.sessionStorage.getItem(SESSION_KEY_NAME); }
+  catch (err) { return null; }
+}
+
+function setStoredKey(rawKey) {
+  try { window.sessionStorage.setItem(SESSION_KEY_NAME, rawKey); }
+  catch (err) { /* storage unavailable: sign-in still works for this view */ }
+}
+
+function clearStoredKey() {
+  try { window.sessionStorage.removeItem(SESSION_KEY_NAME); }
+  catch (err) { /* nothing to clear */ }
+}
+
+// ---------------------------------------------------------------------------
+// Portal state — filled from GET /admin/calendar/me (the backend bootstrap
+// owner). client_id, timezone and today's local date all come from the
+// SERVER for the authenticated office; the browser's clock and timezone are
+// never used to decide dates.
+// ---------------------------------------------------------------------------
+
+var portalState = {
+  clientId: null,
+  practiceName: null,
+  timezoneName: null,
+  todayLocal: null,        // "YYYY-MM-DD" in the OFFICE timezone
+  bookingEnabled: false,
+  appointments: []
+};
+
+// How far ahead the MVP lists appointments (calendar days after today_local).
+var LIST_RANGE_DAYS = 30;
+
+// Known broad reasons -> friendlier labels. Anything unknown is shown as its
+// raw text (via textContent, so it can never be interpreted as HTML).
+var REASON_LABELS = {
+  "cleaning/checkup": "Cleaning / Checkup",
+  "toothache/pain": "Toothache / Pain",
+  "emergency": "Emergency visit",
+  "implant consultation": "Implant consultation",
+  "root canal": "Root canal",
+  "dentures": "Dentures",
+  "whitening": "Whitening",
+  "other": "Other"
+};
+
+// ---------------------------------------------------------------------------
+// Element lookups (ids match the static markup above).
+// ---------------------------------------------------------------------------
+
+function el(id) { return document.getElementById(id); }
+
+// ---------------------------------------------------------------------------
+// API helper: relative same-origin URLs only; the key rides ONLY in the
+// X-Admin-Key header. Any 401 anywhere clears the session and returns the
+// staff member to the login screen (the backend's single indistinguishable
+// credential failure).
+// ---------------------------------------------------------------------------
+
+function apiFetch(relativePath, options) {
+  var settings = options || {};
+  var headers = { "X-Admin-Key": getStoredKey() || "" };
+  return fetch(relativePath, {
+    method: settings.method || "GET",
+    headers: headers
+  }).then(function (response) {
+    if (response.status === 401) {
+      handleUnauthorized();
+      var unauthorized = new Error("unauthorized");
+      unauthorized.isUnauthorized = true;
+      throw unauthorized;
+    }
+    return response;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Date helpers. today_local arrives as an office-timezone "YYYY-MM-DD"; the
+// 30-day end date is derived with UTC-only arithmetic so the BROWSER timezone
+// can never shift the range.
+// ---------------------------------------------------------------------------
+
+function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+function addDaysToIsoDate(isoDate, days) {
+  var parts = isoDate.split("-");
+  var stamp = Date.UTC(
+    parseInt(parts[0], 10),
+    parseInt(parts[1], 10) - 1,
+    parseInt(parts[2], 10) + days
+  );
+  var d = new Date(stamp);
+  return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" +
+         pad2(d.getUTCDate());
+}
+
+// Format a stored UTC instant in the OFFICE timezone (from the bootstrap),
+// falling back to the browser only if the configured zone name is unusable.
+function formatInOfficeZone(isoInstant, formatOptions) {
+  var when = new Date(isoInstant);
+  try {
+    var withZone = {};
+    for (var key in formatOptions) { withZone[key] = formatOptions[key]; }
+    withZone.timeZone = portalState.timezoneName;
+    return new Intl.DateTimeFormat("en-US", withZone).format(when);
+  } catch (err) {
+    return new Intl.DateTimeFormat("en-US", formatOptions).format(when);
+  }
+}
+
+function formatLocalDate(isoInstant) {
+  return formatInOfficeZone(isoInstant, {
+    weekday: "short", year: "numeric", month: "short", day: "numeric"
+  });
+}
+
+function formatLocalTime(isoInstant) {
+  return formatInOfficeZone(isoInstant, { hour: "numeric", minute: "2-digit" });
+}
+
+// ---------------------------------------------------------------------------
+// View switching.
+// ---------------------------------------------------------------------------
+
+function clearChildren(node) {
+  while (node.children.length > 0) { node.children[0].remove(); }
+  node.textContent = "";
+}
+
+function showLoginView(message) {
+  el("portalView").classList.add("hidden");
+  el("refreshBtn").classList.add("hidden");
+  el("logoutBtn").classList.add("hidden");
+  el("bookingPausedBadge").classList.add("hidden");
+  el("practiceName").textContent = "Office Calendar Portal";
+  el("loginView").classList.remove("hidden");
+  var loginError = el("loginError");
+  if (message) {
+    loginError.textContent = message;
+    loginError.classList.remove("hidden");
+  } else {
+    loginError.textContent = "";
+    loginError.classList.add("hidden");
+  }
+}
+
+function showPortalView() {
+  el("loginView").classList.add("hidden");
+  el("portalView").classList.remove("hidden");
+  el("refreshBtn").classList.remove("hidden");
+  el("logoutBtn").classList.remove("hidden");
+  el("practiceName").textContent = portalState.practiceName || "Office Calendar Portal";
+  var paused = el("bookingPausedBadge");
+  // Informational only: a paused office still reviews and confirms requests.
+  if (portalState.bookingEnabled) { paused.classList.add("hidden"); }
+  else { paused.classList.remove("hidden"); }
+}
+
+// Clears every rendered patient value AND the stored key — used by both
+// Logout and any 401 (whichever request it came from).
+function clearSessionAndPatientData() {
+  clearStoredKey();
+  portalState.clientId = null;
+  portalState.practiceName = null;
+  portalState.timezoneName = null;
+  portalState.todayLocal = null;
+  portalState.bookingEnabled = false;
+  portalState.appointments = [];
+  clearChildren(el("appointmentsList"));
+  el("rangeLabel").textContent = "";
+  el("errorState").textContent = "";
+  el("errorState").classList.add("hidden");
+  el("emptyState").classList.add("hidden");
+}
+
+function handleUnauthorized() {
+  clearSessionAndPatientData();
+  showLoginView("That key was not accepted. Check it and sign in again.");
+}
+
+function logout() {
+  clearSessionAndPatientData();
+  showLoginView(null);
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap: GET /admin/calendar/me identifies the office for the presented
+// key — the portal NEVER asks staff for (or guesses) a client id.
+// ---------------------------------------------------------------------------
+
+function bootstrapAndLoad() {
+  return apiFetch("/admin/calendar/me").then(function (response) {
+    if (!response.ok) {
+      showLoginView("The server could not start the portal. Try again shortly.");
+      return false;
+    }
+    return response.json().then(function (me) {
+      portalState.clientId = me.client_id;
+      portalState.practiceName = me.practice_name;
+      portalState.timezoneName = me.timezone_name;
+      portalState.todayLocal = me.today_local;
+      portalState.bookingEnabled = me.booking_enabled === true;
+      showPortalView();
+      return refreshAppointments().then(function () { return true; });
+    });
+  }).catch(function (err) {
+    if (!err || !err.isUnauthorized) {
+      showLoginView("Could not reach the server. Check your connection and try again.");
+    }
+    return false;
+  });
+}
+
+function signIn() {
+  var input = el("portalKeyInput");
+  var candidate = (input.value || "").trim();
+  input.value = "";
+  if (!candidate) {
+    showLoginView("Enter your office portal key.");
+    return Promise.resolve(false);
+  }
+  setStoredKey(candidate);
+  return bootstrapAndLoad();
+}
+
+// ---------------------------------------------------------------------------
+// Appointment list: the existing tenant-scoped listing endpoint, with the
+// authenticated client_id and the server-provided 30-day local-date range.
+// ---------------------------------------------------------------------------
+
+function refreshAppointments() {
+  var errorState = el("errorState");
+  errorState.textContent = "";
+  errorState.classList.add("hidden");
+  var startDay = portalState.todayLocal;
+  var endDay = addDaysToIsoDate(startDay, LIST_RANGE_DAYS);
+  el("rangeLabel").textContent =
+    "Pending and confirmed appointments, " + startDay + " through " + endDay + ".";
+  var url = "/admin/calendar/appointments" +
+    "?client_id=" + encodeURIComponent(portalState.clientId) +
+    "&start_day=" + encodeURIComponent(startDay) +
+    "&end_day=" + encodeURIComponent(endDay);
+  return apiFetch(url).then(function (response) {
+    if (!response.ok) {
+      errorState.textContent = "The appointment list could not be loaded. Try Refresh.";
+      errorState.classList.remove("hidden");
+      return false;
+    }
+    return response.json().then(function (rows) {
+      portalState.appointments = rows;
+      renderAppointments();
+      return true;
+    });
+  }).catch(function (err) {
+    if (!err || !err.isUnauthorized) {
+      errorState.textContent = "Could not reach the server. Check your connection and try Refresh.";
+      errorState.classList.remove("hidden");
+    }
+    return false;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rendering. The backend returns ascending appointment time; filtering with
+// Array.prototype.filter preserves that order — the portal never re-sorts.
+// Every dynamic value goes through textContent.
+// ---------------------------------------------------------------------------
+
+function labelForReason(reason) {
+  if (!reason) { return "Not provided"; }
+  var known = REASON_LABELS[String(reason).toLowerCase()];
+  return known || String(reason);
+}
+
+function labelForPatientType(value) {
+  if (value === "new") { return "New patient"; }
+  if (value === "returning") { return "Returning patient"; }
+  return "Unknown";
+}
+
+function fieldRow(labelText, valueText, extraClass) {
+  var row = document.createElement("div");
+  row.className = "field-row";
+  var label = document.createElement("span");
+  label.className = "field-label";
+  label.textContent = labelText;
+  var value = document.createElement("span");
+  value.className = "field-value" + (extraClass ? " " + extraClass : "");
+  value.textContent = valueText;
+  row.appendChild(label);
+  row.appendChild(value);
+  return row;
+}
+
+function badge(text, className) {
+  var span = document.createElement("span");
+  span.className = "badge " + className;
+  span.textContent = text;
+  return span;
+}
+
+function urgencyBadge(urgency) {
+  var value = String(urgency || "").toLowerCase();
+  if (value === "routine") { return badge("Routine", "badge-routine"); }
+  if (value === "priority") { return badge("Priority", "badge-priority"); }
+  // Unknown vocabulary: show it safely as text rather than guessing.
+  return badge(String(urgency || "Unknown"), "badge-routine");
+}
+
+function statusBadge(status) {
+  if (status === "pending") { return badge("Pending", "badge-pending"); }
+  return badge("Confirmed", "badge-confirmed");
+}
+
+function buildAppointmentCard(appointment) {
+  var card = document.createElement("div");
+  card.className = "card";
+  card.setAttribute("data-appointment-id", String(appointment.id));
+
+  var top = document.createElement("div");
+  top.className = "card-top";
+  var when = document.createElement("span");
+  when.className = "card-when";
+  when.textContent =
+    formatLocalDate(appointment.start_datetime) + " · " +
+    formatLocalTime(appointment.start_datetime) + " – " +
+    formatLocalTime(appointment.end_datetime);
+  top.appendChild(when);
+  top.appendChild(urgencyBadge(appointment.urgency));
+  top.appendChild(statusBadge(appointment.status));
+  card.appendChild(top);
+
+  card.appendChild(fieldRow("Patient", appointment.patient_name || "Not provided"));
+  card.appendChild(fieldRow("Phone", appointment.patient_phone || "Not provided"));
+  card.appendChild(fieldRow("Email", appointment.patient_email || "Not provided"));
+  card.appendChild(fieldRow("Patient type", labelForPatientType(appointment.new_or_returning)));
+  card.appendChild(fieldRow("Service / Reason", labelForReason(appointment.reason)));
+  card.appendChild(fieldRow("Office SMS", appointment.office_sms_sent ? "Sent" : "Not sent"));
+  card.appendChild(fieldRow("Office email", appointment.office_email_sent ? "Sent" : "Not sent"));
+  if (appointment.notify_error) {
+    card.appendChild(fieldRow("Notification issue", String(appointment.notify_error), "notify-error"));
+  }
+
+  // Confirmation is offered ONLY for pending appointments. Confirmed rows get
+  // no action at all (the MVP never cancels or reschedules anything).
+  if (appointment.status === "pending") {
+    var actions = document.createElement("div");
+    actions.className = "card-actions";
+    var confirmBtn = document.createElement("button");
+    confirmBtn.className = "primary";
+    confirmBtn.type = "button";
+    confirmBtn.textContent = "Confirm appointment";
+    confirmBtn.addEventListener("click", function () {
+      confirmAppointment(appointment, confirmBtn);
+    });
+    actions.appendChild(confirmBtn);
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function renderAppointments() {
+  var list = el("appointmentsList");
+  clearChildren(list);
+  var visible = portalState.appointments.filter(function (a) {
+    return a.status === "pending" || a.status === "confirmed";
+  });
+  var emptyState = el("emptyState");
+  if (visible.length === 0) {
+    emptyState.classList.remove("hidden");
+    return;
+  }
+  emptyState.classList.add("hidden");
+  visible.forEach(function (appointment) {
+    list.appendChild(buildAppointmentCard(appointment));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation: the EXISTING idempotent pending -> confirmed endpoint. On
+// success the single row is rebuilt from the returned AppointmentView — no
+// full reload. 404/409/server failures get controlled staff wording.
+// ---------------------------------------------------------------------------
+
+function confirmAppointment(appointment, buttonEl) {
+  var prompt = "Confirm this appointment for " +
+    (appointment.patient_name || "this patient") + "?";
+  if (!window.confirm(prompt)) { return Promise.resolve(false); }
+  buttonEl.disabled = true;
+  var url = "/admin/calendar/appointments/" +
+    encodeURIComponent(String(appointment.id)) + "/confirm" +
+    "?client_id=" + encodeURIComponent(portalState.clientId);
+  var errorState = el("errorState");
+  return apiFetch(url, { method: "POST" }).then(function (response) {
+    if (response.status === 404) {
+      buttonEl.disabled = false;
+      errorState.textContent = "That appointment could not be found. Use Refresh to reload the list.";
+      errorState.classList.remove("hidden");
+      return false;
+    }
+    if (response.status === 409) {
+      buttonEl.disabled = false;
+      errorState.textContent = "That appointment can no longer be confirmed. Use Refresh to reload the list.";
+      errorState.classList.remove("hidden");
+      return false;
+    }
+    if (!response.ok) {
+      buttonEl.disabled = false;
+      errorState.textContent = "The server could not confirm the appointment. Try again.";
+      errorState.classList.remove("hidden");
+      return false;
+    }
+    return response.json().then(function (updated) {
+      // Replace ONLY this row in memory with the returned AppointmentView,
+      // then re-render from state — no network reload, and the backend's
+      // ascending order is preserved because positions never change.
+      for (var i = 0; i < portalState.appointments.length; i += 1) {
+        if (String(portalState.appointments[i].id) === String(updated.id)) {
+          portalState.appointments[i] = updated;
+        }
+      }
+      renderAppointments();
+      return true;
+    });
+  }).catch(function (err) {
+    if (!err || !err.isUnauthorized) {
+      buttonEl.disabled = false;
+      errorState.textContent = "Could not reach the server. The appointment was not changed here — try again.";
+      errorState.classList.remove("hidden");
+    }
+    return false;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wiring.
+// ---------------------------------------------------------------------------
+
+function initPortal() {
+  el("loginBtn").addEventListener("click", function () { signIn(); });
+  el("portalKeyInput").addEventListener("keydown", function (event) {
+    if (event && event.key === "Enter") { signIn(); }
+  });
+  el("refreshBtn").addEventListener("click", function () { refreshAppointments(); });
+  el("logoutBtn").addEventListener("click", function () { logout(); });
+  if (getStoredKey()) {
+    return bootstrapAndLoad();   // same-tab refresh stays signed in
+  }
+  showLoginView(null);
+  return Promise.resolve(false);
+}
+
+initPortal();
+</script>
+</body>
+</html>
