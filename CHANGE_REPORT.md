@@ -4921,3 +4921,235 @@ no database or state involvement.
 - patch9a_delivery/ is intentionally retained for this release as
   non-executable audit material; post-release cleanup is tracked separately.
 - No production merge or deployment has occurred as of this record.
+
+# PRODUCTION RELEASE CLOSURE - Calendar MVP + Simple Office Portal (02a3a37)
+
+Closed 2026-07-29 after automated regression, controlled production booking,
+physical notification delivery, staff confirmation, portal UI validation,
+authenticated API verification, and direct read-only database closure checks.
+
+## Goal
+
+Deploy the verified Calendar MVP safely onto production main, correct the
+routine native-Calendar duplicate-notification journey discovered during the
+controlled pilot, add the deliberately small single-office staff portal, and
+close the release with every production tenant frozen until a willing pilot
+office is deliberately enabled.
+
+## Final validated checkpoint
+
+- Production branch: `main`
+- Final validated commit:
+  `02a3a373bbf7a7b60329bb9a3de5f2924237dbc6`
+- Commit message: `Add simple office Calendar portal`
+- Parent commit:
+  `65d4071e4f41fbbd4bd50162343d3722cd26150e`
+- GitHub `origin/main` and the deployed Render revision were verified at the
+  exact final commit.
+- Production URL: `https://ai-dental-chatbot.onrender.com`
+- Portal URL:
+  `https://ai-dental-chatbot.onrender.com/static/admin/calendar-portal.html`
+
+## Release lineage
+
+1. `83256de9cd7e7c4d751b1891ea6e1173e5bfa86c` - controlled integration of
+   the verified Calendar program and Checkpoint B onto production main.
+2. `3470c1e` - staging widget same-origin routing and final deployed-staging
+   verification.
+3. `405ba95` - release documentation closure on top of the code release
+   candidate.
+4. `65d4071e4f41fbbd4bd50162343d3722cd26150e` - corrected duplicate routine
+   Calendar notifications while preserving capture-only, external/hybrid,
+   priority, and emergency notification policy.
+5. `02a3a373bbf7a7b60329bb9a3de5f2924237dbc6` - added the simple office
+   Calendar portal and authenticated `/admin/calendar/me` bootstrap route.
+
+## Production backup and rollback checkpoint
+
+Before the Calendar production migration/deploy gate:
+
+- Git tag: `before-checkpoint-b-merge-20260728-025708`
+- Filesystem backup:
+  `C:\Users\kalva\Desktop\Mia-Production-Backup-Before-Calendar-20260729-060741`
+- Backup SHA-256:
+  `25C8412869ADE8CA57E729ED1DB7FF91351252645B56EA9192633CB6C6C84DD5`
+
+The backup contained 47 entries and was recorded before production mutation.
+
+## Database changes and final safety state
+
+- Production migrations `001` through `006` were applied individually, in
+  order, before Calendar code served production traffic.
+- Final schema verification found all four Calendar tables, all seven required
+  conversation columns, eight required indexes, and five required safety
+  constraints.
+- Demo Dental controlled-pilot client:
+  `04bfd2ae-f0ac-4077-8206-40cc5f5d62e0`.
+- Final direct database closure result:
+  `FINAL DATABASE CLOSURE CHECK PASSED`.
+- Production clients: 10.
+- Clients with `settings.calendar.booking_enabled = true`: 0.
+- Demo Dental explicitly has `booking_enabled = false`.
+- Exactly two controlled Demo Dental appointments existed at closure; both
+  were confirmed, both had `confirmed_at`, and zero remained pending.
+- Exactly four `notification_attempts` rows existed for those appointments:
+  two `office_sms` and two `office_email` rows.
+- All four attempts were `sent` and resolved.
+- There were zero duplicate appointment/channel groups, zero unexpected
+  channels, zero unexpected statuses, zero patient-SMS sends, and zero
+  notification errors.
+
+## Duplicate routine-notification correction (65d4071)
+
+The first controlled production Calendar booking exposed two separate office
+notification paths in the same routine journey: the legacy generic lead alert
+and the native Calendar exact-time alert. Calendar ledger idempotency itself
+was functioning; the defect was journey-level routing ownership.
+
+The approved correction established this policy:
+
+- Routine native Calendar booking: complete the lead silently before Calendar
+  delegation; after successful booking, send only the exact-time Calendar SMS
+  and exact-time Calendar email.
+- Native Calendar delegation/opening failure: preserve the legacy generic lead
+  notification as a one-time fallback.
+- Capture-only and external/hybrid modes: preserve the existing legacy generic
+  notification behavior.
+- Priority non-life-threatening native Calendar cases: preserve the immediate
+  safety alert and later exact-time Calendar notifications.
+- Life-threatening and ordinary emergency behavior remains unchanged.
+
+Verification on the correction checkpoint included Python compilation,
+selected routing/policy tests, 811 Calendar tests, 18 JavaScript tests, and
+46 emergency tests covering 84 emergency subtests.
+
+A controlled production retest then physically delivered exactly one office
+SMS and one office email for the successful routine booking. No duplicate
+legacy generic alert arrived.
+
+## Simple office portal (02a3a37)
+
+The portal was intentionally limited to the existing authenticated Calendar
+administration surface plus one small read-only bootstrap endpoint.
+
+Exactly four files changed:
+
+- `app/routes/calendar.py`
+- `calendar_tests/test_portal_me.py`
+- `static/admin/calendar-portal.html`
+- `tests/test_calendar_portal.js`
+
+Added route:
+
+- `GET /admin/calendar/me` returning only the authenticated office identity,
+  practice name, timezone, current local day, and booking-enabled state.
+
+The portal uses the existing per-office `X-Admin-Key` authentication and
+existing tenant-scoped appointment-list and confirmation routes. No global
+admin key was reintroduced. The raw office key was never committed or stored
+in plaintext in the database; only its SHA-256 representation is stored, and
+the owner-controlled local copy is DPAPI-encrypted.
+
+## Automated portal verification
+
+Observed on the final portal patch:
+
+- `/admin/calendar/me`: 17 tests passed.
+- Existing Calendar admin authentication: 31 tests passed.
+- Confirmation tests: 14 passed, 41 deselected.
+- Portal JavaScript tests: 37 passed, 0 failed.
+- Complete Calendar suite: 828 passed.
+- Widget/map JavaScript suite: 18 passed.
+- Emergency suite: 46 tests passed, covering 84 subtests.
+- Python compilation passed.
+
+## Production portal and confirmation evidence
+
+Public/authentication smoke:
+
+- Portal document returned HTTP 200.
+- The page exposed the Office Portal Key login form.
+- Unauthenticated `GET /admin/calendar/me` returned HTTP 401.
+- A valid Demo Dental credential authenticated to the exact expected client,
+  practice, and `America/New_York` timezone while booking remained paused.
+
+Manual portal UI smoke:
+
+- `Demo Dental` header displayed.
+- `Online booking paused`, Refresh, and Log out controls displayed.
+- Exactly two appointment cards displayed.
+- Before the controlled mutation, one card was Confirmed and one was Pending.
+- The Confirm appointment control appeared only on the Pending card.
+- Both cards showed Office SMS Sent and Office email Sent.
+- No notification-error, cancel, or reschedule control appeared.
+
+Controlled portal mutation:
+
+- The owner explicitly authorized one production confirmation.
+- The pending controlled appointment changed to Confirmed.
+- Its confirmation control disappeared.
+- The already-confirmed appointment remained unchanged.
+- Booking remained paused.
+- No new SMS or email arrived after staff confirmation.
+
+Final authenticated read-only API closure:
+
+- Exactly two appointments returned.
+- Confirmed: 2; Pending: 0.
+- Both `confirmed_at` timestamps present.
+- Office SMS sent flags: 2.
+- Office email sent flags: 2.
+- Patient SMS sent flags: 0.
+- Notification errors: 0.
+- Final `booking_enabled`: false.
+- The closure script used only authenticated GET requests and performed no
+  confirmation, cancellation, booking, or database mutation.
+
+## Behavior intentionally not included
+
+The validated MVP does not add:
+
+- cancellation or rescheduling controls;
+- multi-location, provider, or operatory scheduling;
+- PMS or Google Calendar integration;
+- patient reminders or patient SMS;
+- advanced analytics;
+- automatic notification retry/recovery workers;
+- stale-attempt mutation or manual resolution.
+
+## Deferred work
+
+- Patch 9B remains deferred: read-only, tenant-scoped visibility for stale
+  notification attempts after the approved visibility threshold. It must not
+  retry, resolve, or mutate attempts.
+- Patch 9C has not started. The current source documents do not contain an
+  approved detailed 9C architecture; active retry/recovery, stale-claim
+  processing, workers/cron, and provider idempotency mechanisms remain outside
+  this release and require a separate explicit design and approval.
+- Patch 10 has not started.
+- Multi-location and deeper portal functionality remain post-MVP work.
+
+## Rollback method
+
+- Portal-only rollback: redeploy parent commit
+  `65d4071e4f41fbbd4bd50162343d3722cd26150e`; the notification-routing
+  correction remains intact.
+- Calendar emergency rollback: first keep every tenant's booking flag false,
+  then redeploy the pre-Calendar production checkpoint as directed by the
+  production rollback runbook. The migrations are additive and should not be
+  down-migrated during an incident unless a separately reviewed data-export
+  and rollback procedure is being executed.
+- Do not roll back below `65d4071` as a routine portal response: doing so
+  reopens the known duplicate routine native-Calendar notification journey.
+
+## Final status
+
+`02a3a373bbf7a7b60329bb9a3de5f2924237dbc6` is the final technically
+validated production release checkpoint for the Mia Calendar MVP and Simple
+Office Portal as of 2026-07-29.
+
+Technical production closure is complete. No code change is recommended from
+the closure evidence. Production booking remains frozen for all tenants.
+Remaining work is operational: preserve the release record, prepare the
+credential/onboarding runbook, and deliberately onboard one willing
+single-location office under a controlled pilot gate.
