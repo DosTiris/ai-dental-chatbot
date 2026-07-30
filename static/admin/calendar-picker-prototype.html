@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Mia — Appointment Picker (Prototype A, fake data)</title>
+<!--
+  MIA VISUAL CALENDAR PICKER — PROTOTYPE A
+  ========================================
+  Standalone visual prototype. Fully self-contained: no external libraries,
+  no network calls, no backend dependencies, no real availability, no holds,
+  no appointments. Every date and time below is FAKE Demo Dental data.
+
+  Source baseline (not modified): commit 925520135c88f185ce8bc6697d6fe33ab18b584a
+  Deterministic anchor date: "today" is fixed to Thursday, July 30, 2026 so
+  every reviewer sees identical states.
+
+  Branding contract: all colors flow through the Mia CSS variables below so a
+  future integration can inject per-office themes. A client-side contrast
+  fallback (computeContrastFallbacks) derives readable on-primary text even
+  when an office chooses an unreadable brand color.
+-->
+<style>
+  :root {
+    /* ---- Mia theme variables (injectable per office) ------------------- */
+    --mia-primary: #2563eb;
+    --mia-primary-hover: #1d4ed8;
+    --mia-background: #0f172a;
+    --mia-surface: #111827;
+    --mia-text: #f3f6fb;
+    --mia-muted: #94a3b8;
+    --mia-border: #253047;
+    --mia-success: #22c55e;
+    --mia-error: #f87171;
+
+    /* ---- Derived by the contrast fallback (JS may overwrite) ----------- */
+    --mia-on-primary: #ffffff;      /* text/icon color on primary buttons   */
+    --mia-primary-edge: transparent;/* outline when primary ~= surface      */
+    --mia-step-current: #2563eb;    /* current progress step; JS re-derives */
+
+    /* ---- Prototype-internal tokens (all derived from theme vars) ------- */
+    --p-radius: 14px;
+    --p-radius-sm: 10px;
+    --p-shadow: 0 14px 34px color-mix(in srgb, var(--mia-primary) 12%, rgba(0,0,0,.35));
+    --p-tint: color-mix(in srgb, var(--mia-primary) 12%, var(--mia-surface));
+    --p-tint-strong: color-mix(in srgb, var(--mia-primary) 22%, var(--mia-surface));
+    --p-line: color-mix(in srgb, var(--mia-border) 82%, white 6%);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 18px 12px 40px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    color: var(--mia-text);
+    background:
+      radial-gradient(circle at 88% 0%, color-mix(in srgb, var(--mia-primary) 16%, transparent), transparent 36%),
+      radial-gradient(circle at 6% 10%, color-mix(in srgb, var(--mia-primary) 10%, transparent), transparent 30%),
+      var(--mia-background);
+  }
+
+  /* ---------------- Chat-panel shell ----------------------------------- */
+  .panel {
+    width: 100%;
+    max-width: 420px;
+    background: var(--mia-surface);
+    border: 1px solid var(--p-line);
+    border-radius: 20px;
+    box-shadow: var(--p-shadow);
+    overflow: hidden;
+    position: relative;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--p-line);
+  }
+  .avatar {
+    width: 38px; height: 38px; flex: none;
+    border-radius: 12px;
+    display: grid; place-items: center;
+    background: var(--p-tint);
+    color: var(--mia-primary);
+  }
+  .avatar svg { width: 24px; height: 24px; }
+  .panel-header h1 {
+    font-size: 16px; font-weight: 700; margin: 0; letter-spacing: .01em;
+  }
+  .panel-header p {
+    margin: 1px 0 0; font-size: 12px; color: var(--mia-muted);
+  }
+  .proto-badge {
+    margin-left: auto;
+    font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--mia-muted);
+    border: 1px dashed var(--p-line);
+    border-radius: 999px;
+    padding: 4px 8px;
+    white-space: nowrap;
+  }
+
+  .flow { padding: 14px 14px 18px; }
+
+  /* ---------------- Conversation lines ---------------------------------- */
+  .mia-line {
+    display: flex; gap: 10px; margin: 10px 0 12px;
+  }
+  .mia-line .dot {
+    width: 8px; height: 8px; margin-top: 7px; flex: none;
+    border-radius: 50%;
+    background: var(--mia-primary);
+  }
+  .mia-line p {
+    margin: 0;
+    font-size: 14.5px; line-height: 1.5;
+    color: var(--mia-text);
+    background: color-mix(in srgb, var(--mia-text) 6%, var(--mia-surface));
+    border: 1px solid var(--p-line);
+    border-radius: 4px var(--p-radius) var(--p-radius) var(--p-radius);
+    padding: 10px 12px;
+    max-width: 92%;
+  }
+
+  .stage { animation: rise .18s ease both; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: none;} }
+
+  /* ---------------- Date strip (signature element) ----------------------
+     Seven "appointment cards": weekday, day number, and a WRITTEN state
+     label — availability is never color-only. -------------------------- */
+  .strip-label {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin: 2px 2px 8px;
+  }
+  .strip-label span { font-size: 12px; color: var(--mia-muted); letter-spacing: .02em; }
+
+  /* v2 correction 1: the strip is a horizontal scroll-snap carousel.
+     Seven dates total; ~4–5 fixed-width cards visible on phones; the rest
+     reachable by touch scroll, Tab (every chip is focusable), or trackpad.
+     Overflow is confined to this element — never the document. */
+  .strip-wrap { position: relative; }
+  .date-strip {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 2px;
+    padding: 2px 2px 6px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .date-strip::-webkit-scrollbar { display: none; }
+  .strip-fade {
+    position: absolute; top: 0; bottom: 6px; right: 0; width: 34px;
+    pointer-events: none;
+    background: linear-gradient(to right, transparent,
+                color-mix(in srgb, var(--mia-surface) 92%, transparent));
+    display: flex; align-items: center; justify-content: flex-end;
+    color: var(--mia-muted); font-size: 14px;
+    opacity: 1; transition: opacity .12s ease;
+  }
+  .strip-fade[data-hidden="true"] { opacity: 0; }
+  .date-chip {
+    appearance: none;
+    font: inherit;
+    flex: 0 0 auto;
+    width: 70px;
+    scroll-snap-align: start;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 9px 2px 7px;
+    min-height: 66px;
+    border-radius: var(--p-radius-sm);
+    border: 1px solid var(--p-line);
+    background: color-mix(in srgb, var(--mia-text) 4%, var(--mia-surface));
+    color: var(--mia-text);
+    cursor: pointer;
+    transition: transform .12s ease, background .12s ease, border-color .12s ease;
+  }
+  @media (max-width: 349px) { .date-chip { width: 60px; } }
+  .date-chip .dow { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; color: var(--mia-muted); text-transform: uppercase; }
+  .date-chip .num { font-size: 16px; font-weight: 700; line-height: 1.1; white-space: nowrap; }
+  .date-chip .num .mon { font-size: 9.5px; font-weight: 700; letter-spacing: .04em; color: var(--mia-muted); vertical-align: 1px; margin-right: 2px; }
+  .date-chip .st  { font-size: 9px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; color: var(--mia-success); white-space: nowrap; padding: 0; }
+  .date-chip .st::before { content: "•"; margin-right: 3px; }
+
+  .date-chip:not([aria-disabled="true"]):hover { border-color: var(--mia-primary); background: var(--p-tint); transform: translateY(-1px); }
+
+  /* v2 correction 2 pattern (applied to the strip too): unavailable dates
+     use aria-disabled and STAY focusable, so keyboard users can reach and
+     hear every date; activation is ignored in JS. */
+  .date-chip[aria-disabled="true"] {
+    cursor: not-allowed;
+    color: var(--mia-muted);
+    background: transparent;
+    border-style: dashed;
+  }
+  .date-chip[aria-disabled="true"] .num { color: var(--mia-muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+  .date-chip[aria-disabled="true"] .st { color: var(--mia-muted); }
+  .date-chip[aria-disabled="true"] .st::before { content: "–"; }
+
+  .date-chip[aria-pressed="true"] {
+    background: var(--mia-primary);
+    border-color: var(--mia-primary);
+    outline: 1px solid var(--mia-primary-edge);
+    color: var(--mia-on-primary);
+  }
+  .date-chip[aria-pressed="true"] .dow,
+  .date-chip[aria-pressed="true"] .num .mon,
+  .date-chip[aria-pressed="true"] .st { color: var(--mia-on-primary); }
+  /* v2.2 polish 2: selection is fill + checkmark, never border alone. */
+  .date-chip[aria-pressed="true"] .st::before { content: "✓"; }
+
+  .more-dates {
+    margin-top: 10px;
+    width: 100%;
+  }
+
+  /* ---------------- Buttons --------------------------------------------- */
+  .btn {
+    appearance: none; font: inherit;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 12px 14px;
+    min-height: 46px;
+    border-radius: var(--p-radius-sm);
+    border: 1px solid var(--p-line);
+    background: color-mix(in srgb, var(--mia-text) 5%, var(--mia-surface));
+    color: var(--mia-text);
+    font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease, transform .12s ease;
+  }
+  .btn:hover { border-color: var(--mia-primary); background: var(--p-tint); }
+  .btn:active { transform: translateY(1px); }
+
+  .btn-primary {
+    background: var(--mia-primary);
+    border-color: var(--mia-primary);
+    outline: 1px solid var(--mia-primary-edge);
+    color: var(--mia-on-primary);
+  }
+  .btn-primary:hover { background: var(--mia-primary-hover); border-color: var(--mia-primary-hover); }
+
+  .btn-quiet {
+    background: transparent; border-color: transparent; color: var(--mia-muted);
+    min-height: 40px; padding: 8px 10px;
+  }
+  .btn-quiet:hover { color: var(--mia-text); background: color-mix(in srgb, var(--mia-text) 6%, transparent); border-color: transparent; }
+
+  :is(button, [tabindex]):focus-visible {
+    outline: 2px solid var(--mia-primary);
+    outline-offset: 2px;
+    border-radius: var(--p-radius-sm);
+  }
+  .date-chip[aria-pressed="true"]:focus-visible,
+  .btn-primary:focus-visible {
+    outline-color: var(--mia-text);
+  }
+
+  /* ---------------- Times ------------------------------------------------ */
+  .times-head {
+    display: flex; align-items: center; gap: 8px; margin: 2px 0 10px;
+  }
+  .times-head h2 { font-size: 14px; font-weight: 700; margin: 0; }
+  .times-head .spacer { flex: 1; }
+
+  .time-group { margin: 12px 0 4px; }
+  .time-group h3 {
+    margin: 0 0 8px;
+    font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--mia-muted);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .time-group h3::after { content: ""; flex: 1; height: 1px; background: var(--p-line); }
+
+  .time-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .time-btn { width: 100%; }
+
+  .none-note { font-size: 13px; color: var(--mia-muted); margin: 2px 0 6px; }
+
+  /* ---------------- Status / loading / error ----------------------------- */
+  .status-card {
+    border: 1px solid var(--p-line);
+    border-radius: var(--p-radius);
+    padding: 16px 14px;
+    text-align: center;
+    font-size: 13.5px;
+    color: var(--mia-muted);
+  }
+  .status-card strong { color: var(--mia-text); font-weight: 700; }
+  .status-card.error { border-color: color-mix(in srgb, var(--mia-error) 55%, var(--p-line)); }
+  .status-card.error strong { color: var(--mia-error); }
+  .status-card .btn { margin-top: 12px; }
+
+  .spinner {
+    width: 22px; height: 22px; margin: 0 auto 10px;
+    border-radius: 50%;
+    border: 3px solid var(--p-line);
+    border-top-color: var(--mia-primary);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .notice {
+    display: flex; gap: 8px; align-items: flex-start;
+    border: 1px solid color-mix(in srgb, var(--mia-error) 45%, var(--p-line));
+    background: color-mix(in srgb, var(--mia-error) 9%, var(--mia-surface));
+    border-radius: var(--p-radius-sm);
+    padding: 10px 12px;
+    font-size: 13px;
+    margin: 0 0 10px;
+  }
+  .notice b { color: var(--mia-error); font-weight: 700; }
+
+  /* ---------------- Review card ------------------------------------------ */
+  .review {
+    border: 1px solid var(--p-line);
+    border-radius: var(--p-radius);
+    overflow: hidden;
+  }
+  .review-row {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 11px 14px;
+    font-size: 14px;
+  }
+  .review-row + .review-row { border-top: 1px solid var(--p-line); }
+  .review-row dt { color: var(--mia-muted); font-weight: 500; }
+  .review-row dd { margin: 0; font-weight: 700; text-align: right; }
+  .review dl { margin: 0; }
+
+  .ptype {
+    display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;
+  }
+  .ptype button {
+    appearance: none; font: inherit;
+    font-size: 12px; font-weight: 600;
+    padding: 6px 10px; border-radius: 999px;
+    border: 1px solid var(--p-line);
+    background: transparent; color: var(--mia-muted);
+    cursor: pointer;
+  }
+  .ptype button[aria-pressed="true"] {
+    background: var(--mia-primary);
+    border-color: var(--mia-primary);
+    outline: 1px solid var(--mia-primary-edge);
+    color: var(--mia-on-primary);
+  }
+
+  .review-actions { display: grid; gap: 8px; margin-top: 12px; }
+
+  /* ---------------- Final state ------------------------------------------ */
+  .final-card {
+    text-align: center;
+    padding: 22px 14px 18px;
+    border: 1px solid color-mix(in srgb, var(--mia-success) 40%, var(--p-line));
+    border-radius: var(--p-radius);
+  }
+  .final-card .tick {
+    width: 40px; height: 40px; margin: 0 auto 12px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    background: color-mix(in srgb, var(--mia-success) 16%, var(--mia-surface));
+    color: var(--mia-success);
+  }
+  .final-card h2 { font-size: 15.5px; margin: 0 0 6px; }
+  .final-card p { font-size: 13.5px; color: var(--mia-muted); margin: 0 0 4px; line-height: 1.5; }
+
+  /* ---------------- Month calendar (sheet on mobile) ---------------------- */
+  .sheet-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(2, 6, 23, .55);
+    opacity: 0; pointer-events: none;
+    transition: opacity .16s ease;
+  }
+  .sheet {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--mia-surface);
+    border-top: 1px solid var(--p-line);
+    border-radius: 18px 18px 0 0;
+    padding: 12px 14px 16px;
+    transform: translateY(102%);
+    transition: transform .2s ease;
+    max-height: 88%;
+    overflow: auto;
+  }
+  .panel.sheet-open .sheet-backdrop { opacity: 1; pointer-events: auto; }
+  .panel.sheet-open .sheet { transform: translateY(0); }
+
+  .sheet-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .sheet-head h2 { font-size: 14px; font-weight: 700; margin: 0; flex: 1; }
+  .month-nav { display: flex; align-items: center; gap: 4px; }
+  .month-nav .btn-quiet { min-height: 36px; padding: 6px 10px; font-size: 16px; line-height: 1; }
+  .month-name { font-size: 13px; font-weight: 700; min-width: 118px; text-align: center; }
+
+  .cal-grid {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+    margin-top: 8px;
+  }
+  .cal-dow {
+    font-size: 10px; font-weight: 700; letter-spacing: .06em;
+    color: var(--mia-muted); text-align: center; text-transform: uppercase;
+    padding: 4px 0;
+  }
+  .cal-day {
+    appearance: none; font: inherit;
+    min-height: 44px;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--mia-text);
+    font-size: 13.5px; font-weight: 600;
+    cursor: pointer;
+    display: grid; place-items: center; gap: 0;
+    padding: 3px 0;
+  }
+  .cal-day small { font-size: 8px; font-weight: 700; letter-spacing: .04em; color: var(--mia-success); text-transform: uppercase; }
+  .cal-day:not([aria-disabled="true"]):hover { background: var(--p-tint); border-color: var(--mia-primary); }
+  .cal-day[aria-disabled="true"] { color: var(--mia-muted); cursor: not-allowed; }
+  .cal-day[aria-disabled="true"] span { text-decoration: line-through; text-decoration-thickness: 1px; }
+  .cal-day[aria-disabled="true"] small { color: var(--mia-muted); }
+  .cal-day[aria-pressed="true"] {
+    background: var(--mia-primary); border-color: var(--mia-primary);
+    outline: 1px solid var(--mia-primary-edge);
+    color: var(--mia-on-primary);
+  }
+  .cal-day[aria-pressed="true"] small { color: var(--mia-on-primary); }
+  .cal-day[aria-pressed="true"] small::before { content: "✓ "; }
+
+  /* v2.2 polish 2: a re-shown selected time is filled + check-marked. */
+  .time-btn[aria-pressed="true"] {
+    background: var(--mia-primary);
+    border-color: var(--mia-primary);
+    outline: 1px solid var(--mia-primary-edge);
+    color: var(--mia-on-primary);
+  }
+  .time-btn[aria-pressed="true"]::before { content: "✓"; font-weight: 700; }
+
+  /* v2.2 polish 6: restrained progress cue (Date → Time → Review). */
+  .progress {
+    display: flex; align-items: center; gap: 6px;
+    margin: 0 2px 10px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--mia-muted);
+    list-style: none; padding: 0;
+  }
+  .progress li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .progress li + li::before { content: "→"; color: var(--p-line); font-weight: 400; }
+  /* v2.2.1 fix: raw --mia-primary text on --mia-surface fails 4.5:1 under
+     the Mia default (3.43) and Poor-contrast brand (1.13) themes. The
+     derived --mia-step-current keeps the brand hue whenever it already
+     passes and mixes toward --mia-text only as far as needed. */
+  .progress li[aria-current="step"] { color: var(--mia-step-current); }
+  .progress li[data-done="true"] { color: var(--mia-text); }
+  .progress li[data-done="true"] .tickmark::before { content: "✓ "; color: var(--mia-success); }
+
+  /* v2.2 polish 4: patient-type value + Edit control on the review card. */
+  .ptype-value { display: inline-flex; align-items: center; gap: 8px; }
+  .ptype-edit {
+    appearance: none; font: inherit;
+    font-size: 12px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--p-line);
+    background: transparent; color: var(--mia-primary);
+    cursor: pointer;
+  }
+  .ptype-edit:hover { border-color: var(--mia-primary); background: var(--p-tint); }
+  /* v2.2.1 fix: `hidden` lives on the #ptypeRow .review-row, and the
+     author rule `.review-row { display:flex }` beats the UA stylesheet's
+     `[hidden]` display:none. Target the row itself so the collapsed
+     editor is genuinely display:none, not merely aria-hidden. */
+  .review-row[hidden] { display: none; }
+  .ptype button[aria-pressed="true"]::before { content: "✓ "; }
+
+  .review-note { font-size: 12px; color: var(--mia-muted); margin: 8px 2px 0; text-align: center; }
+  .cal-legend {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    margin-top: 10px; font-size: 11px; color: var(--mia-muted);
+  }
+  .cal-legend span::before { content: "•"; margin-right: 4px; color: var(--mia-success); }
+  .cal-legend span.leg-off::before { content: "–"; color: var(--mia-muted); }
+
+  /* ---------------- aria-live region (v2 correction 5: SR-only) ----------- */
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; border: 0;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  body { overflow-x: hidden; } /* belt-and-braces: overflow lives only in the strip */
+
+  /* ---------------- Prototype controls (review aid only) ------------------ */
+  .proto-controls {
+    width: 100%; max-width: 420px;
+    margin-top: 14px;
+    font-size: 11.5px; color: var(--mia-muted);
+  }
+  .proto-controls fieldset {
+    border: 1px dashed var(--p-line);
+    border-radius: var(--p-radius-sm);
+    padding: 10px 12px;
+  }
+  .proto-controls legend { padding: 0 6px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; font-size: 10px; }
+  .proto-controls .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .proto-controls button {
+    appearance: none; font: inherit; font-size: 11.5px; font-weight: 600;
+    padding: 6px 10px; border-radius: 999px;
+    border: 1px solid var(--p-line);
+    background: transparent; color: var(--mia-muted); cursor: pointer;
+  }
+  .proto-controls button[aria-pressed="true"] { color: var(--mia-text); border-color: var(--mia-primary); }
+
+  /* ---------------- Layout: wrap + desktop ------------------------------- */
+  .wrap { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: stretch; }
+
+  @media (min-width: 700px) {
+    body { padding-top: 42px; }
+    .sheet {
+      position: static; transform: none; transition: none;
+      border: 1px solid var(--p-line); border-radius: var(--p-radius);
+      margin-top: 10px; max-height: none; display: none;
+    }
+    .panel.sheet-open .sheet { display: block; }
+    .sheet-backdrop { display: none; }
+  }
+
+  @media (max-width: 380px) {
+    .time-grid { grid-template-columns: repeat(2, 1fr); }
+    .date-chip { min-height: 62px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel" id="panel">
+    <header class="panel-header">
+      <span class="avatar" aria-hidden="true">
+        <svg viewBox="0 0 64 64" focusable="false">
+          <path d="M20.4 6.6c3.4 0 5.7 1.3 7.7 2.4 1.5.8 2.8 1.5 3.9 1.5s2.4-.7 3.9-1.5c2-1.1 4.3-2.4 7.7-2.4 7.4 0 12.3 6.2 12.3 14.2 0 5.6-2.3 10.6-4.5 15.4-1.7 3.8-3.4 7.4-4 11.1-1.1 6.8-3.2 10.1-6.2 10.1-3.2 0-4.1-3.6-5.1-7.3-1-3.8-2-7.7-4.1-7.7s-3.1 3.9-4.1 7.7c-1 3.7-1.9 7.3-5.1 7.3-3 0-5.1-3.3-6.2-10.1-.6-3.7-2.3-7.3-4-11.1-2.2-4.8-4.5-9.8-4.5-15.4 0-8 4.9-14.2 12.3-14.2Z" fill="currentColor"/>
+        </svg>
+      </span>
+      <div>
+        <h1>Mia</h1>
+        <p>Demo Dental — AI receptionist</p>
+      </div>
+      <span class="proto-badge">Prototype · fake data</span>
+    </header>
+
+    <div class="flow" id="flow"><!-- stages render here --></div>
+
+    <p class="sr-only" id="liveStatus" aria-live="polite"></p>
+
+    <!-- Month calendar: bottom sheet on mobile, inline panel on desktop -->
+    <div class="sheet-backdrop" id="sheetBackdrop"></div>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="false" aria-labelledby="sheetTitle" tabindex="-1" hidden>
+      <div class="sheet-head">
+        <h2 id="sheetTitle">Choose a date</h2>
+        <div class="month-nav">
+          <button type="button" class="btn btn-quiet" id="prevMonth" aria-label="Previous month">‹</button>
+          <span class="month-name" id="monthName"></span>
+          <button type="button" class="btn btn-quiet" id="nextMonth" aria-label="Next month">›</button>
+        </div>
+        <button type="button" class="btn btn-quiet" id="closeSheet" aria-label="Close calendar">✕</button>
+      </div>
+      <div class="cal-grid" id="calGrid" role="grid" aria-label="Month calendar"></div>
+      <div class="cal-legend">
+        <!-- v2.2 polish 5: every state visible in this grid, and only those.
+             "Unavailable" is not listed because the month grid never shows
+             it in the fake window (the strip's fully-booked wording is a
+             separate vocabulary). -->
+        <span>Open</span>
+        <span class="leg-off">Closed</span>
+        <span class="leg-off">Full</span>
+        <span class="leg-off">Past</span>
+      </div>
+    </section>
+  </div>
+
+  <!-- Review aid only: proves theme injection + contrast fallback. Not part of the patient flow. -->
+  <aside class="proto-controls">
+    <fieldset>
+      <legend>Prototype controls</legend>
+      Office theme (demonstrates CSS-variable injection and the contrast fallback):
+      <div class="row" id="themeRow" role="group" aria-label="Prototype theme presets"></div>
+      <div class="row">
+        <button type="button" id="restartBtn">Restart flow</button>
+      </div>
+    </fieldset>
+  </aside>
+</div>
+
+<script>
+(() => {
+"use strict";
+/* v2.2 hardening: the whole prototype runs inside an IIFE so none of its
+   functions or state leak as globals — a co-located host-page script can
+   no longer collide with (or redefine) them. Surfaced when a test helper
+   named `contrast` overrode the prototype’s own and broke the fallback. */
+/* =========================================================================
+   FAKE DEMO DENTAL DATA — deterministic. No network, no backend, no holds.
+   ========================================================================= */
+
+// Fixed "today" so every review sees identical states.
+const TODAY = { y: 2026, m: 7, d: 30 }; // Thursday, July 30, 2026
+
+const MONTH_NAMES = ["January","February","March","April","May","June","July",
+                     "August","September","October","November","December"];
+const DOW_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const DOW_LONG  = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+// Availability vocabulary (written labels; never color-only).
+const AV = { AVAILABLE: "Available", CLOSED: "Closed", UNAVAILABLE: "Unavailable" };
+
+// Fake slot menus.
+const SLOTS_FULL      = { morning: ["9:00 AM", "10:15 AM", "11:30 AM"], afternoon: ["1:30 PM", "2:45 PM", "4:00 PM"] };
+const SLOTS_MORNING   = { morning: ["8:30 AM", "9:45 AM", "11:00 AM"], afternoon: [] };
+const SLOTS_AFTERNOON = { morning: [], afternoon: ["12:30 PM", "2:00 PM", "3:15 PM", "4:30 PM"] };
+
+/*
+  Special demo dates (all in the fixed July/August 2026 window):
+    2026-07-31  fully booked weekday        -> Unavailable in strip + month
+    2026-08-01  Saturday                    -> Closed
+    2026-08-02  Sunday                      -> Closed
+    2026-08-03  morning-only availability
+    2026-08-04  afternoon-only availability
+    2026-08-07  error demo: first load fails, Retry succeeds
+    2026-08-10  empty-day demo: loads, then zero remaining slots
+    Slot-taken demo: on 2026-08-05, "1:30 PM" is "just taken" the first
+    time it is tapped and disappears from the refreshed menu.
+  Every other weekday from TODAY through 2026-09-30 is Available with the
+  full fake menu; weekends are Closed; past dates are disabled.
+*/
+const SPECIALS = {
+  "2026-07-31": { state: AV.UNAVAILABLE },
+  "2026-08-07": { state: AV.AVAILABLE, demo: "error",  slots: SLOTS_FULL },
+  "2026-08-10": { state: AV.AVAILABLE, demo: "empty" },
+  "2026-08-03": { state: AV.AVAILABLE, slots: SLOTS_MORNING },
+  "2026-08-04": { state: AV.AVAILABLE, slots: SLOTS_AFTERNOON },
+  "2026-08-05": { state: AV.AVAILABLE, slots: SLOTS_FULL, demo: "slotTaken", takenSlot: "1:30 PM" }
+};
+
+const BOOKING_HORIZON = { y: 2026, m: 9, d: 30 }; // last offered fake day
+
+const FAKE_SERVICE = "Cleaning / checkup";
+
+/* ---------------- date helpers (pure, deterministic) -------------------- */
+function key(y, m, d) { return y + "-" + String(m).padStart(2, "0") + "-" + String(d).padStart(2, "0"); }
+function toDate(o) { return new Date(o.y, o.m - 1, o.d); }
+function addDays(o, n) { const t = toDate(o); t.setDate(t.getDate() + n); return { y: t.getFullYear(), m: t.getMonth() + 1, d: t.getDate() }; }
+function cmp(a, b) { return toDate(a) - toDate(b); }
+function dow(o) { return toDate(o).getDay(); }
+function longLabel(o) { return DOW_LONG[dow(o)] + ", " + MONTH_NAMES[o.m - 1] + " " + o.d; }
+
+/*
+  v2 correction 3: every date carries a `reason` and a matching VISIBLE
+  month label so the on-screen word and the aria-label always agree:
+    past    -> "Past"          (was wrongly shown as "full" in v1)
+    closed  -> "Closed"
+    full    -> "Full"          (only 2026-07-31 demonstrates this in July)
+    horizon -> "Unavailable"   (beyond the fake booking window)
+    open    -> "Open"
+*/
+function availabilityFor(o) {
+  if (cmp(o, TODAY) < 0)
+    return { state: AV.UNAVAILABLE, past: true, reason: "past", monthLabel: "Past" };
+  if (cmp(o, BOOKING_HORIZON) > 0)
+    return { state: AV.UNAVAILABLE, past: false, reason: "horizon", monthLabel: "Unavailable" };
+  const sp = SPECIALS[key(o.y, o.m, o.d)];
+  if (sp && sp.state === AV.UNAVAILABLE)
+    return { state: AV.UNAVAILABLE, past: false, reason: "full", monthLabel: "Full", special: sp };
+  if (sp)
+    return { state: sp.state, past: false, reason: "open", monthLabel: "Open", special: sp };
+  if (dow(o) === 0 || dow(o) === 6)
+    return { state: AV.CLOSED, past: false, reason: "closed", monthLabel: "Closed" };
+  return { state: AV.AVAILABLE, past: false, reason: "open", monthLabel: "Open" };
+}
+function slotsFor(o) {
+  const sp = SPECIALS[key(o.y, o.m, o.d)];
+  if (sp && sp.demo === "empty") return { morning: [], afternoon: [] };
+  if (sp && sp.slots) return { morning: sp.slots.morning.slice(), afternoon: sp.slots.afternoon.slice() };
+  return { morning: SLOTS_FULL.morning.slice(), afternoon: SLOTS_FULL.afternoon.slice() };
+}
+
+/* =========================================================================
+   CONTRAST FALLBACK — unreadable brand colors still get readable buttons.
+   ========================================================================= */
+function parseColor(str) {
+  const el = document.createElement("span");
+  el.style.color = str;
+  document.body.appendChild(el);
+  const rgb = getComputedStyle(el).color.match(/[\d.]+/g) || [0, 0, 0];
+  el.remove();
+  return rgb.slice(0, 3).map(Number);
+}
+function luminance([r, g, b]) {
+  const f = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function contrast(a, b) { const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); }
+
+function computeContrastFallbacks() {
+  const css = getComputedStyle(document.documentElement);
+  const primary = parseColor(css.getPropertyValue("--mia-primary").trim() || "#2563eb");
+  const surface = parseColor(css.getPropertyValue("--mia-surface").trim() || "#111827");
+  const white = [255, 255, 255], dark = [17, 24, 39];
+  // Pick the on-primary text color with the higher contrast (>=4.5 target).
+  const onPrimary = contrast(primary, white) >= contrast(primary, dark) ? "#ffffff" : "#111827";
+  document.documentElement.style.setProperty("--mia-on-primary", onPrimary);
+  // If primary nearly vanishes against the surface, draw a visible edge.
+  const edge = contrast(primary, surface) < 1.6
+    ? "color-mix(in srgb, var(--mia-text) 55%, transparent)"
+    : "transparent";
+  document.documentElement.style.setProperty("--mia-primary-edge", edge);
+  // v2.2.1: the current progress step renders as primary-colored TEXT on
+  // the surface, so it needs its own readable derivation (the on-primary
+  // fallback above only covers text sitting ON a primary fill). Keep the
+  // brand primary when it already reaches 4.5:1 against the surface;
+  // otherwise mix it toward the theme text color in 5% steps and stop at
+  // the first passing mix. The 100% mix equals --mia-text itself, and if
+  // even that fails (hostile injected theme) fall back to whichever of
+  // white/dark reads better on the surface — so a passing color always
+  // exists and the loop always terminates.
+  const text = parseColor(css.getPropertyValue("--mia-text").trim() || "#f3f6fb");
+  let step = null;
+  for (let m = 0; m <= 100; m += 5) {
+    const mix = primary.map((v, i) => Math.round(v + (text[i] - v) * m / 100));
+    if (contrast(mix, surface) >= 4.5) { step = mix; break; }
+  }
+  if (!step) step = contrast(surface, white) >= contrast(surface, dark) ? white : dark;
+  document.documentElement.style.setProperty(
+    "--mia-step-current", `rgb(${step[0]}, ${step[1]}, ${step[2]})`);
+}
+
+/* =========================================================================
+   PROTOTYPE THEME PRESETS — review aid proving variable injection.
+   ========================================================================= */
+const THEMES = {
+  "Mia default": null, // stylesheet values
+  "Warm light office": {
+    "--mia-primary": "#0f766e", "--mia-primary-hover": "#115e59",
+    "--mia-background": "#f6f3ee", "--mia-surface": "#ffffff",
+    "--mia-text": "#1f2937", "--mia-muted": "#6b7280",
+    "--mia-border": "#e5e0d8", "--mia-success": "#15803d", "--mia-error": "#b91c1c"
+  },
+  "Charcoal office": { // deep dark: warm amber primary on near-black
+    "--mia-primary": "#d9930d", "--mia-primary-hover": "#b97e0b",
+    "--mia-background": "#0b0b0c", "--mia-surface": "#151517",
+    "--mia-text": "#f4f1ea", "--mia-muted": "#9b968c",
+    "--mia-border": "#2a2a2e", "--mia-success": "#4ade80", "--mia-error": "#f87171"
+  },
+  "Poor-contrast brand": { // deliberately bad: pale primary on pale surface
+    "--mia-primary": "#eaf2ff", "--mia-primary-hover": "#dbe9ff",
+    "--mia-background": "#f4f7fb", "--mia-surface": "#ffffff",
+    "--mia-text": "#22304a", "--mia-muted": "#6b7a94",
+    "--mia-border": "#dce4ef", "--mia-success": "#15803d", "--mia-error": "#b91c1c"
+  }
+};
+function applyTheme(name) {
+  const root = document.documentElement;
+  ["--mia-primary","--mia-primary-hover","--mia-background","--mia-surface",
+   "--mia-text","--mia-muted","--mia-border","--mia-success","--mia-error"]
+    .forEach(v => root.style.removeProperty(v));
+  const t = THEMES[name];
+  if (t) Object.entries(t).forEach(([k, v]) => root.style.setProperty(k, v));
+  computeContrastFallbacks();
+  document.querySelectorAll("#themeRow button").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.theme === name)));
+}
+
+/* =========================================================================
+   FLOW STATE MACHINE (visual only — nothing is reserved or booked)
+   ========================================================================= */
+const state = {
+  stage: "date",              // date | times | review | final
+  selectedDate: null,         // {y,m,d}
+  selectedTime: null,         // "1:30 PM"
+  // v2.2 polish 4: patient-facing choices are New patient / Returning
+  // patient / I'm not sure. "Not provided" is an INTERNAL state only (the
+  // short-symptom path may never collect the question) — it is displayed
+  // as a value on the review card but never offered as a choice.
+  patientType: "Not provided",
+  monthView: { y: TODAY.y, m: TODAY.m },
+  takenConsumed: false,       // slot-taken demo fires once
+  errorRetried: false,        // error demo: retry succeeds
+  removedSlots: {}            // key -> Set of removed times (slot-taken demo)
+};
+
+const PATIENT_TYPE_CHOICES = ["New patient", "Returning patient", "I\u2019m not sure"];
+
+const flow = document.getElementById("flow");
+const live = document.getElementById("liveStatus");
+function announce(msg) { live.textContent = msg; }
+
+function el(html) { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; }
+function miaLine(text) {
+  return el(`<div class="mia-line"><span class="dot" aria-hidden="true"></span><p>${text}</p></div>`);
+}
+
+// v2.2 polish 6: restrained Date → Time → Review cue. `current` is 1-3;
+// earlier steps render as completed. Omitted on the final screen.
+function progressCue(current) {
+  const steps = ["Date", "Time", "Review"];
+  const ol = el(`<ol class="progress" aria-label="Booking steps"></ol>`);
+  steps.forEach((label, i) => {
+    const n = i + 1;
+    const li = el(`<li data-done="${n < current}"><span class="tickmark"></span>${label}</li>`);
+    if (n === current) li.setAttribute("aria-current", "step");
+    ol.appendChild(li);
+  });
+  return ol;
+}
+
+/* ---------------- Stage 1: date strip ----------------------------------- */
+function renderDateStage() {
+  state.stage = "date";
+  flow.textContent = "";
+  flow.appendChild(miaLine("What day would work best for your appointment?"));
+
+  const stage = el(`<div class="stage"></div>`);
+  stage.appendChild(progressCue(1));
+  stage.appendChild(el(`<div class="strip-label"><span>Next 7 days</span><span>Demo Dental</span></div>`));
+
+  // v2 correction 1: horizontal scroll-snap carousel. All seven chips are
+  // in the Tab order (aria-disabled, not native disabled); focusing an
+  // off-screen chip scrolls it into view, and a fading edge hint shows
+  // while more dates remain to the right.
+  const wrap = el(`<div class="strip-wrap"></div>`);
+  const strip = el(`<div class="date-strip" role="group" aria-label="Upcoming dates — scroll for more" tabindex="-1"></div>`);
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(TODAY, i);
+    const av = availabilityFor(d);
+    // v2.2 polish 1 + vocabulary unification: non-open strip days use the
+    // SAME words as the month grid ("Full" for the fully-booked Jul 31
+    // demo, "Closed" for weekends), per the approved fully-booked
+    // vocabulary "Full or Unavailable" — "UNAVAILABLE" (71px measured)
+    // cannot fit the carousel cards at readable size. "Unavailable" stays
+    // reserved for beyond-horizon dates, which never appear in this
+    // 7-day strip. Open days keep "Available" per the v2.2 example.
+    const stripLabel = av.reason === "open" ? "Available" : av.monthLabel;
+    const selected = state.selectedDate && key(d.y, d.m, d.d) === key(state.selectedDate.y, state.selectedDate.m, state.selectedDate.d);
+    const chip = el(`
+      <button type="button" class="date-chip" aria-pressed="${selected ? "true" : "false"}"
+        aria-label="${longLabel(d)} — ${stripLabel}">
+        <span class="dow">${DOW_SHORT[dow(d)]}</span>
+        <span class="num"><span class="mon">${MONTH_NAMES[d.m - 1].slice(0, 3).toUpperCase()}</span>${d.d}</span>
+        <span class="st">${stripLabel}</span>
+      </button>`);
+    if (av.reason !== "open") {
+      chip.setAttribute("aria-disabled", "true"); // focusable, not activatable
+    } else {
+      chip.addEventListener("click", () => selectDate(d));
+    }
+    chip.addEventListener("focus", () => chip.scrollIntoView({ block: "nearest", inline: "nearest" }));
+    strip.appendChild(chip);
+  }
+  const fade = el(`<div class="strip-fade" aria-hidden="true">›</div>`);
+  const syncFade = () => {
+    const more = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 2;
+    fade.dataset.hidden = more ? "false" : "true";
+  };
+  strip.addEventListener("scroll", syncFade, { passive: true });
+  window.addEventListener("resize", syncFade);
+  wrap.appendChild(strip);
+  wrap.appendChild(fade);
+  stage.appendChild(wrap);
+  window.requestAnimationFrame(syncFade);
+
+  const more = el(`<button type="button" class="btn more-dates">See full calendar</button>`);
+  more.addEventListener("click", openSheet);
+  stage.appendChild(more);
+
+  flow.appendChild(stage);
+}
+
+function selectDate(d) {
+  state.selectedDate = d;
+  state.selectedTime = null;
+  announce(longLabel(d) + " selected. Loading times.");
+  closeSheet();
+  renderTimesStage();
+}
+
+/* ---------------- Stage 2: times (loading / empty / error / grouped) ---- */
+function renderTimesStage() {
+  state.stage = "times";
+  const d = state.selectedDate;
+  const sp = (availabilityFor(d).special) || {};
+
+  flow.textContent = "";
+  flow.appendChild(miaLine(`Here’s what’s open on <b>${longLabel(d)}</b>. Pick a time that works.`));
+
+  const stage = el(`<div class="stage"></div>`);
+  stage.appendChild(progressCue(2));
+  const head = el(`
+    <div class="times-head">
+      <button type="button" class="btn btn-quiet" id="backToDates" aria-label="Back to dates">‹ Back to dates</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-quiet" id="changeDate">Open full calendar</button>
+    </div>`);
+  stage.appendChild(head);
+
+  const body = el(`<div id="timesBody"></div>`);
+  stage.appendChild(body);
+  flow.appendChild(stage);
+
+  head.querySelector("#backToDates").addEventListener("click", renderDateStage);
+  head.querySelector("#changeDate").addEventListener("click", () => { renderDateStage(); openSheet(); });
+
+  // Loading simulation (brief, deterministic).
+  body.appendChild(el(`<div class="status-card" role="status"><div class="spinner" aria-hidden="true"></div>Checking <strong>${longLabel(d)}</strong>…</div>`));
+  announce("Loading times for " + longLabel(d) + ".");
+
+  const delay = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 650;
+  window.setTimeout(() => {
+    if (state.stage !== "times") return;
+
+    // Error demo: first load of 2026-08-07 fails; Retry succeeds.
+    if (sp.demo === "error" && !state.errorRetried) {
+      body.textContent = "";
+      const err = el(`
+        <div class="status-card error" role="alert">
+          <strong>Couldn’t load times.</strong><br>
+          Check your connection and try again — nothing was reserved.<br>
+          <button type="button" class="btn">Try again</button>
+        </div>`);
+      err.querySelector("button").addEventListener("click", () => { state.errorRetried = true; renderTimesStage(); });
+      body.appendChild(err);
+      announce("Times failed to load. Try again is available.");
+      return;
+    }
+
+    const slots = slotsFor(d);
+    const removed = state.removedSlots[key(d.y, d.m, d.d)] || new Set();
+    const morning = slots.morning.filter(t => !removed.has(t));
+    const afternoon = slots.afternoon.filter(t => !removed.has(t));
+
+    body.textContent = "";
+
+    // Empty-day demo (2026-08-10): loads, then zero remaining slots.
+    if (!morning.length && !afternoon.length) {
+      const empty = el(`
+        <div class="status-card" role="status">
+          <strong>No remaining times on ${longLabel(d)}.</strong><br>
+          Earlier openings were taken. Pick another day to see fresh times.<br>
+          <button type="button" class="btn">Choose another day</button>
+        </div>`);
+      empty.querySelector("button").addEventListener("click", () => { renderDateStage(); openSheet(); });
+      body.appendChild(empty);
+      announce("No remaining times on " + longLabel(d) + ".");
+      return;
+    }
+
+    const groups = el(`<div></div>`);
+    [["Morning", morning], ["Afternoon", afternoon]].forEach(([label, list]) => {
+      const g = el(`<section class="time-group" aria-label="${label} times"><h3>${label}</h3></section>`);
+      if (!list.length) {
+        g.appendChild(el(`<p class="none-note">No ${label.toLowerCase()} openings this day.</p>`));
+      } else {
+        const grid = el(`<div class="time-grid"></div>`);
+        list.forEach(t => {
+          const pressed = state.selectedTime === t;
+          const b = el(`<button type="button" class="btn time-btn" aria-pressed="${pressed ? "true" : "false"}" aria-label="${t} on ${longLabel(d)}">${t}</button>`);
+          b.addEventListener("click", () => chooseTime(t, body));
+          grid.appendChild(b);
+        });
+        g.appendChild(grid);
+      }
+      groups.appendChild(g);
+    });
+    body.appendChild(groups);
+    announce((morning.length + afternoon.length) + " times shown for " + longLabel(d) + ".");
+  }, delay);
+}
+
+function chooseTime(t, timesBody) {
+  const d = state.selectedDate;
+  const sp = (availabilityFor(d).special) || {};
+
+  // Slot-taken demo: on 2026-08-05, "1:30 PM" is taken the first time only.
+  if (sp.demo === "slotTaken" && t === sp.takenSlot && !state.takenConsumed) {
+    state.takenConsumed = true;
+    const k = key(d.y, d.m, d.d);
+    (state.removedSlots[k] = state.removedSlots[k] || new Set()).add(t);
+    announce("That time was just taken. Times refreshed.");
+    renderTimesStage();
+    // Prepend the notice after re-render.
+    const body = document.getElementById("timesBody");
+    const note = el(`<div class="notice" role="alert"><span aria-hidden="true">⚠</span><span><b>${t} was just taken.</b> Here are the updated times — nothing is reserved yet.</span></div>`);
+    const observer = new MutationObserver(() => {
+      if (body.querySelector(".time-grid") || body.querySelector(".status-card")) {
+        body.prepend(note); observer.disconnect();
+      }
+    });
+    observer.observe(body, { childList: true, subtree: true });
+    return;
+  }
+
+  state.selectedTime = t;
+  announce(t + " on " + longLabel(d) + " selected. Review your request.");
+  renderReviewStage();
+}
+
+/* ---------------- Stage 3: review ---------------------------------------- */
+function renderReviewStage() {
+  state.stage = "review";
+  const d = state.selectedDate;
+
+  flow.textContent = "";
+  flow.appendChild(miaLine("Almost done — please review your request."));
+
+  const stage = el(`<div class="stage"></div>`);
+  stage.appendChild(progressCue(3));
+  const card = el(`
+    <div class="review">
+      <dl>
+        <div class="review-row"><dt>Service</dt><dd>${FAKE_SERVICE}</dd></div>
+        <div class="review-row"><dt>Date</dt><dd>${longLabel(d)}</dd></div>
+        <div class="review-row"><dt>Time</dt><dd>${state.selectedTime}</dd></div>
+        <div class="review-row">
+          <dt id="ptypeLabel">Patient type</dt>
+          <dd>
+            <span class="ptype-value">
+              <span id="ptypeValue">${state.patientType}</span>
+              <button type="button" class="ptype-edit" id="ptypeEdit"
+                aria-expanded="false" aria-controls="ptypeGroup">Edit</button>
+            </span>
+          </dd>
+        </div>
+        <div class="review-row" id="ptypeRow" hidden>
+          <dt class="sr-only">Patient type choices</dt>
+          <dd style="text-align:right; width:100%">
+            <div class="ptype" role="group" aria-labelledby="ptypeLabel" id="ptypeGroup"></div>
+          </dd>
+        </div>
+      </dl>
+    </div>`);
+  stage.appendChild(card);
+
+  /* v2.2 polish 4: the current value (including the internal-only
+     "Not provided") is displayed as TEXT with a small Edit control.
+     Editing offers only the patient-facing choices — "Not provided" is
+     never a selectable button. */
+  const editBtn = card.querySelector("#ptypeEdit");
+  const row = card.querySelector("#ptypeRow");
+  const group = card.querySelector("#ptypeGroup");
+  const valueEl = card.querySelector("#ptypeValue");
+  PATIENT_TYPE_CHOICES.forEach(v => {
+    const b = el(`<button type="button" aria-pressed="${state.patientType === v}">${v}</button>`);
+    b.addEventListener("click", () => {
+      state.patientType = v;
+      valueEl.textContent = v;
+      group.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      row.hidden = true;
+      editBtn.setAttribute("aria-expanded", "false");
+      editBtn.focus();
+      announce("Patient type set to " + v + ".");
+    });
+    group.appendChild(b);
+  });
+  editBtn.addEventListener("click", () => {
+    const open = row.hidden;
+    row.hidden = !open;
+    editBtn.setAttribute("aria-expanded", String(open));
+    if (open) (group.querySelector('[aria-pressed="true"]') || group.querySelector("button")).focus();
+  });
+
+  const actions = el(`
+    <div class="review-actions">
+      <button type="button" class="btn btn-primary" id="submitReq">Submit appointment request</button>
+      <button type="button" class="btn" id="anotherTime">Choose another time</button>
+      <p class="review-note">This sends a request — the office confirms the final time.</p>
+    </div>`);
+  stage.appendChild(actions);
+  flow.appendChild(stage);
+
+  actions.querySelector("#anotherTime").addEventListener("click", renderTimesStage);
+  actions.querySelector("#submitReq").addEventListener("click", renderFinalStage);
+}
+
+/* ---------------- Stage 4: final ----------------------------------------- */
+function renderFinalStage() {
+  state.stage = "final";
+  const d = state.selectedDate;
+  flow.textContent = "";
+  const stage = el(`<div class="stage"></div>`);
+  stage.appendChild(el(`
+    <div class="final-card" role="status">
+      <div class="tick" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 20 20" focusable="false"><path d="M4 10.5l4 4 8-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h2>Your appointment request was received.</h2>
+      <p>The office will contact you during business hours to confirm.</p>
+      <p>${FAKE_SERVICE} · ${longLabel(d)} · ${state.selectedTime} · ${state.patientType}</p>
+    </div>`));
+  const again = el(`<div class="review-actions" style="margin-top:10px"><button type="button" class="btn" id="startAgain">Start a new request</button></div>`);
+  again.querySelector("#startAgain").addEventListener("click", restart);
+  stage.appendChild(again);
+  flow.appendChild(stage);
+  announce("Request received. The office will contact you during business hours to confirm.");
+}
+
+/* =========================================================================
+   MONTH SHEET
+   ========================================================================= */
+const panel = document.getElementById("panel");
+const sheet = document.getElementById("sheet");
+const backdrop = document.getElementById("sheetBackdrop");
+const flowRegion = document.getElementById("flow");
+let sheetReturnFocus = null;
+
+/*
+  v2 correction 4 — modality synchronized with layout.
+  v2.1 focus-containment fix:
+    (a) The trap computes focusables from elements GENUINELY in sequential
+        keyboard navigation: tabIndex >= 0, not disabled, and rendered.
+        The v2 bug used `button:not([disabled])`, which matched every
+        tabindex="-1" grid cell, so the computed "last" element was one the
+        browser skips — Tab escaped the sheet.
+    (b) While the mobile modal is open, everything outside the sheet — the
+        panel header, the conversation flow, AND the prototype controls
+        outside the panel — is made noninteractive with `inert` (plus
+        aria-hidden). inert is never placed on an ancestor of the sheet.
+    (c) A defensive `focusin` guard (mobile modal only) returns any focus
+        that lands outside the sheet to a valid element inside it.
+    (d) Closing the sheet, or crossing to desktop inline mode while open,
+        removes inert, restores aria-hidden state, and restores normal
+        interaction. Desktop keeps aria-modal="false" and no trap.
+*/
+const mobileSheetMQ = window.matchMedia("(max-width: 699px)");
+
+// Siblings of the sheet (never its ancestors) that go inert in modal mode.
+const OUTSIDE_MODAL = [
+  document.querySelector(".panel-header"),
+  flowRegion,
+  document.querySelector(".proto-controls"),
+].filter(Boolean);
+
+function sheetFocusables() {
+  // Only elements genuinely participating in sequential keyboard
+  // navigation: tabIndex >= 0 (excludes the roving grid's tabindex="-1"
+  // cells), not disabled, and actually rendered.
+  return Array.from(
+    sheet.querySelectorAll("button, [href], input, select, textarea, [tabindex]")
+  ).filter(elx =>
+    elx.tabIndex >= 0 && !elx.disabled && elx.getClientRects().length > 0
+  );
+}
+
+function modalActive() {
+  return panel.classList.contains("sheet-open") && mobileSheetMQ.matches;
+}
+
+function syncSheetModality() {
+  const modal = modalActive();
+  sheet.setAttribute("aria-modal", modal ? "true" : "false");
+  OUTSIDE_MODAL.forEach(elx => {
+    if (modal) {
+      elx.inert = true;
+      elx.setAttribute("aria-hidden", "true");
+    } else {
+      elx.inert = false;
+      elx.removeAttribute("aria-hidden");
+    }
+  });
+}
+mobileSheetMQ.addEventListener("change", syncSheetModality);
+
+function trapSheetFocus(e) {
+  if (e.key !== "Tab" || !modalActive()) return;
+  const focusables = sheetFocusables();
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !sheet.contains(document.activeElement))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !sheet.contains(document.activeElement))) {
+    e.preventDefault(); first.focus();
+  }
+}
+document.addEventListener("keydown", trapSheetFocus, true);
+
+// (c) Defensive guard: if focus is programmatically moved outside the open
+// mobile sheet, bring it back inside. Never runs in desktop inline mode.
+document.addEventListener("focusin", e => {
+  if (!modalActive()) return;
+  if (sheet.contains(e.target)) return;
+  const inside = sheetFocusables();
+  (inside[0] || sheet).focus();
+});
+
+function openSheet() {
+  sheet.hidden = false;
+  panel.classList.add("sheet-open");
+  sheetReturnFocus = document.activeElement;
+  renderMonth();
+  syncSheetModality();
+  const first = sheet.querySelector('.cal-day[tabindex="0"]') || document.getElementById("closeSheet");
+  first.focus();
+  announce("Month calendar opened. " + MONTH_NAMES[state.monthView.m - 1] + " " + state.monthView.y + ".");
+}
+function closeSheet() {
+  panel.classList.remove("sheet-open");
+  syncSheetModality();
+  window.setTimeout(() => { sheet.hidden = true; }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200);
+  if (sheetReturnFocus && document.contains(sheetReturnFocus)) sheetReturnFocus.focus();
+}
+document.getElementById("closeSheet").addEventListener("click", closeSheet);
+backdrop.addEventListener("click", closeSheet);
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && panel.classList.contains("sheet-open")) closeSheet();
+});
+
+function shiftMonth(delta) {
+  let { y, m } = state.monthView;
+  m += delta;
+  if (m < 1) { m = 12; y -= 1; }
+  if (m > 12) { m = 1; y += 1; }
+  // Clamp navigation to the fake data window (July–September 2026).
+  if (y < TODAY.y || (y === TODAY.y && m < TODAY.m)) return;
+  if (y > BOOKING_HORIZON.y || (y === BOOKING_HORIZON.y && m > BOOKING_HORIZON.m)) return;
+  state.monthView = { y, m };
+  renderMonth();
+  announce(MONTH_NAMES[m - 1] + " " + y + ".");
+}
+document.getElementById("prevMonth").addEventListener("click", () => shiftMonth(-1));
+document.getElementById("nextMonth").addEventListener("click", () => shiftMonth(1));
+
+function renderMonth() {
+  const { y, m } = state.monthView;
+  document.getElementById("monthName").textContent = MONTH_NAMES[m - 1] + " " + y;
+  document.getElementById("prevMonth").disabled = (y === TODAY.y && m === TODAY.m);
+  document.getElementById("nextMonth").disabled = (y === BOOKING_HORIZON.y && m === BOOKING_HORIZON.m);
+
+  const grid = document.getElementById("calGrid");
+  grid.textContent = "";
+  DOW_SHORT.forEach(dw => grid.appendChild(el(`<div class="cal-dow" role="columnheader">${dw}</div>`)));
+
+  const firstDow = new Date(y, m - 1, 1).getDay();
+  const daysInMonth = new Date(y, m, 0).getDate();
+  for (let i = 0; i < firstDow; i++) grid.appendChild(el(`<div aria-hidden="true"></div>`));
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const o = { y, m, d };
+    const av = availabilityFor(o);
+    const selected = state.selectedDate && key(y, m, d) === key(state.selectedDate.y, state.selectedDate.m, state.selectedDate.d);
+    // v2 corrections 2+3: cells are NEVER native-disabled — unavailable
+    // dates are aria-disabled and remain focusable, so arrow navigation
+    // can land on them (and announce why) without ever stalling. The
+    // visible word and the aria-label use the same accurate vocabulary.
+    const cell = el(`
+      <button type="button" class="cal-day" role="gridcell" tabindex="-1"
+        aria-pressed="${selected ? "true" : "false"}"
+        aria-label="${longLabel(o)} — ${av.monthLabel}">
+        <span>${d}</span><small>${av.monthLabel}</small>
+      </button>`);
+    if (av.reason !== "open") cell.setAttribute("aria-disabled", "true");
+    cell.addEventListener("click", () => {
+      if (cell.getAttribute("aria-disabled") === "true") return; // not selectable
+      selectDate(o);
+    });
+    grid.appendChild(cell);
+  }
+
+  /*
+    v2 correction 2 — documented keyboard strategy (aria-disabled model):
+    Roving tabindex: exactly one cell is in the Tab order (the selected
+    date if visible, else the first selectable date, else the first cell).
+    Arrow keys move focus SPATIALLY by one cell / one row to ANY cell,
+    including aria-disabled ones — movement is always predictable and can
+    never stall on a disabled neighbor (the v1 bug: July 30 → ArrowRight
+    now lands on July 31 "Full" and announces it). Enter/Space/click on an
+    aria-disabled cell do nothing. focus() is never called on a
+    native-disabled element because none exist in the grid.
+  */
+  const cells = Array.from(grid.querySelectorAll(".cal-day"));
+  const rove = target => {
+    cells.forEach(c => c.setAttribute("tabindex", c === target ? "0" : "-1"));
+  };
+  const initial =
+    cells.find(c => c.getAttribute("aria-pressed") === "true") ||
+    cells.find(c => c.getAttribute("aria-disabled") !== "true") ||
+    cells[0];
+  if (initial) rove(initial);
+  cells.forEach((c, i) => {
+    c.addEventListener("focus", () => rove(c));
+    c.addEventListener("keydown", e => {
+      const jump = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: 7, ArrowUp: -7 }[e.key];
+      if (jump) {
+        e.preventDefault();
+        const next = cells[i + jump];
+        if (next) { rove(next); next.focus(); }
+        return;
+      }
+      if ((e.key === "Enter" || e.key === " ") &&
+          c.getAttribute("aria-disabled") === "true") {
+        e.preventDefault(); // explicit no-op on unavailable dates
+      }
+    });
+  });
+}
+
+/* =========================================================================
+   BOOT
+   ========================================================================= */
+function restart() {
+  state.stage = "date";
+  state.selectedDate = null;
+  state.selectedTime = null;
+  state.patientType = "Not provided";
+  state.monthView = { y: TODAY.y, m: TODAY.m };
+  state.takenConsumed = false;
+  state.errorRetried = false;
+  state.removedSlots = {};
+  closeSheet();
+  renderDateStage();
+  announce("Prototype restarted.");
+}
+document.getElementById("restartBtn").addEventListener("click", restart);
+
+const themeRow = document.getElementById("themeRow");
+Object.keys(THEMES).forEach(name => {
+  const b = el(`<button type="button" data-theme="${name}" aria-pressed="${name === "Mia default"}">${name}</button>`);
+  b.addEventListener("click", () => applyTheme(name));
+  themeRow.appendChild(b);
+});
+
+computeContrastFallbacks();
+renderDateStage();
+})();
+</script>
+</body>
+</html>
