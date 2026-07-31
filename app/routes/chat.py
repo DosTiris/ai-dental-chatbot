@@ -39,14 +39,16 @@ from app.config import OPENAI_API_KEY
 from app.database import SessionLocal
 from app.models import Client, Conversation, Message, ClientFAQ, FAQEvent
 from app.schemas import ChatRequest, ChatResponse
+# B2 (enabled-service owner extraction): get_client_enabled_service_keys
+# now lives in mia_service_library (single owner, Rule 3); chat.py only
+# imports it. DEFAULT_ENABLED_SERVICE_KEYS, SPECIALTY_PRESETS, and
+# normalize_service_text served ONLY that function here and moved with it.
 from app.services.mia_service_library import (
     DentalService,
     find_matching_service,
+    get_client_enabled_service_keys,
     get_service,
-    DEFAULT_ENABLED_SERVICE_KEYS,
     DEFAULT_VISIBLE_SERVICE_BUTTONS,
-    SPECIALTY_PRESETS,
-    normalize_service_text,
     MASTER_DENTAL_SERVICES,
 )
 from app.services.service_policy_mapping import (
@@ -487,38 +489,10 @@ def get_client_setting(client, key: str, default=None):
         return settings.get(key, default)
     return default
 
-def get_client_enabled_service_keys(client) -> List[str]:
-    """
-    Read enabled dental services from clients.settings.
-
-    Priority:
-    1) settings.enabled_services
-    2) settings.practice_specialty preset
-    3) default general dentist services
-
-    This lets each office only offer the services they actually provide.
-    """
-    settings = getattr(client, "settings", None)
-
-    if not isinstance(settings, dict):
-        return DEFAULT_ENABLED_SERVICE_KEYS
-
-    raw_enabled = settings.get("enabled_services")
-
-    if isinstance(raw_enabled, list):
-        cleaned = [
-            str(item).strip()
-            for item in raw_enabled
-            if str(item or "").strip()
-        ]
-
-        if cleaned:
-            return cleaned
-
-    specialty = str(settings.get("practice_specialty") or "general").strip()
-    specialty_key = normalize_service_text(specialty).replace(" ", "_")
-
-    return SPECIALTY_PRESETS.get(specialty_key, DEFAULT_ENABLED_SERVICE_KEYS)
+# get_client_enabled_service_keys MOVED to
+# app/services/mia_service_library.py (Prototype B B2 - enabled-service
+# owner extraction). chat.py imports the single shared owner above;
+# behavior is unchanged (Rule 3: one owner per responsibility).
 
 def get_client_visible_service_keys(client) -> List[str]:
     """

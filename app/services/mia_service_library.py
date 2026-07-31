@@ -850,3 +850,48 @@ def service_is_enabled(service_key: str, enabled_service_keys: Optional[List[str
         return True
 
     return service_key in set(enabled_service_keys)
+
+
+# ---------------------------------------------------------------------------
+# Client-enabled services (Prototype B B2 - enabled-service owner extraction)
+#
+# OWNER OF: reading which master-library services one office/client has
+# enabled. Moved BYTE-FOR-BYTE from app/routes/chat.py so the /chat widget
+# flow and the authenticated Calendar availability-preview route share ONE
+# owner (Rule 3) without a route importing another route (Rule 6). The
+# priority order, malformed-setting behavior, ordering, and returned values
+# (including returning the module constants themselves on the fallback
+# paths) are unchanged.
+# ---------------------------------------------------------------------------
+def get_client_enabled_service_keys(client) -> List[str]:
+    """
+    Read enabled dental services from clients.settings.
+
+    Priority:
+    1) settings.enabled_services
+    2) settings.practice_specialty preset
+    3) default general dentist services
+
+    This lets each office only offer the services they actually provide.
+    """
+    settings = getattr(client, "settings", None)
+
+    if not isinstance(settings, dict):
+        return DEFAULT_ENABLED_SERVICE_KEYS
+
+    raw_enabled = settings.get("enabled_services")
+
+    if isinstance(raw_enabled, list):
+        cleaned = [
+            str(item).strip()
+            for item in raw_enabled
+            if str(item or "").strip()
+        ]
+
+        if cleaned:
+            return cleaned
+
+    specialty = str(settings.get("practice_specialty") or "general").strip()
+    specialty_key = normalize_service_text(specialty).replace(" ", "_")
+
+    return SPECIALTY_PRESETS.get(specialty_key, DEFAULT_ENABLED_SERVICE_KEYS)
