@@ -49,6 +49,9 @@ from app.services.mia_service_library import (
     normalize_service_text,
     MASTER_DENTAL_SERVICES,
 )
+from app.services.service_policy_mapping import (
+    calendar_policy_value_for_master_service,
+)
 from twilio.rest import Client as TwilioClient
 import resend
 
@@ -288,70 +291,12 @@ def pretty_service_label(service_reason: str) -> str:
 # Mia master service library bridge
 # =========================================================
 
-SERVICE_LIBRARY_TO_LEGACY_REASON = {
-    # General
-    "dental_consultation": "appointment request",
-    "new_patient_exam": "cleaning/checkup",
-    "follow_up": "appointment request",
-
-    # Preventive / diagnostic
-    "cleaning_checkup": "cleaning/checkup",
-    "deep_cleaning": "cleaning/checkup",
-    "x_rays": "appointment request",
-    "fluoride": "cleaning/checkup",
-    "sealants": "cleaning/checkup",
-
-    # Urgent / symptoms
-    "tooth_pain": "tooth pain",
-    "broken_tooth": "broken tooth/filling",
-    "swelling_abscess": "tooth pain",
-    "lost_crown_filling": "broken tooth/filling",
-
-    # Restorative
-    "fillings": "broken tooth/filling",
-    "crowns": "crown",
-    "bridges": "crown",
-    "bonding": "cosmetic/whitening",
-
-    # Endodontic
-    "root_canal": "appointment request",
-
-    # Oral surgery
-    "tooth_extraction": "extraction/implant",
-    "wisdom_tooth": "extraction/implant",
-    "bone_graft": "extraction/implant",
-
-    # Cosmetic
-    "teeth_whitening": "cosmetic/whitening",
-    "veneers": "cosmetic/whitening",
-    "smile_makeover": "cosmetic/whitening",
-
-    # Orthodontic
-    "braces": "orthodontics",
-    "invisalign": "orthodontics",
-    "retainers": "orthodontics",
-
-    # Implants / dentures
-    "implants": "extraction/implant",
-    "dentures": "appointment request",
-
-    # Periodontic
-    "gum_disease": "appointment request",
-    "gum_grafting": "appointment request",
-
-    # Pediatric
-    "child_cleaning": "cleaning/checkup",
-    "child_cavity": "broken tooth/filling",
-    "space_maintainer": "appointment request",
-
-    # TMJ / oral medicine
-    "tmj": "tooth pain",
-    "night_guard": "appointment request",
-    "oral_cancer_screening": "appointment request",
-
-    # Sleep
-    "sleep_apnea_appliance": "appointment request",
-}
+# The master-key -> Calendar-policy mapping previously defined here
+# (SERVICE_LIBRARY_TO_LEGACY_REASON, 37 entries) now lives with its single
+# owner: app/services/service_policy_mapping.py (Rule 3). This route only
+# CALLS the lookup; the generic "appointment request" fallback further
+# below stays chat-owned so a future B2 route can instead REJECT unmapped
+# master keys rather than inherit a silent generic bucket.
 
 
 def detect_library_dental_service(
@@ -392,10 +337,11 @@ def detect_library_service_reason(
     if not matched_service:
         return None
 
-    return SERVICE_LIBRARY_TO_LEGACY_REASON.get(
-        matched_service.key,
-        "appointment request",
-    )
+    # Translation is owned by service_policy_mapping (single owner). The
+    # generic fallback is DELIBERATELY chat-owned (locked design): future
+    # B2 must be able to reject an unmapped key instead of inheriting it.
+    mapped = calendar_policy_value_for_master_service(matched_service.key)
+    return mapped or "appointment request"
 
 
 def detect_disabled_library_service_for_client(client: Client, user_text: str) -> Optional[DentalService]:

@@ -5231,3 +5231,95 @@ No data rollback is required because B1 contains no database mutation or migrati
 ## Explicit confirmations
 
 B1 only. No route. No frontend network call. No migration. `/chat` unchanged. No booking or hold mutation. No notification change. No production change. Nothing committed or pushed. B2 not begun.
+---
+
+## Patch - Service-policy mapping-owner extraction (pre-B2 prerequisite)
+
+**Checkpoint status.** Locally implemented and fully regression-tested on the
+isolated branch `feature/service-policy-mapping-owner-extraction`. The source
+parent remains `8c08376e960b1af6310b371a629eef2d3a568e57`. At the time this evidence
+was appended, the working changes were intentionally unstaged and uncommitted;
+the controlled commit gate follows separately.
+
+**Goal.** Extract the master-service-key to Calendar-policy mapping from
+`app/routes/chat.py` into one pure service-owned module so the future B2 route
+can translate public master service keys without importing a route or creating
+a second runtime dictionary. This is an ownership-only change: all 37 existing
+mapping pairs are preserved exactly.
+
+**Files changed.**
+- NEW `app/services/service_policy_mapping.py` - sole live runtime owner of the
+  read-only `MASTER_SERVICE_TO_CALENDAR_POLICY` mapping and the pure
+  `calendar_policy_value_for_master_service()` lookup.
+- MODIFIED `app/routes/chat.py` - imports only the lookup function, removes its
+  private mapping dictionary, and preserves the chat-owned
+  `"appointment request"` fallback.
+- NEW `calendar_tests/test_service_policy_mapping.py` - focused ownership,
+  mapping-integrity, import-boundary, fallback, and compatibility coverage.
+- MODIFIED `CHANGE_REPORT.md` - this append-only verified evidence entry.
+
+**Runtime contract.**
+- The new mapping owner contains exactly 37 key/value pairs and exposes the
+  public mapping through `MappingProxyType`.
+- The lookup is stdlib-only, side-effect-free, trims surrounding whitespace,
+  then performs a case-sensitive exact lookup.
+- Blank, unknown, non-string, unsupported, case-mismatched, and
+  `admin_other` keys return `None`.
+- The mapping owner performs no fallback, route import, HTTP work, database
+  access, booking, hold, intake, notification, or logging behavior.
+- `detect_library_service_reason()` retains its prior observable behavior by
+  applying `mapped or "appointment request"` at the chat caller boundary.
+- `SERVICE_LABELS` and all unrelated chat behavior remain unchanged.
+
+**Database and production changes.** None. No schema change, migration,
+database write, route, frontend network call, tenant-setting change,
+notification change, deployment, or production action. Supabase and production
+were not used. B2 was not begun.
+
+**Recorded deviations.**
+- `[DEV-MAP-OWNER-001]` - `app/routes/chat_rebuild.py` retains a duplicate
+  dictionary as a tracked dead legacy copy. Repository inspection found zero
+  tracked references to `chat_rebuild`; `app/main.py` imports and registers
+  only `app.routes.chat`, and the regression tests import `app.routes.chat`.
+  The dead file was deliberately not modified. Cleanup requires a separate
+  approved scope.
+- `[DEV-PREVIEW-DOC-001]` - one B1 comment in
+  `app/services/availability_preview_service.py` now describes the old route
+  ownership. That forbidden file was not modified; its comment correction is
+  deferred to a separately approved B2 scope.
+
+**Verified file hashes before this report entry.**
+- `app/routes/chat.py`:
+  `fbed7b9249a848e3fbbd513c628d70eb4726b29577f6f5fa6edd191aac38a508`
+- `app/services/service_policy_mapping.py`:
+  `a7d2b92f0b8ec99133a608907e94805222dafdb9113ca3a6ba33902ee4aa58d6`
+- `calendar_tests/test_service_policy_mapping.py`:
+  `7d8496c8cc663b78bca93866d63588d8c6c233c9a7d63e17e9629e76214b70d6`
+
+**Owner-observed local verification.**
+- Python 3.14.2, pytest 9.1.1.
+- `py_compile` on the three implementation files: passed.
+- Focused mapping-owner suite:
+  `32 passed in 3.32s`.
+- Targeted existing chat regressions
+  (`test_service_detail_enrichment.py`, `test_other_reason_validation.py`,
+  and `test_hybrid_capture.py`) under temporary import-only in-memory SQLite:
+  `44 passed, 106 skipped in 2.73s`.
+- Complete Calendar collection against disposable local PostgreSQL 16:
+  `918 tests collected in 2.67s`.
+- Complete Calendar suite against disposable local PostgreSQL 16:
+  `918 passed in 29.02s`.
+- Life-threatening emergency suite:
+  `46 passed, 84 subtests passed in 0.32s`.
+- Git scope checks: passed. Before this report, working changes were exactly the
+  three implementation files. After this report, scope is exactly those three
+  files plus `CHANGE_REPORT.md`.
+- Git whitespace check: passed.
+- The existing disposable PostgreSQL container was returned to its prior
+  stopped state, and the original PowerShell environment variables were
+  restored.
+
+**Rollback.** Before application, an external rollback backup was created at
+`C:\Users\kalva\Desktop\Mia-Service-Policy-Mapping-Owner-Rollback-8c08376-20260731-050927`.
+Before this report append, a separate external `CHANGE_REPORT.md` backup is
+created by the guarded report script. No data rollback is required.
