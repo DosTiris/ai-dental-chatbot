@@ -16,6 +16,7 @@
 #   GET    /admin/calendar/appointments          list appointments in a range
 #   POST   /admin/calendar/appointments/{id}/confirm  pending -> confirmed
 #   POST   /admin/calendar/appointments/{id}/cancel   cancel + free the slot
+#   GET    /admin/calendar/availability-preview  read-only picker preview (B2)
 #
 # Times in requests/responses are ISO-8601. Requests may send local times
 # WITH an offset ("2026-07-16T13:30:00-04:00") or UTC ("...T17:30:00Z");
@@ -27,7 +28,7 @@ from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -39,6 +40,24 @@ from app.services.calendar_admin_auth import authenticate_calendar_admin
 # gate so AppointmentView can never return an arbitrary stored value.
 from app.services.notification_service import sanitize_stored_notify_error
 from app.repositories import appointment_repository
+# B2 (availability preview): the route wires FOUR existing owners and adds
+# no rule of its own (Rule 2) - the B1 request/response contract
+# (app.schemas), the B1 preview builder, the shared enabled-service owner
+# (extracted from chat.py in this same patch), and the master-key ->
+# Calendar-policy translation owner.
+from app.schemas import (
+    AvailabilityPreviewRequest,
+    AvailabilityPreviewResponse,
+)
+from app.services.availability_preview_service import (
+    build_availability_preview,
+)
+from app.services.mia_service_library import (
+    get_client_enabled_service_keys,
+)
+from app.services.service_policy_mapping import (
+    calendar_policy_value_for_master_service,
+)
 from app.services import booking_service
 from app.services.calendar_settings_service import (
     client_now,
@@ -48,6 +67,14 @@ from app.services.calendar_settings_service import (
 )
 
 router = APIRouter(prefix="/admin/calendar", tags=["calendar-admin"])
+
+# B2 (availability preview): the ONE stable 422 detail for every rejected
+# service_key - blank, unknown, case-mismatched, admin_other,
+# tenant-disabled, unmapped, or a direct internal policy value. One wording
+# BY DESIGN (Rule 4: named, not buried): the response never reveals WHICH
+# gate rejected the key, so callers cannot probe the tenant's enabled
+# services or the mapping vocabulary through error differences.
+SERVICE_KEY_NOT_AVAILABLE_DETAIL = "service_key is not available for preview"
 
 
 def get_db():
@@ -407,6 +434,163 @@ def cancel_appointment(
             detail=f"Appointment is {result.detail} and cannot be cancelled.",
         )
     return _appointment_view(result.appointment)
+
+
+# ---------------------------------------------------------------------------
+# B2 - read-only availability preview (Prototype B)
+# ---------------------------------------------------------------------------
+
+def _resolve_preview_service_policy(
+    client: Client, service_key: Optional[str]
+) -> Optional[str]:
+    """
+    Purpose: The B2 route's ONLY service-key gate. Translates one OPTIONAL
+        browser-supplied master-library key into the existing Calendar-
+        policy vocabulary, enforcing the locked order: trim, then the
+        tenant-enabled check (shared owner get_client_enabled_service_keys),
+        then the mapping owner's translation. Runs AFTER authentication and
+        tenant matching only - the caller guarantees that ordering.
+    Inputs:
+        client: the AUTHENTICATED tenant (never the raw requested id).
+        service_key: the raw optional query value; None means the caller
+            requested a generic preview.
+    Returns: None for a generic preview (mapping owner NOT invoked - locked
+        contract), otherwise the translated existing policy value
+        (e.g. "cleaning/checkup") to hand to B1 unchanged.
+    Database effects: none (both owners consulted are pure).
+    Possible failures: HTTPException 422 with the single
+        SERVICE_KEY_NOT_AVAILABLE_DETAIL wording for blank, unknown,
+        case-mismatched, admin_other, tenant-disabled, unmapped, or direct
+        internal-policy-value input. The chat fallback
+        ("appointment" + " request") is DELIBERATELY never applied here:
+        B2 rejects unmapped keys instead of inheriting a generic bucket.
+    """
+    if service_key is None:
+        return None
+
+    trimmed = service_key.strip()
+    if not trimmed:
+        # Blank/whitespace-only is a rejected SUPPLIED key, never silently
+        # downgraded to the generic mode (Rule 4 - no hidden behavior).
+        raise HTTPException(
+            status_code=422, detail=SERVICE_KEY_NOT_AVAILABLE_DETAIL
+        )
+
+    # Tenant-enabled gate FIRST (locked order): a real master key the
+    # office has not enabled must be indistinguishable from an unknown
+    # key. Matching is case-sensitive by design - the shared owner
+    # returns canonical keys and no normalization is performed here.
+    if trimmed not in get_client_enabled_service_keys(client):
+        raise HTTPException(
+            status_code=422, detail=SERVICE_KEY_NOT_AVAILABLE_DETAIL
+        )
+
+    # Translation through the single mapping owner. None covers unknown,
+    # admin_other, case-mismatched, unmapped, and direct internal policy
+    # values (those are never master keys, so they cannot map).
+    policy_value = calendar_policy_value_for_master_service(trimmed)
+    if policy_value is None:
+        raise HTTPException(
+            status_code=422, detail=SERVICE_KEY_NOT_AVAILABLE_DETAIL
+        )
+    return policy_value
+
+
+def _preview_request_error_detail(exc: ValidationError) -> str:
+    """
+    Purpose: Render the B1 request-model's ValidationError as a compact,
+        input-describing 422 detail. Only pydantic's field locations and
+        rule messages are surfaced - never tracebacks, internal types, or
+        tenant data (the messages describe the CALLER'S own input).
+    Inputs:  exc - the ValidationError raised while constructing
+        AvailabilityPreviewRequest from the raw query strings.
+    Returns: "field: message; field: message" in pydantic's deterministic
+        error order.
+    Database effects: none. External effects: none.
+    """
+    parts = []
+    for error in exc.errors():
+        loc = ".".join(str(item) for item in error.get("loc", ()))
+        msg = str(error.get("msg", "invalid value"))
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts)
+
+
+@router.get("/availability-preview", response_model=AvailabilityPreviewResponse)
+def availability_preview(
+    client_id: uuid.UUID = Query(...),
+    start_day: str = Query(
+        ..., description="Raw office-local day, e.g. 2026-07-16"
+    ),
+    end_day: str = Query(
+        ..., description="Raw office-local day, e.g. 2026-07-22"
+    ),
+    selected_day: Optional[str] = Query(
+        default=None, description="Raw office-local day inside the range"
+    ),
+    service_key: Optional[str] = Query(
+        default=None, description="Mia master-library service key"
+    ),
+    db: Session = Depends(get_db),
+    authenticated_client: Client = Depends(require_calendar_admin),
+):
+    """
+    Purpose: B2 - the authenticated, STRICTLY READ-ONLY transport for the
+        B1 availability preview (the visual picker's calendar grid and
+        selected-day slot list). This route only orders the gates and
+        delegates; every rule lives in its existing owner (Rule 2).
+    Locked processing order:
+        1. require_calendar_admin (dependency - runs before this body)
+        2. require_tenant_match
+        3. optional master-service-key validation/translation
+           (_resolve_preview_service_policy)
+        4. existing B1 AvailabilityPreviewRequest construction
+        5. existing B1 build_availability_preview call
+        6. existing B1 AvailabilityPreviewResponse returned unchanged
+    Inputs: X-Admin-Key header (per-office credential); client_id (UUID);
+        start_day / end_day / selected_day as RAW office-local YYYY-MM-DD
+        STRINGS - deliberately NOT FastAPI date parameters, so date
+        semantics are revealed only AFTER authentication and tenant
+        matching (a foreign tenant with malformed dates gets the existing
+        404, never a 422); service_key as an OPTIONAL master-library key
+        (absent = generic preview; the mapping owner is not consulted).
+    Returns: the B1 AvailabilityPreviewResponse unchanged - day states
+        only from the locked past/open/full/unavailable vocabulary, no
+        slot_id, no daily counts, no patient/hold/conversation/
+        notification data. booking_enabled=false is INFORMATIONAL: the
+        preview still renders and the tenant setting is never altered.
+    Database effects: SELECT only - the authorization owner's credential
+        SELECT plus exactly ONE appointment_slots range SELECT inside the
+        B1 service. No INSERT/UPDATE/DELETE, no SELECT FOR UPDATE, no
+        commit/flush, no hold placement or release (an expired hold may be
+        INTERPRETED as available, but its row is left byte-untouched).
+    Possible failures: 401 "Invalid admin key." for every credential
+        failure (single owner's rule); 404 "Client not found." on tenant
+        mismatch - indistinguishable from a nonexistent client and issued
+        BEFORE any parameter semantics; 422 for invalid dates/ranges/
+        selected_day (B1 model rules, surfaced verbatim) and for every
+        rejected service_key (single SERVICE_KEY_NOT_AVAILABLE_DETAIL
+        wording). Database errors propagate (Rule 16 - fail visibly).
+    """
+    client = require_tenant_match(client_id, authenticated_client)
+    policy_value = _resolve_preview_service_policy(client, service_key)
+    try:
+        # The B1 model owns EVERY date rule (valid ISO date, ordering, the
+        # 31-day cap, selected_day membership) - nothing is re-implemented
+        # here, and raw strings enter validation only past the two gates.
+        request = AvailabilityPreviewRequest(
+            start_day=start_day,
+            end_day=end_day,
+            selected_day=selected_day,
+            service_key=policy_value,
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=_preview_request_error_detail(exc)
+        )
+    return build_availability_preview(
+        db, client, request, datetime.now(ZoneInfo("UTC"))
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -76,22 +76,22 @@ class AvailabilityPreviewRequest(BaseModel):
             date never reaches the service.
         selected_day: optional; when present the response also carries that
             day's bookable slots. Must lie inside [start_day, end_day].
-        service_key: REQUIRED and treated as an OPAQUE, non-blank value in
-            the EXISTING Calendar policy vocabulary (the values carried by
-            slot rows and compared by evaluate_slot_policy, e.g.
-            "cleaning/checkup"). B1 owns NO vocabulary validation and NO
-            master-key translation: there is currently no importable owner
-            of the Calendar policy vocabulary (its only definition lives in
-            a route module). B2 remains blocked until a separately approved
-            extraction provides one service-owned master-key-to-policy
-            mapping.
+        service_key: OPTIONAL (approved B2 request-contract expansion).
+            None - the default - means a GENERIC preview: the value is
+            passed unchanged to the policy owner, which then applies no
+            service filter. When supplied, it is an OPAQUE, non-blank
+            value in the EXISTING Calendar policy vocabulary (the values
+            carried by slot rows and compared by evaluate_slot_policy,
+            e.g. "cleaning/checkup"). The B2 route owns master-key
+            validation and translation BEFORE constructing this model;
+            blank and whitespace-only input remains rejected here.
     Possible failures: pydantic.ValidationError on any violated rule below —
         the caller (a future B2 route) surfaces it; nothing is guessed.
     """
     start_day: date
     end_day: date
     selected_day: Optional[date] = None
-    service_key: str
+    service_key: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_range_rules(self):
@@ -109,7 +109,7 @@ class AvailabilityPreviewRequest(BaseModel):
             self.start_day <= self.selected_day <= self.end_day
         ):
             raise ValueError("selected_day must lie inside start_day..end_day")
-        if not self.service_key.strip():
+        if self.service_key is not None and not self.service_key.strip():
             raise ValueError("service_key is required and must not be blank")
         return self
 

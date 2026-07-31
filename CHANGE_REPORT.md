@@ -5323,3 +5323,133 @@ were not used. B2 was not begun.
 `C:\Users\kalva\Desktop\Mia-Service-Policy-Mapping-Owner-Rollback-8c08376-20260731-050927`.
 Before this report append, a separate external `CHANGE_REPORT.md` backup is
 created by the guarded report script. No data rollback is required.
+
+## Patch - Calendar availability-preview B2 route and shared service-owner closure
+
+**Checkpoint status.** Locally implemented and fully regression-tested on the
+isolated branch `feature/calendar-picker-prototype-b-b2` from source commit
+`d7be8c0040b6b6ca2b01691a842b6419c10053fb`. The implementation and this
+documentation closure remain intentionally unstaged and uncommitted. Closure
+evidence was recorded locally at `2026-07-31 15:09:23 -04:00`.
+
+**Goal.** Add the authenticated, tenant-isolated, read-only transport for
+Prototype B availability preview while preserving the existing B1 service and
+policy owners. B2 does not create a patient booking flow and does not use the
+`/chat` endpoint.
+
+**Endpoint.**
+- `GET /admin/calendar/availability-preview`
+- Existing `X-Admin-Key` Calendar credential authentication.
+- Required query inputs: `client_id`, `start_day`, and `end_day`.
+- Optional query inputs: `selected_day` and master-library `service_key`.
+- Date strings remain raw through authentication and tenant matching, so an
+  authenticated foreign tenant plus malformed dates remains the existing 404.
+- Successful responses return the existing B1 response contract unchanged.
+
+**Locked processing order.**
+1. Existing `require_calendar_admin` authentication.
+2. Existing `require_tenant_match` isolation.
+3. Optional master-service validation and translation.
+4. Existing `AvailabilityPreviewRequest` model construction.
+5. Existing `build_availability_preview` read-only service.
+6. Existing B1 response returned unchanged.
+
+**Shared enabled-service owner.**
+- `get_client_enabled_service_keys(client)` moved from
+  `app/routes/chat.py` to `app/services/mia_service_library.py` without a
+  behavior change.
+- Both `chat.py` and `calendar.py` import the same service-owned helper.
+- Explicit tenant lists, specialty presets, general defaults, malformed
+  settings behavior, order, and widget behavior remain preserved.
+- No duplicate live helper remains in either route.
+
+**Service-key contract.**
+- A missing `service_key` is generic preview mode and passes actual `None`
+  into B1.
+- Generic mode does not invoke the mapping owner and does not substitute the
+  chat fallback.
+- A supplied key is trimmed, checked against the authenticated tenant's enabled
+  master keys, then translated through
+  `calendar_policy_value_for_master_service()`.
+- Matching remains case-sensitive.
+- Blank, unknown, `admin_other`, tenant-disabled, and unmapped keys return
+  HTTP 422 with the single detail
+  `service_key is not available for preview`.
+- Internal Calendar policy values are not accepted directly.
+- The chat-owned `"appointment request"` fallback remains confined to chat
+  behavior and is not used by B2.
+
+**Minimal Option A request-contract expansion.**
+- `AvailabilityPreviewRequest.service_key` is now
+  `Optional[str] = None`.
+- Omitted and explicit `None` values are accepted for generic preview.
+- Supplied blank or whitespace-only values remain rejected.
+- Existing nonblank service values and all date, range, selected-day, response,
+  and policy rules remain unchanged.
+- No `model_construct()`, placeholder value, route-local duplicate model, or
+  hidden post-validation overwrite is used.
+
+**Files changed.**
+- MODIFIED `app/services/mia_service_library.py`
+- MODIFIED `app/routes/chat.py`
+- MODIFIED `app/schemas.py`
+- MODIFIED `app/routes/calendar.py`
+- NEW `calendar_tests/test_client_enabled_services.py`
+- NEW `calendar_tests/test_availability_preview_route.py`
+- MODIFIED `CHANGE_REPORT.md` - this append-only closure entry
+
+**Read-only and production boundary.**
+- The route performs existing authentication/client reads and the existing B1
+  appointment-slot range SELECT.
+- No INSERT, UPDATE, DELETE, row lock, hold mutation, appointment mutation,
+  conversation/message creation, notification attempt, provider call,
+  migration, frontend change, tenant-setting change, or production action was
+  introduced.
+- Expired holds may be interpreted as eligible without mutating the stored row.
+- Booking-disabled tenants receive informational preview data only.
+- Supabase and production were not used.
+
+**Verified implementation file hashes.**
+- `app/routes/calendar.py`:
+  `ca53490770fca644feaf845f6e0b718c5ee04399b2e19ef3f3d2f175df4ed644`
+- `app/routes/chat.py`:
+  `ae9a0eaf5ff1d56c90bfe692a20eb0dc0914da76b8caf83e6fe3f9bcdb20f3fe`
+- `app/schemas.py`:
+  `b7b9c4d2cb20973e831b936e257f188ac22ced5a439f694a8876c00b89e8a56d`
+- `app/services/mia_service_library.py`:
+  `8e17e7a5f44fd107ab508becc3e5f286427c45d8161468a7f979fb5b27eac913`
+- `calendar_tests/test_availability_preview_route.py`:
+  `1a269607bd461d5fa80c128e5f4b95482ba60aa34af2fd5f5fa9b1c09ee5094e`
+- `calendar_tests/test_client_enabled_services.py`:
+  `8016ab8260724bafa9d3f4fab9a9b3343b2de6915a3f18cb1376234863e67132`
+
+**Owner-observed local verification.**
+- Python 3.14.2.
+- Python compilation of all six B2 Python files: passed.
+- Focused B2 collection: `189 tests collected in 21.49s`.
+- Focused B2 PostgreSQL regression set:
+  `189 passed in 8.04s`.
+- Complete Calendar collection:
+  `986 tests collected in 6.35s`.
+- Complete Calendar suite against a new isolated PostgreSQL 16 container:
+  `986 passed in 37.80s`.
+- Life-threatening emergency suite:
+  `46 passed, 84 subtests passed in 0.39s`.
+- Both test gates reverified the exact six implementation files and all six
+  audited SHA-256 values after execution.
+- Git whitespace checks passed.
+- Working changes remained unstaged.
+- Each isolated PostgreSQL test container was removed after its run.
+- The existing `mia-calendar-test-db` container was untouched.
+- Original PowerShell environment variables were restored.
+
+**Rollback.**
+- Pre-application implementation rollback backup:
+  `C:\Users\kalva\Desktop\Mia-Calendar-Prototype-B-B2-Rollback-d7be8c0-20260731-144255`
+- Pre-closure `CHANGE_REPORT.md` backup:
+  `C:\Users\kalva\Desktop\Mia-Calendar-Prototype-B-B2-Change-Report-Backup-d7be8c0-20260731-150923`
+- No database or production rollback is required.
+
+**Current authorization boundary.** Nothing has been committed, pushed, merged,
+deployed, or applied to production. Those actions require separate explicit
+authorization.
