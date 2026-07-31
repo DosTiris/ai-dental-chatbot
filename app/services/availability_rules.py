@@ -148,6 +148,59 @@ def filter_bookable_slots(
          time preference, and service compatibility — DELEGATED to
          evaluate_slot_policy, the single pure owner (Patch 2C), so display,
          hold creation, and finalization all apply identical rule text.
+
+    Prototype B B1: the rule text above now lives in list_bookable_slots
+    (the uncapped owner). This function is a thin cap over that owner —
+    same rules, same ordering, same public behavior as before the split.
+    """
+    bookable = list_bookable_slots(
+        slots, now_utc, settings, time_preference, service_key
+    )
+    return bookable[: settings.max_offered_slots]
+
+
+def list_bookable_slots(
+    slots: Sequence,
+    now_utc: datetime,
+    settings: CalendarSettings,
+    time_preference: str,
+    service_key: Optional[str] = None,
+) -> List:
+    """
+    Purpose: THE single pure owner of "every slot a patient could book right
+             now" — identical rules to filter_bookable_slots but UNCAPPED
+             (Prototype B B1). filter_bookable_slots delegates here and then
+             applies max_offered_slots, so the conversational offer cap and
+             the full-day preview can never drift apart (Rule 3).
+    Inputs:
+        slots:            slot objects (ORM rows or test stubs) with
+                          status/start_datetime/held_until/service_key attrs.
+        now_utc:          current aware UTC time (naive input is normalized
+                          via ensure_utc, matching the previous behavior).
+        settings:         the client's CalendarSettings.
+        time_preference:  PREF_* bucket from appointment_intent. Callers
+                          wanting the whole day pass PREF_ANY.
+        service_key:      the patient's requested service, if known.
+    Returns: EVERY bookable slot, soonest first, uncapped. Ordering is
+             deterministic: sorted by aware-UTC start_datetime; Python's
+             stable sort preserves the caller-supplied order for equal
+             starts (for repository rows that is the query's start-ASC
+             order — unchanged from the pre-B1 behavior).
+    Database effects: none (pure — slots and holds are never mutated).
+    Possible failures: none — bad rows are excluded, never guessed at.
+
+    A slot is bookable only when ALL of these hold (rule text moved intact
+    from filter_bookable_slots — semantics unchanged):
+      1. status is "available", OR "held" but the hold expired (lazy reclaim)
+         — availability-STATUS rules, owned here because they are context-
+         dependent (hold placement may retake your own hold; finalization
+         requires your own active hold).
+      2-5. The four booking-POLICY rules — minimum notice (exact elapsed
+         time, also rejecting past slots), the Patch 2B local-date horizon,
+         time preference, and service compatibility — DELEGATED to
+         evaluate_slot_policy, the single pure owner (Patch 2C), so display,
+         hold creation, finalization, and the B1 preview all apply identical
+         rule text.
     """
     normalized_now = ensure_utc(now_utc)
 
@@ -169,4 +222,4 @@ def filter_bookable_slots(
         bookable.append(slot)
 
     bookable.sort(key=lambda s: ensure_utc(s.start_datetime))
-    return bookable[: settings.max_offered_slots]
+    return bookable

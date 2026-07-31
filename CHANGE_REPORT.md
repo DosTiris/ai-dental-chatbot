@@ -5153,3 +5153,81 @@ the closure evidence. Production booking remains frozen for all tenants.
 Remaining work is operational: preserve the release record, prepare the
 credential/onboarding runbook, and deliberately onboard one willing
 single-location office under a controlled pilot gate.
+
+# Prototype B B1 - Read-only availability preview (revision v2)
+
+Base commit: `6d16f05d2012ce0efe59f32b7202f3b0499f3783`
+Branch: `feature/calendar-picker-prototype-b-b1`
+Stage: B1 only. B2, B3, and B4 are not implemented. B2 remains blocked on a separately approved, service-owned master-key-to-Calendar-policy mapping extraction.
+
+## Goal
+
+Add the read-only backend foundations for the visual Calendar picker without adding a route, frontend network call, database migration, `/chat` change, booking or hold mutation, notification behavior, or production change.
+
+## Files changed
+
+- `app/services/availability_rules.py` - adds the pure uncapped `list_bookable_slots` owner. Existing `filter_bookable_slots` delegates to it and preserves the current capped behavior and ordering used by Mia.
+- `app/schemas.py` - adds the enforced B1 preview request/response contract. Day state is restricted to `open`, `full`, `unavailable`, and `past`; `closed` is impossible. Slot and generated timestamps must be aware UTC values.
+- `app/services/availability_preview_service.py` - new read-only preview owner using one existing `list_slots_between` range SELECT, office-local bucketing, pure policy evaluation, deterministic internal ordering, and no emitted `slot_id`.
+- `calendar_tests/test_availability_preview.py` - new focused, contract, DST, ordering, policy, query-count, and read-only tests.
+- `CHANGE_REPORT.md` - this verified B1 record.
+
+`calendar_tests/test_availability_rules.py` remains unchanged and supplies the existing regression suite.
+
+## Service-key ownership
+
+B1 treats `service_key` as an opaque, nonblank existing Calendar-policy value and passes it unchanged to the established policy owner. B1 does not validate master-library keys, import `chat.py`, or duplicate the master-key-to-legacy-policy mapping.
+
+Before B2 begins, one separately approved service-owned mapping owner must be extracted so a public request can translate master service keys to existing Calendar-policy values without creating a second vocabulary owner.
+
+## Database and behavior boundaries
+
+- No migration or schema change.
+- Exactly one existing SELECT range query per preview.
+- No commit, flush, add, delete, hold takeover, appointment creation, conversation/message creation, or notification call.
+- `/chat`, booking conversation flow, admin routes, portal behavior, and production settings are unchanged.
+- Production booking remains paused and untouched.
+
+## Verified local test evidence
+
+Focused non-database gate, using temporary in-memory SQLite only to satisfy imports:
+
+- Python compilation: passed.
+- `calendar_tests/test_availability_preview.py` plus `calendar_tests/test_availability_rules.py`: **76 passed, 1 skipped in 1.00s**.
+- The skipped case was the explicitly database-backed preview proof.
+- Repository scope remained limited to the approved four implementation files.
+- Temporary process environment variables were restored.
+
+Disposable local PostgreSQL gate:
+
+- Database: local Docker container `mia-calendar-test-db` on `localhost:5433`; Supabase and production were not used.
+- Database-backed B1 read-only proof: **1 passed in 0.99s**.
+- Full Calendar collection: **886 tests collected in 3.12s**.
+- Complete `calendar_tests` suite: **886 passed in 28.91s**.
+- Working changes remained limited to the approved implementation files.
+- Nothing was staged, committed, or pushed.
+- The pre-existing test container was returned to its prior stopped state.
+- Original PowerShell environment variables were restored.
+
+## Known limitation
+
+There is no B1 route, so FastAPI HTTP serialization, authentication, and tenant-gate behavior are intentionally deferred. B2 must not begin until the mapping-owner extraction is separately designed and approved.
+
+## Rollback
+
+Delete:
+
+- `app/services/availability_preview_service.py`
+- `calendar_tests/test_availability_preview.py`
+
+Restore from base commit:
+
+- `app/services/availability_rules.py`
+- `app/schemas.py`
+- `CHANGE_REPORT.md`
+
+No data rollback is required because B1 contains no database mutation or migration.
+
+## Explicit confirmations
+
+B1 only. No route. No frontend network call. No migration. `/chat` unchanged. No booking or hold mutation. No notification change. No production change. Nothing committed or pushed. B2 not begun.
