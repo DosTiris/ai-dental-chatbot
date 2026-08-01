@@ -5453,3 +5453,83 @@ policy owners. B2 does not create a patient booking flow and does not use the
 **Current authorization boundary.** Nothing has been committed, pushed, merged,
 deployed, or applied to production. Those actions require separate explicit
 authorization.
+
+## Patch - Calendar picker Prototype B B3 read-only review UI closure
+
+**Closed:** 2026-07-31
+**Source branch:** `feature/calendar-picker-prototype-b-b2`
+**Source HEAD before the B3 commit:** `42f4ed2f154dbcc7952a2114d795162f514513b4`
+**Status:** implementation complete locally; tested; uncommitted; undeployed
+
+### Scope
+
+Prototype B adds a standalone, read-only development/staging Calendar review
+page and its deterministic Node test harness:
+
+- `static/admin/calendar-picker-prototype-b.html`
+- `tests/test_calendar_picker_prototype_b.js`
+
+No existing implementation file was modified. Prototype A remained frozen at
+SHA-256
+`16b2f76c62ae377ea7dadbf21a965640ff7e828934197b4eb91e32c93e1e7570`.
+
+### Locked behavior
+
+- Uses only `GET /admin/calendar/availability-preview`.
+- Keeps the disposable test credential memory-only and sends it only through
+  the `X-Admin-Key` header.
+- Makes one seven-day range request, a lazy one-range month request of no more
+  than 31 days, and one same-range `selected_day` request when an available
+  day is selected.
+- Accepts only `open`, `full`, `unavailable`, and `past`.
+- Does not synthesize `closed`, display daily slot counts, use `slot_id`,
+  call `/chat`, or perform a write-capable request.
+- Slot selection is preview-only and creates no hold, booking, notification,
+  conversation, or database mutation.
+- Production booking remains paused.
+
+### Owner-observed focused JavaScript verification
+
+Node.js `v24.12.0`:
+
+- B3 JavaScript: `81 passed, 0 failed`.
+- Existing Calendar portal JavaScript: `37 passed, 0 failed`.
+- Existing map-action JavaScript: `18 passed, 0 failed`.
+- The map-action suite's legacy repository-root `chat.html` assumption was
+  satisfied by a temporary hash-verified copy of `static/chat.html`; the
+  copy was removed after the test and the real file hash was preserved.
+
+Evidence:
+`C:\Users\kalva\Desktop\Mia-Calendar-Prototype-B-B3-Focused-Tests-42f4ed2-20260731-191800`
+
+### Owner-observed full regression verification
+
+Python `3.14.2` with isolated PostgreSQL 16:
+
+- Complete Calendar collection: `986 tests collected in 4.01s`.
+- Complete Calendar regression: `986 passed in 42.42s`.
+- Life-threatening emergency regression:
+  `46 passed, 84 subtests passed in 0.31s`.
+
+The disposable PostgreSQL container was removed, the existing
+`mia-calendar-test-db` container was untouched, and the original PowerShell
+database environment was restored. Supabase and the production database were
+not used.
+
+Evidence:
+`C:\Users\kalva\Desktop\Mia-Calendar-Prototype-B-B3-Full-Regression-42f4ed2-20260731-192314`
+
+### Final local file hashes
+
+- `static/admin/calendar-picker-prototype-b.html`:
+  `96898f746eda75d2d6eec27555f152ba85280c8fb42db557cd455775a9c42354`
+- `tests/test_calendar_picker_prototype_b.js`:
+  `89c12f01fc0e1042ec54a8eaa358e937c725e2dfec89a999e317c7b0383d50f1`
+- Frozen Prototype A:
+  `16b2f76c62ae377ea7dadbf21a965640ff7e828934197b4eb91e32c93e1e7570`
+
+### Safety closure
+
+Nothing was staged, committed, pushed, merged, or deployed during
+implementation or verification. No migration ran, booking was not enabled,
+and production was not changed.

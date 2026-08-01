@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mia — Availability Preview Review (Prototype B — B3, development only)</title>
+<!--
+  static/admin/calendar-picker-prototype-b.html
+
+  MIA CALENDAR PROTOTYPE B — B3: STANDALONE READ-ONLY REVIEW TOOL
+  ===============================================================
+
+  A development/staging page that lets the developer inspect the REAL B1/B2
+  availability behavior through the one authenticated read-only endpoint:
+
+      GET /admin/calendar/availability-preview
+
+  This page is NOT a patient booking flow, NOT an office portal, and NOT a
+  production feature. Nothing on this page can create or change server state:
+  it issues only read requests, and a click on a rendered time is a visual
+  selection with no network activity at all.
+
+  Source checkpoint: branch feature/calendar-picker-prototype-b-b2,
+  B2 HEAD 42f4ed2f154dbcc7952a2114d795162f514513b4.
+
+  Visual owners (per the approved B3 source review):
+    - Prototype A (static/admin/calendar-picker-prototype.html, frozen)
+      owns the Mia CSS-variable theme and the week/month grid presentation.
+      Its retired fifth day state is deliberately NOT ported: the locked
+      server vocabulary is exactly open / full / unavailable / past.
+    - static/admin/calendar-portal.html owns the safe admin rendering
+      conventions: every server value renders through textContent, and the
+      credential rides ONLY in the X-Admin-Key request header.
+
+  Credential model (STRICTER than the portal, by frozen design):
+    - memory-only for the current page lifetime; the password field itself is
+      the single holder. No browser storage of any kind, no cookies, no
+      credential in a URL, no echo into page text, errors, or diagnostics.
+    - Refreshing or reopening the page always requires re-entry.
+
+  Test owner: tests/test_calendar_picker_prototype_b.js (Node vm harness,
+  same scaffolding family as tests/test_calendar_portal.js). The harness
+  executes THIS file's single inline script, so every function below is a
+  top-level declaration the tests can drive directly.
+-->
+<style>
+  :root {
+    /* ---- Mia theme variables (Prototype A owner; injectable per office) - */
+    --mia-primary: #2563eb;
+    --mia-primary-hover: #1d4ed8;
+    --mia-background: #0f172a;
+    --mia-surface: #111827;
+    --mia-text: #f3f6fb;
+    --mia-muted: #94a3b8;
+    --mia-border: #253047;
+    --mia-success: #22c55e;
+    --mia-error: #f87171;
+    --mia-on-primary: #ffffff;
+
+    /* ---- B3-internal tokens (all derived from the theme) ---------------- */
+    --b3-radius: 14px;
+    --b3-radius-sm: 10px;
+    --b3-tint: color-mix(in srgb, var(--mia-primary) 12%, var(--mia-surface));
+    --b3-tint-strong: color-mix(in srgb, var(--mia-primary) 22%, var(--mia-surface));
+    --b3-line: color-mix(in srgb, var(--mia-border) 82%, white 6%);
+    --b3-warn-bg: #7c2d12;
+    --b3-warn-ink: #ffedd5;
+    --b3-warn-edge: #fb923c;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--mia-background);
+    color: var(--mia-text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-bottom: 48px;
+  }
+
+  /* ---- Development banner: permanent, unmistakable ---------------------- */
+  .dev-banner {
+    background: var(--b3-warn-bg);
+    color: var(--b3-warn-ink);
+    border-bottom: 3px solid var(--b3-warn-edge);
+    padding: 12px 18px;
+    font-weight: 700;
+    letter-spacing: .01em;
+    text-align: center;
+  }
+
+  .wrap { max-width: 880px; margin: 0 auto; padding: 18px; }
+
+  header.page-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 6px 0 14px; }
+  header.page-head h1 { font-size: 22px; margin: 0; }
+  .dev-badge {
+    background: var(--b3-warn-edge); color: #431407;
+    border-radius: 999px; padding: 2px 12px; font-size: 12px; font-weight: 800;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+
+  .panel {
+    background: var(--mia-surface);
+    border: 1px solid var(--b3-line);
+    border-radius: var(--b3-radius);
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+
+  /* ---- Setup form ------------------------------------------------------- */
+  .field { margin: 0 0 12px; }
+  .field label { display: block; font-weight: 600; margin-bottom: 4px; }
+  .field .hint { color: var(--mia-muted); font-size: 13px; margin: 4px 0 0; }
+  .field input {
+    width: 100%; padding: 9px 11px; font: inherit;
+    color: var(--mia-text); background: var(--b3-tint);
+    border: 1px solid var(--b3-line); border-radius: var(--b3-radius-sm);
+  }
+  .field-row { display: flex; gap: 10px; align-items: flex-end; }
+  .field-row .field { flex: 1; margin-bottom: 0; }
+
+  button {
+    font: inherit; cursor: pointer;
+    border-radius: var(--b3-radius-sm);
+    border: 1px solid var(--b3-line);
+    background: var(--b3-tint); color: var(--mia-text);
+    padding: 9px 14px;
+  }
+  button.primary {
+    background: var(--mia-primary); border-color: var(--mia-primary);
+    color: var(--mia-on-primary); font-weight: 700;
+  }
+  button.primary:hover { background: var(--mia-primary-hover); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible {
+    outline: 3px solid var(--mia-primary); outline-offset: 2px;
+  }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+  /* ---- Status / errors / developer details ------------------------------ */
+  .status-line { color: var(--mia-muted); min-height: 1.4em; margin: 10px 0 0; }
+  .error-text {
+    color: var(--mia-error);
+    border: 1px solid color-mix(in srgb, var(--mia-error) 45%, transparent);
+    background: color-mix(in srgb, var(--mia-error) 12%, var(--mia-surface));
+    border-radius: var(--b3-radius-sm);
+    padding: 10px 12px; margin: 10px 0 0;
+  }
+  .dev-details {
+    color: var(--mia-muted); font-size: 12.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 8px 0 0; word-break: break-all;
+  }
+  .hidden { display: none !important; }
+
+  /* ---- Result header ---------------------------------------------------- */
+  .practice-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .practice-line h2 { margin: 0; font-size: 18px; }
+  .paused-badge {
+    background: color-mix(in srgb, var(--b3-warn-edge) 22%, var(--mia-surface));
+    color: var(--b3-warn-edge); border: 1px solid var(--b3-warn-edge);
+    border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700;
+  }
+  .range-line { color: var(--mia-muted); margin: 6px 0 0; }
+
+  /* ---- Day grids (Prototype A presentation family) ---------------------- */
+  .grid-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 10px; }
+  .month-nav { display: flex; align-items: center; gap: 8px; }
+  .month-name { font-weight: 700; min-width: 130px; text-align: center; }
+
+  .day-grid { display: grid; gap: 8px; margin-top: 8px; }
+  .day-grid.week-mode { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .day-grid.month-mode { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  @media (max-width: 640px) {
+    .day-grid.week-mode { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+
+  .cal-dow { color: var(--mia-muted); font-size: 12px; text-align: center; padding: 2px 0; }
+  .cal-blank { min-height: 1px; }
+
+  .day-chip {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 8px 4px; min-height: 66px;
+    background: var(--b3-tint); text-align: center;
+  }
+  .day-chip .dow { font-size: 11px; color: var(--mia-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .day-chip .num { font-size: 17px; font-weight: 700; }
+  .day-chip .day-state-label { font-size: 11px; font-weight: 600; }
+
+  /* Non-color-only: every state also carries its text label above; the
+     colors below are reinforcement, never the sole signal. */
+  .day-chip.state-open { border-color: var(--mia-success); }
+  .day-chip.state-open .day-state-label { color: var(--mia-success); }
+  .day-chip.state-full .day-state-label { color: var(--b3-warn-edge); }
+  .day-chip.state-unavailable, .day-chip.state-past { opacity: .6; }
+  .day-chip.state-unavailable .day-state-label,
+  .day-chip.state-past .day-state-label { color: var(--mia-muted); }
+  .day-chip[aria-pressed="true"] {
+    background: var(--b3-tint-strong);
+    outline: 2px solid var(--mia-primary); outline-offset: 1px;
+  }
+
+  /* ---- Slots ------------------------------------------------------------ */
+  .slots-panel h3 { margin: 0 0 6px; font-size: 16px; }
+  .tod-heading { color: var(--mia-muted); font-size: 13px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 6px; }
+  .slot-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .slot-btn[aria-pressed="true"] {
+    background: var(--mia-primary); border-color: var(--mia-primary);
+    color: var(--mia-on-primary); font-weight: 700;
+  }
+  .none-note { color: var(--mia-muted); }
+
+  /* ---- Read-only selected-slot summary ---------------------------------- */
+  .slot-summary { border-left: 4px solid var(--mia-primary); }
+  .slot-summary h3 { margin: 0 0 6px; font-size: 16px; }
+  .slot-summary p { margin: 3px 0; }
+  .preview-lock {
+    margin-top: 10px !important; font-weight: 700;
+    color: var(--b3-warn-edge);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="dev-banner" id="devBanner" role="note">
+  Development review only. Use a disposable test credential. Never enter a production credential.
+</div>
+
+<div class="wrap">
+  <header class="page-head">
+    <h1>Mia — Availability Preview Review</h1>
+    <span class="dev-badge">Prototype B · B3 · dev tool</span>
+  </header>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Setup: no request happens until "Load 7-day preview" is pressed.   -->
+  <!-- ------------------------------------------------------------------ -->
+  <section class="panel" aria-label="Review setup">
+    <div class="field">
+      <label for="apiBaseInput">API base URL</label>
+      <input id="apiBaseInput" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Leave blank for same-origin (recommended when served by the app)">
+      <p class="hint">Blank uses this page's own origin. When the page is opened
+        from a local file, enter an explicit local or staging origin such as
+        http://127.0.0.1:8000 — never a production origin.</p>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="credentialInput">Disposable test credential</label>
+        <input id="credentialInput" type="password" autocomplete="off"
+               spellcheck="false" placeholder="Disposable test office key only">
+      </div>
+      <button id="clearCredentialBtn" type="button">Clear credential</button>
+    </div>
+    <p class="hint">Held in memory for this page only. It is sent solely as the
+      X-Admin-Key request header, never shown, never placed in a URL, and never
+      saved anywhere. Refreshing the page always requires re-entry.</p>
+
+    <div class="field">
+      <label for="clientIdInput">Client UUID</label>
+      <input id="clientIdInput" type="text" autocomplete="off" spellcheck="false"
+             placeholder="The office's client UUID">
+    </div>
+
+    <div class="field">
+      <label for="serviceKeyInput">Master service key (optional)</label>
+      <input id="serviceKeyInput" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Leave blank for the generic preview">
+      <p class="hint">A master Mia service key exactly as configured for this
+        office (for example: cleaning_checkup). Keys are case-sensitive.
+        Blank means the generic preview.</p>
+    </div>
+
+    <div class="field">
+      <label for="startDateInput">Starting local date</label>
+      <input id="startDateInput" type="date" autocomplete="off">
+      <p class="hint">An office-local calendar day (YYYY-MM-DD). The 7-day
+        preview covers this day plus the six days after it.</p>
+    </div>
+
+    <div class="actions">
+      <button id="loadWeekBtn" type="button" class="primary">Load 7-day preview</button>
+    </div>
+
+    <p class="status-line" id="statusLive" aria-live="polite"></p>
+    <p class="error-text hidden" id="errorState" role="alert"></p>
+    <p class="dev-details" id="devDetails"></p>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Results: rendered ONLY from server-returned values.                -->
+  <!-- ------------------------------------------------------------------ -->
+  <section class="panel hidden" id="resultView" aria-label="Preview results">
+    <div class="practice-line">
+      <h2 id="practiceName"></h2>
+      <span class="paused-badge hidden" id="bookingPausedBadge">Live booking is paused — read-only preview</span>
+    </div>
+    <p class="range-line" id="rangeLabel"></p>
+
+    <div class="grid-tools">
+      <span id="viewModeLabel" aria-hidden="true"></span>
+      <button id="openMonthBtn" type="button">Open month view</button>
+      <div class="month-nav hidden" id="monthNav">
+        <button id="prevMonthBtn" type="button" aria-label="Previous month">‹</button>
+        <span class="month-name" id="monthNameLabel"></span>
+        <button id="nextMonthBtn" type="button" aria-label="Next month">›</button>
+      </div>
+    </div>
+
+    <div class="day-grid week-mode" id="dayGrid" role="grid" aria-label="Day availability grid"></div>
+  </section>
+
+  <section class="panel hidden slots-panel" id="slotsPanel" aria-label="Times for the selected day">
+    <h3 id="slotsHeading"></h3>
+    <div id="slotsList"></div>
+  </section>
+
+  <section class="panel hidden slot-summary" id="slotSummary" aria-label="Selected time (visual review only)"></section>
+</div>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   Constants — every tunable value is named here, never buried in a function.
+   ========================================================================== */
+
+// The ONE endpoint this page may ever call. Read-only by server contract.
+var PREVIEW_PATH = "/admin/calendar/availability-preview";
+
+// The LOCKED server day-state vocabulary and its on-screen labels. This map
+// is also the validation gate: a state that is not an own-property here is a
+// review error, and is NEVER treated as available. The retired fifth state
+// from Prototype A is deliberately absent — the server cannot emit it.
+var DAY_STATE_LABELS = {
+  open: "Available",
+  full: "Full",
+  unavailable: "Unavailable",
+  past: "Past"
+};
+
+// The LOCKED slot grouping vocabulary from the B1 contract.
+var TIME_OF_DAY_LABELS = { morning: "Morning", afternoon: "Afternoon" };
+
+// The exact read-only statement shown whenever a time is visually selected.
+var PREVIEW_ONLY_STATEMENT =
+  "Preview only — no appointment has been held or booked.";
+
+// 7-day preview: end_day is start_day plus this many local calendar days
+// (six after the start = seven inclusive days).
+var WEEK_SPAN_DAYS = 6;
+
+// A month request must never span more than this many INCLUSIVE local days
+// (mirrors the server's own range cap; a calendar month is always 28–31).
+var MONTH_MAX_INCLUSIVE_DAYS = 31;
+
+var MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+var DOW_HEADERS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/* ==========================================================================
+   Review state machine.
+   Phases: idle -> loading-week -> week-loaded -> loading-month ->
+           month-loaded -> loading-day -> day-loaded, plus error.
+   The credential is NEVER part of this state object: the password input is
+   its only holder for the page lifetime.
+   ========================================================================== */
+
+var reviewState = {
+  phase: "idle",
+  viewMode: "week",        // "week" | "month" — which grid is rendered
+  activeRange: null,       // { startDay, endDay } of the CURRENT dataset;
+                           // every selected-day request reuses it unchanged
+  monthAnchor: null,       // { year, month(1-12) } for the lazy month view
+  selectedDay: null,       // office-local YYYY-MM-DD or null
+  preview: null            // the last VALIDATED preview payload
+};
+
+// Stale-response protection: a newer request bumps the generation and asks
+// the older in-flight request to stop. A response whose ticket generation no
+// longer matches is discarded, so it can never overwrite a newer result.
+var requestGeneration = 0;
+var activeAbortController = null;
+
+function el(id) { return document.getElementById(id); }
+
+/* ==========================================================================
+   Date helpers — portal-owned idiom: UTC-only arithmetic on the office-local
+   date STRINGS, so the reviewer's browser timezone can never shift a day.
+   ========================================================================== */
+
+function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+function isIsoDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function addDaysToIsoDate(isoDate, days) {
+  var parts = isoDate.split("-");
+  var stamp = Date.UTC(
+    parseInt(parts[0], 10),
+    parseInt(parts[1], 10) - 1,
+    parseInt(parts[2], 10) + days
+  );
+  var d = new Date(stamp);
+  return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" +
+         pad2(d.getUTCDate());
+}
+
+// Zero-based day-of-week (0 = Sunday) for a local date string, computed in
+// UTC so the browser zone is irrelevant.
+function dayOfWeekForIsoDate(isoDate) {
+  var parts = isoDate.split("-");
+  return new Date(Date.UTC(
+    parseInt(parts[0], 10),
+    parseInt(parts[1], 10) - 1,
+    parseInt(parts[2], 10)
+  )).getUTCDay();
+}
+
+function anchorFromIsoDate(isoDate) {
+  var parts = isoDate.split("-");
+  return { year: parseInt(parts[0], 10), month: parseInt(parts[1], 10) };
+}
+
+// The inclusive first..last-day range of one calendar month. Day zero of the
+// FOLLOWING month is that month's last day; the span is therefore 28–31
+// inclusive days and can never exceed the month cap.
+function monthRangeForAnchor(anchor) {
+  var lastDay = new Date(Date.UTC(anchor.year, anchor.month, 0)).getUTCDate();
+  return {
+    startDay: anchor.year + "-" + pad2(anchor.month) + "-01",
+    endDay: anchor.year + "-" + pad2(anchor.month) + "-" + pad2(lastDay),
+    label: MONTH_NAMES[anchor.month - 1] + " " + anchor.year
+  };
+}
+
+function shiftAnchor(anchor, deltaMonths) {
+  var zeroBased = anchor.month - 1 + deltaMonths;
+  var year = anchor.year + Math.floor(zeroBased / 12);
+  var month = ((zeroBased % 12) + 12) % 12 + 1;
+  return { year: year, month: month };
+}
+
+/* ==========================================================================
+   Setup reading and the memory-only credential.
+   ========================================================================== */
+
+// The credential is read directly from the input at the moment a request is
+// built and placed ONLY into the admin-key request-header object for that
+// one call (the exact header name lives at the single fetch site below).
+// It is never copied into review state, page text, URLs, the browser log,
+// error messages, or the developer-details area.
+function readCredential() {
+  return el("credentialInput").value;
+}
+
+function clearCredential() {
+  el("credentialInput").value = "";
+  announce("Credential cleared. Enter a disposable test credential to continue.");
+}
+
+// Validates and normalizes the NON-SECRET setup fields. Returns either
+// { ok: true, ... } or { ok: false, message } — a failed read makes no
+// request. The service key is trimmed but NEVER lowercased (master keys are
+// case-sensitive); blank-after-trim means "omit the parameter entirely".
+function readSetup() {
+  var apiBase = el("apiBaseInput").value.trim();
+  while (apiBase.length > 0 && apiBase.charAt(apiBase.length - 1) === "/") {
+    apiBase = apiBase.slice(0, -1);
+  }
+  var clientId = el("clientIdInput").value.trim();
+  var startDay = el("startDateInput").value.trim();
+  var rawServiceKey = el("serviceKeyInput").value;
+  var trimmedKey = rawServiceKey.trim();
+
+  if (!readCredential()) {
+    return { ok: false, message: "Enter the disposable test credential first." };
+  }
+  if (!clientId) {
+    return { ok: false, message: "Enter the office's client UUID." };
+  }
+  if (!isIsoDate(startDay)) {
+    return { ok: false,
+             message: "Enter a starting local date as YYYY-MM-DD." };
+  }
+  return {
+    ok: true,
+    apiBase: apiBase,
+    clientId: clientId,
+    startDay: startDay,
+    serviceKey: trimmedKey === "" ? null : trimmedKey
+  };
+}
+
+/* ==========================================================================
+   URL construction — NON-SECRET query values only. The credential is never
+   a parameter, and no retired request field is ever sent.
+   ========================================================================== */
+
+function buildPreviewUrl(apiBase, params) {
+  var query = new URLSearchParams();
+  query.set("client_id", params.clientId);
+  query.set("start_day", params.startDay);
+  query.set("end_day", params.endDay);
+  if (params.selectedDay) {
+    query.set("selected_day", params.selectedDay);
+  }
+  if (params.serviceKey !== null && params.serviceKey !== undefined) {
+    query.set("service_key", params.serviceKey);
+  }
+  return apiBase + PREVIEW_PATH + "?" + query.toString();
+}
+
+/* ==========================================================================
+   Status line, review errors, and developer details.
+   ========================================================================== */
+
+function announce(text) {
+  el("statusLive").textContent = text;
+}
+
+function showReviewError(message) {
+  reviewState.phase = "error";
+  var box = el("errorState");
+  box.textContent = message;
+  box.classList.remove("hidden");
+  announce(message);
+}
+
+function clearReviewError() {
+  var box = el("errorState");
+  box.textContent = "";
+  box.classList.add("hidden");
+}
+
+// Compact request diagnostics for the reviewer. Contains ONLY: outcome
+// status, the requested range, the selected day, the client UUID, and the
+// service key — never the credential and never request headers.
+function renderDevDetails(status, params) {
+  el("devDetails").textContent =
+    "status: " + status +
+    " · range: " + params.startDay + " → " + params.endDay +
+    " · selected_day: " + (params.selectedDay ? params.selectedDay : "(none)") +
+    " · client_id: " + params.clientId +
+    " · service_key: " + (params.serviceKey === null ? "(generic)" : params.serviceKey);
+}
+
+/* ==========================================================================
+   Loading control — every action button is disabled while one request is in
+   flight, including the rendered day and time buttons.
+   ========================================================================== */
+
+function forEachChildButton(container, fn) {
+  for (var i = 0; i < container.children.length; i += 1) {
+    var child = container.children[i];
+    if (child.tagName === "BUTTON") { fn(child); }
+    if (child.children && child.children.length) { forEachChildButton(child, fn); }
+  }
+}
+
+function setLoading(isLoading) {
+  el("loadWeekBtn").disabled = isLoading;
+  el("openMonthBtn").disabled = isLoading;
+  el("prevMonthBtn").disabled = isLoading;
+  el("nextMonthBtn").disabled = isLoading;
+  el("clearCredentialBtn").disabled = isLoading;
+  forEachChildButton(el("dayGrid"), function (b) { b.disabled = isLoading || b.getAttribute("data-locked") === "yes"; });
+  forEachChildButton(el("slotsList"), function (b) { b.disabled = isLoading; });
+}
+
+/* ==========================================================================
+   Response validation — the locked contract gate. Missing or malformed data
+   is a visible review error and is NEVER interpreted as available.
+   ========================================================================== */
+
+function validatePreviewResponse(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "the response was not a preview payload.";
+  }
+  if (typeof payload.practice_name !== "string" ||
+      typeof payload.timezone_name !== "string" ||
+      typeof payload.client_id !== "string") {
+    return "the response is missing its tenant fields.";
+  }
+  if (typeof payload.booking_enabled !== "boolean") {
+    return "the response is missing booking_enabled.";
+  }
+  if (!isIsoDate(payload.range_start) || !isIsoDate(payload.range_end)) {
+    return "the response range dates are malformed.";
+  }
+  if (!Array.isArray(payload.days)) {
+    return "the response is missing its days array.";
+  }
+  for (var i = 0; i < payload.days.length; i += 1) {
+    var day = payload.days[i];
+    if (!day || !isIsoDate(day.local_date) ||
+        typeof day.weekday !== "string" || day.weekday === "") {
+      return "day entry " + (i + 1) + " is malformed.";
+    }
+    if (!Object.prototype.hasOwnProperty.call(DAY_STATE_LABELS, day.state)) {
+      return "unknown day state \"" + String(day.state) + "\" for " +
+             day.local_date + ". Only open, full, unavailable, and past are valid.";
+    }
+    if (day.selectable !== (day.state === "open")) {
+      return "day " + day.local_date +
+             " has a selectable flag that disagrees with its state.";
+    }
+  }
+  if (!Array.isArray(payload.slots)) {
+    return "the response is missing its slots array.";
+  }
+  for (var j = 0; j < payload.slots.length; j += 1) {
+    var slot = payload.slots[j];
+    if (!slot ||
+        typeof slot.start_utc !== "string" || slot.start_utc === "" ||
+        typeof slot.end_utc !== "string" || slot.end_utc === "" ||
+        typeof slot.local_start_time !== "string" || slot.local_start_time === "" ||
+        typeof slot.local_end_time !== "string" || slot.local_end_time === "" ||
+        typeof slot.accessible_date_label !== "string" || slot.accessible_date_label === "" ||
+        typeof slot.accessible_time_label !== "string" || slot.accessible_time_label === "") {
+      return "time entry " + (j + 1) + " is malformed.";
+    }
+    if (!Object.prototype.hasOwnProperty.call(TIME_OF_DAY_LABELS, slot.time_of_day)) {
+      return "time entry " + (j + 1) + " has an unknown time_of_day value.";
+    }
+    if (slot.selectable !== true) {
+      return "time entry " + (j + 1) + " is not marked selectable.";
+    }
+  }
+  return null;
+}
+
+/* ==========================================================================
+   Request core — the ONLY function that talks to the network. Strictly one
+   read call per invocation; a newer call aborts and outdates the older one.
+   ========================================================================== */
+
+function beginRequestTicket() {
+  requestGeneration += 1;
+  if (activeAbortController && typeof activeAbortController.abort === "function") {
+    activeAbortController.abort();
+  }
+  activeAbortController =
+    (typeof AbortController === "function") ? new AbortController() : null;
+  return {
+    generation: requestGeneration,
+    signal: activeAbortController ? activeAbortController.signal : undefined
+  };
+}
+
+// Issues exactly one read request and maps every outcome to the locked
+// review wording. A failed request never claims the office is unavailable —
+// it reports only what failed. There is NO automatic retry.
+function requestPreview(params, loadingPhase, loadingMessage, onValidPayload) {
+  var credential = readCredential();
+  if (!credential) {
+    showReviewError("Enter the disposable test credential first.");
+    return Promise.resolve(false);
+  }
+  var ticket = beginRequestTicket();
+  reviewState.phase = loadingPhase;
+  clearReviewError();
+  setLoading(true);
+  announce(loadingMessage);
+
+  var url = buildPreviewUrl(params.apiBase, params);
+  return fetch(url, {
+    method: "GET",
+    headers: { "X-Admin-Key": credential },
+    signal: ticket.signal
+  }).then(function (response) {
+    if (ticket.generation !== requestGeneration) { return false; } // stale
+    return response.json().catch(function () { return null; }).then(function (body) {
+      if (ticket.generation !== requestGeneration) { return false; } // stale
+      setLoading(false);
+      renderDevDetails(String(response.status), params);
+      if (response.status === 401) {
+        showReviewError("Credential rejected.");
+        return false;
+      }
+      if (response.status === 404) {
+        showReviewError("Client not found.");
+        return false;
+      }
+      if (response.status === 422) {
+        var detail = body && typeof body.detail === "string"
+          ? body.detail
+          : "The preview endpoint rejected the request (422).";
+        showReviewError(detail);
+        return false;
+      }
+      if (response.status >= 500) {
+        showReviewError("Preview service error.");
+        return false;
+      }
+      if (!response.ok) {
+        showReviewError("Unexpected response from the preview endpoint.");
+        return false;
+      }
+      var problem = validatePreviewResponse(body);
+      if (problem) {
+        showReviewError("Review error: " + problem);
+        return false;
+      }
+      onValidPayload(body);
+      return true;
+    });
+  }).catch(function () {
+    if (ticket.generation !== requestGeneration) { return false; } // aborted
+    setLoading(false);
+    renderDevDetails("network-failure", params);
+    showReviewError("Could not reach preview endpoint.");
+    return false;
+  });
+}
+
+/* ==========================================================================
+   Actions: 7-day preview, lazy month view, selected day.
+   ========================================================================== */
+
+// Primary action. Computes end_day as start_day plus six local calendar days
+// and issues EXACTLY ONE request for the whole seven-day range.
+function loadWeekPreview() {
+  var setup = readSetup();
+  if (!setup.ok) { showReviewError(setup.message); return Promise.resolve(false); }
+  var startDay = setup.startDay;
+  var endDay = addDaysToIsoDate(startDay, WEEK_SPAN_DAYS);
+  var params = {
+    apiBase: setup.apiBase, clientId: setup.clientId,
+    serviceKey: setup.serviceKey,
+    startDay: startDay, endDay: endDay, selectedDay: null
+  };
+  return requestPreview(params, "loading-week", "Loading 7-day preview…",
+    function (payload) {
+      reviewState.activeRange = { startDay: startDay, endDay: endDay };
+      reviewState.viewMode = "week";
+      reviewState.monthAnchor = anchorFromIsoDate(startDay);
+      reviewState.selectedDay = null;
+      reviewState.preview = payload;
+      reviewState.phase = "week-loaded";
+      renderPreview(payload);
+      announce("7-day preview loaded for " + payload.range_start +
+               " through " + payload.range_end + ".");
+    });
+}
+
+// Lazy month view: NO month request happens until the reviewer asks for it.
+// Each month is exactly one range request covering that calendar month
+// (28–31 inclusive days, always within the month cap).
+function openMonthView() {
+  var setup = readSetup();
+  if (!setup.ok) { showReviewError(setup.message); return Promise.resolve(false); }
+  if (!reviewState.monthAnchor) {
+    reviewState.monthAnchor = anchorFromIsoDate(setup.startDay);
+  }
+  return loadMonthForAnchor(setup, reviewState.monthAnchor);
+}
+
+function loadMonthForAnchor(setup, anchor) {
+  var range = monthRangeForAnchor(anchor);
+  var params = {
+    apiBase: setup.apiBase, clientId: setup.clientId,
+    serviceKey: setup.serviceKey,
+    startDay: range.startDay, endDay: range.endDay, selectedDay: null
+  };
+  return requestPreview(params, "loading-month",
+    "Loading month preview for " + range.label + "…",
+    function (payload) {
+      reviewState.activeRange = { startDay: range.startDay, endDay: range.endDay };
+      reviewState.viewMode = "month";
+      reviewState.monthAnchor = anchor;
+      reviewState.selectedDay = null;
+      reviewState.preview = payload;
+      reviewState.phase = "month-loaded";
+      renderPreview(payload);
+      announce("Month preview loaded for " + range.label + ".");
+    });
+}
+
+function goToAdjacentMonth(deltaMonths) {
+  var setup = readSetup();
+  if (!setup.ok) { showReviewError(setup.message); return Promise.resolve(false); }
+  var anchor = shiftAnchor(
+    reviewState.monthAnchor || anchorFromIsoDate(setup.startDay), deltaMonths);
+  return loadMonthForAnchor(setup, anchor);
+}
+
+// Selecting an open day issues EXACTLY ONE additional read request using the
+// SAME active range plus selected_day — the server's response for that
+// request is what carries the day's times (the plain range response does
+// not include them).
+function selectPreviewDay(localDate) {
+  var setup = readSetup();
+  if (!setup.ok) { showReviewError(setup.message); return Promise.resolve(false); }
+  if (!reviewState.activeRange) {
+    showReviewError("Load a preview before selecting a day.");
+    return Promise.resolve(false);
+  }
+  var params = {
+    apiBase: setup.apiBase, clientId: setup.clientId,
+    serviceKey: setup.serviceKey,
+    startDay: reviewState.activeRange.startDay,
+    endDay: reviewState.activeRange.endDay,
+    selectedDay: localDate
+  };
+  return requestPreview(params, "loading-day",
+    "Loading times for " + localDate + "…",
+    function (payload) {
+      reviewState.selectedDay = localDate;
+      reviewState.preview = payload;
+      reviewState.phase = "day-loaded";
+      renderPreview(payload);
+      announce("Times loaded for " + localDate + ".");
+    });
+}
+
+/* ==========================================================================
+   Rendering — every server value flows through textContent (portal-owned
+   convention), so no string from the network is ever interpreted as markup.
+   ========================================================================== */
+
+function clearChildren(node) {
+  while (node.children.length > 0) { node.children[0].remove(); }
+  node.textContent = "";
+}
+
+function renderPreview(payload) {
+  el("resultView").classList.remove("hidden");
+  el("practiceName").textContent = payload.practice_name;
+
+  // booking_enabled is INFORMATIONAL: a paused office still gets a full
+  // read-only preview; the badge only explains the pause.
+  var paused = el("bookingPausedBadge");
+  if (payload.booking_enabled) { paused.classList.add("hidden"); }
+  else { paused.classList.remove("hidden"); }
+
+  el("rangeLabel").textContent =
+    "Range " + payload.range_start + " → " + payload.range_end +
+    " · Office timezone " + payload.timezone_name +
+    " · Generated " + payload.generated_at;
+
+  var monthNav = el("monthNav");
+  if (reviewState.viewMode === "month") {
+    monthNav.classList.remove("hidden");
+    var range = monthRangeForAnchor(reviewState.monthAnchor);
+    el("monthNameLabel").textContent = range.label;
+    el("viewModeLabel").textContent = "Month view";
+    renderMonthGrid(payload.days);
+  } else {
+    monthNav.classList.add("hidden");
+    el("viewModeLabel").textContent = "7-day view";
+    renderWeekStrip(payload.days);
+  }
+
+  renderSlotsPanel(payload);
+
+  // A fresh dataset always clears any previously shown visual selection.
+  var summary = el("slotSummary");
+  clearChildren(summary);
+  summary.classList.add("hidden");
+}
+
+// One day button. The state is shown as TEXT (never color alone); only an
+// "open" day is enabled. A day the server did not mark open is locked and
+// stays locked after loading completes.
+function buildDayButton(day, extraClass) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "day-chip state-" + day.state +
+    (extraClass ? " " + extraClass : "");
+  button.setAttribute("data-local-date", day.local_date);
+  button.setAttribute("role", "gridcell");
+
+  var dow = document.createElement("span");
+  dow.className = "dow";
+  dow.textContent = day.weekday.slice(0, 3);
+  button.appendChild(dow);
+
+  var num = document.createElement("span");
+  num.className = "num";
+  num.textContent = String(parseInt(day.local_date.split("-")[2], 10));
+  button.appendChild(num);
+
+  var stateLabel = document.createElement("span");
+  stateLabel.className = "day-state-label";
+  stateLabel.textContent = DAY_STATE_LABELS[day.state];
+  button.appendChild(stateLabel);
+
+  var pressed = reviewState.selectedDay === day.local_date;
+  button.setAttribute("aria-pressed", pressed ? "true" : "false");
+  button.setAttribute("aria-label",
+    day.weekday + " " + day.local_date + " — " + DAY_STATE_LABELS[day.state] +
+    (day.selectable ? ", selectable" : ""));
+
+  if (!day.selectable) {
+    button.disabled = true;
+    button.setAttribute("data-locked", "yes");
+  } else {
+    button.addEventListener("click", function () {
+      selectPreviewDay(day.local_date);
+    });
+  }
+  return button;
+}
+
+function renderWeekStrip(days) {
+  var grid = el("dayGrid");
+  grid.className = "day-grid week-mode";
+  clearChildren(grid);
+  for (var i = 0; i < days.length; i += 1) {
+    grid.appendChild(buildDayButton(days[i], null));
+  }
+}
+
+function renderMonthGrid(days) {
+  var grid = el("dayGrid");
+  grid.className = "day-grid month-mode";
+  clearChildren(grid);
+  var h;
+  for (h = 0; h < DOW_HEADERS.length; h += 1) {
+    var head = document.createElement("span");
+    head.className = "cal-dow";
+    head.setAttribute("role", "columnheader");
+    head.textContent = DOW_HEADERS[h];
+    grid.appendChild(head);
+  }
+  if (days.length > 0) {
+    var leadingBlanks = dayOfWeekForIsoDate(days[0].local_date);
+    for (h = 0; h < leadingBlanks; h += 1) {
+      var blank = document.createElement("span");
+      blank.className = "cal-blank";
+      blank.setAttribute("aria-hidden", "true");
+      grid.appendChild(blank);
+    }
+  }
+  for (var i = 0; i < days.length; i += 1) {
+    grid.appendChild(buildDayButton(days[i], "cal-day"));
+  }
+}
+
+// Times for the selected day, grouped under the server's own morning /
+// afternoon vocabulary. Rendered ONLY from server-returned fields; no
+// browser timezone math and no per-day counting of any kind.
+function renderSlotsPanel(payload) {
+  var panel = el("slotsPanel");
+  var list = el("slotsList");
+  clearChildren(list);
+  if (!payload.selected_day) {
+    panel.classList.add("hidden");
+    el("slotsHeading").textContent = "";
+    return;
+  }
+  panel.classList.remove("hidden");
+
+  var selectedWeekday = "";
+  for (var d = 0; d < payload.days.length; d += 1) {
+    if (payload.days[d].local_date === payload.selected_day) {
+      selectedWeekday = payload.days[d].weekday;
+      break;
+    }
+  }
+  el("slotsHeading").textContent =
+    "Times for " + (selectedWeekday ? selectedWeekday + " " : "") +
+    payload.selected_day;
+
+  if (payload.slots.length === 0) {
+    var none = document.createElement("p");
+    none.className = "none-note";
+    none.textContent = "No bookable times were returned for this day.";
+    list.appendChild(none);
+    return;
+  }
+
+  var groups = ["morning", "afternoon"];
+  for (var g = 0; g < groups.length; g += 1) {
+    var groupName = groups[g];
+    var groupSlots = [];
+    for (var s = 0; s < payload.slots.length; s += 1) {
+      if (payload.slots[s].time_of_day === groupName) {
+        groupSlots.push(payload.slots[s]);
+      }
+    }
+    if (groupSlots.length === 0) { continue; }
+    var heading = document.createElement("p");
+    heading.className = "tod-heading";
+    heading.textContent = TIME_OF_DAY_LABELS[groupName];
+    list.appendChild(heading);
+    var row = document.createElement("div");
+    row.className = "slot-list";
+    for (var k = 0; k < groupSlots.length; k += 1) {
+      row.appendChild(buildSlotButton(groupSlots[k]));
+    }
+    list.appendChild(row);
+  }
+}
+
+function buildSlotButton(slot) {
+  var button = document.createElement("button");
+  button.type = "button";
+  button.className = "slot-btn";
+  button.textContent = slot.local_start_time + " – " + slot.local_end_time;
+  button.setAttribute("aria-pressed", "false");
+  button.setAttribute("aria-label",
+    slot.accessible_time_label + ", " + slot.accessible_date_label +
+    " — visual selection only");
+  // A time click is a VISUAL selection for review. It makes zero network
+  // requests and can never create a hold, a booking, or any other change.
+  button.addEventListener("click", function () {
+    showSlotSummary(slot, button);
+  });
+  return button;
+}
+
+function showSlotSummary(slot, buttonEl) {
+  forEachChildButton(el("slotsList"), function (b) {
+    b.setAttribute("aria-pressed", "false");
+  });
+  buttonEl.setAttribute("aria-pressed", "true");
+
+  var summary = el("slotSummary");
+  clearChildren(summary);
+
+  var title = document.createElement("h3");
+  title.textContent = "Selected time (visual review only)";
+  summary.appendChild(title);
+
+  var dateLine = document.createElement("p");
+  dateLine.textContent = slot.accessible_date_label;
+  summary.appendChild(dateLine);
+
+  var timeLine = document.createElement("p");
+  timeLine.textContent = slot.accessible_time_label +
+    " (" + TIME_OF_DAY_LABELS[slot.time_of_day] + ")";
+  summary.appendChild(timeLine);
+
+  var lockLine = document.createElement("p");
+  lockLine.className = "preview-lock";
+  lockLine.textContent = PREVIEW_ONLY_STATEMENT;
+  summary.appendChild(lockLine);
+
+  summary.classList.remove("hidden");
+  announce("Time selected for visual review only. " + PREVIEW_ONLY_STATEMENT);
+}
+
+/* ==========================================================================
+   Wiring. NOTHING here performs a network request: the page is fully inert
+   until the reviewer presses "Load 7-day preview".
+   ========================================================================== */
+
+function initPicker() {
+  el("loadWeekBtn").addEventListener("click", function () { loadWeekPreview(); });
+  el("clearCredentialBtn").addEventListener("click", function () { clearCredential(); });
+  el("openMonthBtn").addEventListener("click", function () { openMonthView(); });
+  el("prevMonthBtn").addEventListener("click", function () { goToAdjacentMonth(-1); });
+  el("nextMonthBtn").addEventListener("click", function () { goToAdjacentMonth(1); });
+  announce("Ready. Enter the setup values, then press Load 7-day preview.");
+}
+
+initPicker();
+</script>
+</body>
+</html>
