@@ -5533,3 +5533,56 @@ Evidence:
 Nothing was staged, committed, pushed, merged, or deployed during
 implementation or verification. No migration ran, booking was not enabled,
 and production was not changed.
+
+## C1-B — Backward-Compatible Structured Chat Action Transport — CLOSED
+
+Status: C1-B CLOSED at source-review, owner-local verification, implementation-commit, and documentation-record levels; branch integration remains pending separate authorization.
+
+Closure date: 2026-08-01
+Implementation commit: `b4d70b159f39c61127df086fd044f1a221c898e4` (detached; not attached to any branch, not pushed, not merged, not deployed)
+Frozen parent baseline: `ab1aa86cb4128876dc69d3f72f20801a2fe727fb` (branch lineage `feature/calendar-picker-prototype-b-b2`; worktree `C:\Users\kalva\Desktop\mia-c1b-gate-ab1aa86c`)
+Authoritative package: `Mia-Chatbot-Calendar-C1-B-Action-Transport-Implementation-v3-ab1aa86c.zip`, ZIP SHA-256 `028ffbef03cfed2587b13752f2d1dd00a2a798dba41bf49be207991162d983ef`; patch SHA-256 `73cc48910aa7a6fec98a087ce298b4199c9bcb95d18ce97c37933121c5887ada`
+
+### Goal
+Add backward-compatible structured action transport between the widget and `/chat`, fail-closed until C1-C introduces the Calendar action owner, with zero behavior change for all existing message-only traffic.
+
+### Committed boundary and committed-tree verification
+Exactly six files; owner-verified that the committed tree at `b4d70b15…98e4` reproduces all six approved identities (git blob SHA-1, with the corresponding approved canonical SHA-256 recorded alongside):
+
+1. `app/routes/chat.py` — blob `9cdeeb57719b68183c10de99cc57851a7fab6f02` / SHA-256 `82647600f89d7f6c22b588bcf76e5bccf6559a880d61b7cc062ac7b21e9a3de8`
+2. `app/schemas.py` — blob `d961575a0655918337a01807d35e64b7a4580ea5` / SHA-256 `b21dbe37dbdbf9bc0e7eefa1c60a8b3bedc11639d0241b0e54b38af090162873`
+3. `calendar_tests/test_chat_action_contract.py` (new) — blob `c1455672e69f651588b5045da9a41ebafbd37f98` / SHA-256 `a65dcf8d4b49cce4c018a537f9c9f011eecd66cd363ad7d45635e27f9287d1db`
+4. `static/chat.html` — blob `20f83c1835b2c786733b2aa6482f8f3e847b058a` / SHA-256 `1ded5a8772087e3cff196e90b11a39d7f0ab5bd8c40360c401ae1323951dddfe`
+5. `tests/test_chat_structured_actions.js` (new) — blob `6a1c618506b0887fb2509b5cb6176c0e493e60ef` / SHA-256 `b77b3b23e706e49c85514377497231a800ccac0b22f33b6654b734154fe95ac9`
+6. `tests/test_life_threatening_interruption.py` — blob `7108e673d3b15519ea0885926d4b4acc8e6edf23` / SHA-256 `8ab9dea4b671bcf865c2f7e976f34348ecfbcfee105142b14b96f9e8a8c56dd4`
+
+The commit message matched the approved text exactly, with no BOM or prefix. Files 1–5 are byte-identical to the approved v2 candidate; file 6 carries the sole v3 correction (+8/−0 in `run_chat()`: teaching comment, `action=None` on the single request-shaped double, `assert req.action is None` drift tripwire).
+
+### Behavior added
+Strict optional `ChatAction {type: "calendar_choice", choice_id}` on `ChatRequest` (extra-forbid, bounded, trimmed, requires existing `conversation_id`; schema owns the `None` default). `/chat` transport gate: action against a missing/malformed/unknown/cross-tenant conversation → HTTP 409 stale (tenant-indistinguishable); action against a `final_closed` conversation → existing persistent-stop contract; any other action → HTTP 409 not-active. No persistence, no replacement conversation, no service invocation on any action path. Widget: normalization and rendering of server-supplied structured quick replies from `meta.calendar_actions`, opaque-choice-only request bodies, in-flight duplicate lock, malformed-action fail-closed fallback to the service menu.
+
+### Behavior intentionally unchanged
+All message-only request handling; legacy string and `{key,label,message}` quick replies; emergency, final-closed, locked, misconduct, and obscenity guards for all message traffic; notifications; holds; bookings; migrations (none); `app/routes/chat_rebuild.py`; tenant settings; booking enablement (production booking remains frozen for all tenants).
+
+### Correction history within C1-B
+v1 → v2: independent source review APPROVE-with-conditions; T1–T3 (malformed-UUID, locked-conversation pin, emergency-ordering pin) added to the contract suite; source hunks byte-identical. v2 gate: stop condition 19 — established emergency harness double lacked the new contract attribute (`AttributeError` at `chat.py:7887`), 48 failed / 29 passed / 49 subtests. Root cause: test-double drift, not a production defect. Owner-approved repair location: test harness (production `getattr` rejected as duplicate ownership of the schema default and a silent fallback). Untouched-baseline proof established the authoritative emergency profile at 46 passed, 84 subtests (earlier 77/49 prediction retired as non-authoritative). v3: anchored single-match repair, forward/reverse `git apply` reproducibility proven, files 1–5 unchanged.
+
+### Owner-observed verification (sole pass/fail authority)
+Pre-commit v3 gate (isolated disposable PostgreSQL 16; Python 3.14.2; no Supabase/staging/production): compilation passed; focused C1-B contract suite 14 passed; structured-action Node suite 31 passed, 0 failed; map-action Node suite 18 passed, 0 failed; complete Calendar collection 1,000 collected; complete Calendar regression 1,000 passed; life-threatening emergency regression 46 passed, 84 subtests passed; `git diff --check` passed; post-test hashes unchanged. Gate logs: `C1B_V3_GUARDED_OWNER_GATE_20260801_031859.txt` (SHA-256 `1ba9f6b8a8baaaa1eb12acc93546c574537139ab5e9a57982b166b1fd8aa7cf7`) and `C1B_V3_POST_TEST_RECONCILIATION_V2_20260801_032515.txt`.
+
+Post-commit integrity gate at `b4d70b15…98e4`: parent verified as frozen baseline; committed boundary exactly the six approved paths; all six committed blob IDs matched the approved values; commit message verified BOM-free and exact; focused C1-B contract suite 14 passed; life-threatening emergency regression 46 passed, 84 subtests passed; repository clean after each suite; disposable PostgreSQL container removed and confirmed absent; original process environment variables restored exactly; protected container `mia-calendar-test-db` untouched (same container ID and exited state before and after). Authoritative transcript: `C1B_IMPLEMENTATION_COMMIT_GATE_V3_20260801_040731.txt`, SHA-256 `a1367165064d12c2be77a7b83e15df064f571bbc81d361a1ee77222e20af37e2`.
+
+### Repository state at closure
+The implementation commit `b4d70b159f39c61127df086fd044f1a221c898e4` and this documentation-only child commit remain on detached-HEAD lineage. Neither commit has been attached to a branch, pushed, merged, or deployed. Branch attachment/integration to `feature/calendar-picker-prototype-b-b2` is a later, separately authorized step. Beyond the implementation commit, the only additional commit on this lineage is this documentation-only closure commit. No push, merge, deployment, migration, tenant activation, Calendar enablement, production booking, staging/production access, or real notification action was performed.
+
+The documentation commit SHA is intentionally reported by the guarded gate transcript rather than embedded in this section, avoiding a circular self-reference in the commit content.
+
+### Binding C1-C requirements (verbatim, unchanged, OPEN)
+1. Structured actions must not execute before final-closed, locked, misconduct, obscenity, life-threatening emergency, and ordinary dental-emergency boundaries are resolved.
+2. Patient-facing handling must distinguish structured-action HTTP 409 responses from genuine connection failures before Calendar actions are activated.
+
+### Other carried-forward items
+Widget currently renders any non-OK response as the generic connection-failure message (subsumed by binding requirement 2). Optional future maintenance: migrate the emergency harness double to a real `ChatRequest` (separate patch, if desired). Pre-existing deferred `confirm_appointment` boundary-safety item remains open and untouched.
+
+### Rollback
+Revert the single implementation commit (`git revert b4d70b159f39c61127df086fd044f1a221c898e4`), or reverse-apply patch `73cc4891…` (proven to restore all baseline hashes exactly). The documentation-only closure commit is independently revertible.
