@@ -63,8 +63,17 @@ import resend
 # BookingState is imported only as the single owner of the state constants.
 from app.calendar_models import BookingState
 from app.services.booking_conversation import (
+    ACTION_BOUNDARY,
+    ACTION_EXECUTED,
+    ACTION_NOT_ACTIVE,
+    ACTION_STALE_CHOICE,
+    BOUNDARY_FINAL_CLOSED,
+    BOUNDARY_LOCKED,
+    BOUNDARY_SAFETY_BLOCKED,
     begin_booking_after_intake,
+    booking_boundary_state,
     cancel_active_booking,
+    handle_booking_action,
     handle_booking_message,
 )
 
@@ -126,6 +135,33 @@ STRUCTURED_ACTION_STALE_DETAIL = (
     "This calendar option is no longer available. "
     "Please continue by typing a message."
 )
+STRUCTURED_ACTION_SAFETY_BLOCKED_DETAIL = (
+    "This calendar option can’t be used in this conversation. "
+    "If you need urgent help, please call the office directly."
+)
+
+# C1-C: stable machine codes for structured-action HTTP 409 responses
+# (closed vocabulary — locked decision 5). The widget branches on
+# detail.code ONLY; detail.message is the server-owned patient wording and
+# is never parsed by the client.
+ACTION_ERROR_CODE_NOT_ACTIVE = "ACTION_NOT_ACTIVE"
+ACTION_ERROR_CODE_STALE_CHOICE = "STALE_CHOICE"
+ACTION_ERROR_CODE_CONVERSATION_UNAVAILABLE = "CONVERSATION_UNAVAILABLE"
+ACTION_ERROR_CODE_CONVERSATION_LOCKED = "CONVERSATION_LOCKED"
+ACTION_ERROR_CODE_SAFETY_BLOCKED = "SAFETY_BLOCKED"
+
+
+def _structured_action_error(code, message, calendar_actions=None):
+    """One builder (Rule 3) for the C1-C structured-action 409 envelope:
+    {"detail": {"code", "message", optional "calendar_actions"}}.
+    CONVERSATION_UNAVAILABLE callers pass no calendar_actions and the one
+    fixed message, so malformed / missing / unknown / cross-tenant stay
+    byte-identical and never echo the submitted conversation_id (locked
+    decision 5)."""
+    detail = {"code": code, "message": message}
+    if calendar_actions:
+        detail["calendar_actions"] = calendar_actions
+    return HTTPException(status_code=409, detail=detail)
 
 # ---------------------------------------------------------
 # Public widget config helpers
@@ -7880,19 +7916,25 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         except Exception:
             conversation = None
 
-    # C1-B structured-action transport is fail-closed until C1-C adds the
-    # Calendar state-machine owner. An action must target an existing
-    # tenant-scoped conversation, must not create a replacement conversation,
-    # and must not be persisted or interpreted as ordinary free text.
+    # C1-C structured-action execution lane (replaces the C1-B transport-
+    # only rejection at this SAME pre-persistence location). An action must
+    # target an existing tenant-scoped conversation, never creates a
+    # replacement conversation, and its accompanying message remains an
+    # untrusted display echo: never persisted, never classified, never
+    # interpreted (locked decision 1). The text classifiers below this
+    # block never see action requests.
     if req.action is not None:
         if conversation is None:
-            raise HTTPException(
-                status_code=409,
-                detail=STRUCTURED_ACTION_STALE_DETAIL,
+            # Missing / malformed / unknown / cross-tenant conversation ids
+            # are BYTE-IDENTICAL here (locked decision 5): one code, one
+            # fixed message, no echo of the submitted conversation_id.
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_CONVERSATION_UNAVAILABLE,
+                STRUCTURED_ACTION_STALE_DETAIL,
             )
 
-        # Preserve the existing persistent-stop contract even for a stale
-        # structured control. No action execution occurs here.
+        # Preserve the pinned persistent-stop contract: final_closed keeps
+        # its existing HTTP 200 ChatResponse (locked decision 4).
         if bool(getattr(conversation, "final_closed", False)):
             return ChatResponse(
                 reply=(
@@ -7907,9 +7949,138 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 },
             )
 
-        raise HTTPException(
-            status_code=409,
-            detail=STRUCTURED_ACTION_NOT_ACTIVE_DETAIL,
+        # Durable-boundary evaluation via the shared reason-returning
+        # helper (locked decision 6). handle_booking_action re-checks the
+        # SAME helper as defense in depth, so a state change between the
+        # two checks still produces the correct boundary outcome.
+        boundary = booking_boundary_state(conversation)
+        if boundary == BOUNDARY_LOCKED:
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_CONVERSATION_LOCKED,
+                build_zero_tolerance_lock_reply(office_phone),
+            )
+        if boundary == BOUNDARY_SAFETY_BLOCKED:
+            # Same-request Calendar cleanup — identical guarded pattern to
+            # the existing emergency-family blocks. A cleanup failure is
+            # logged and rolled back; the 409 below stays the patient-
+            # facing result (Rule 16: never a 500, never a false success).
+            if (booking_dialog_active(conversation)
+                    or getattr(conversation, "booking_selected_slot_id", None) is not None):
+                try:
+                    cancel_active_booking(db, client, conversation)
+                except Exception as cleanup_error:
+                    print(f"CALENDAR ACTION CLEANUP ERROR: exc_class={sanitized_exception_class(cleanup_error)} conversation={conversation.id}")
+                    try:
+                        db.rollback()
+                    except Exception as rollback_error:
+                        print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_SAFETY_BLOCKED,
+                STRUCTURED_ACTION_SAFETY_BLOCKED_DETAIL,
+            )
+
+        # Dispatch to the single Calendar action owner. Visible failure
+        # (Rule 16): mirror the existing booking dispatch boundary — log
+        # the class, roll back, answer safely, never pretend the action
+        # advanced.
+        try:
+            action_outcome = handle_booking_action(
+                db, client, conversation, req.action.choice_id
+            )
+        except Exception as e:
+            print(f"CALENDAR ACTION ERROR: exc_class={sanitized_exception_class(e)} conversation={conversation.id}")
+            try:
+                db.rollback()
+            except Exception as rollback_error:
+                print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+            reply_text = _booking_error_reply_text(db, client, conversation, office_phone)
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={"faq_match": False, "mode": "booking_error", "show_start_over": show_start_over},
+            )
+
+        if action_outcome.status == ACTION_NOT_ACTIVE:
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_NOT_ACTIVE,
+                STRUCTURED_ACTION_NOT_ACTIVE_DETAIL,
+            )
+        if action_outcome.status == ACTION_BOUNDARY:
+            # Between-checks state change (locked decision 6): map the
+            # helper's reason to the SAME outcomes the early checks give.
+            if action_outcome.boundary == BOUNDARY_FINAL_CLOSED:
+                return ChatResponse(
+                    reply=(
+                        "This conversation has ended. "
+                        "Please tap Start Over to begin a new request."
+                    ),
+                    conversation_id=str(conversation.id),
+                    meta={
+                        "mode": "final_closed",
+                        "faq_match": False,
+                        "show_start_over": show_start_over,
+                    },
+                )
+            if action_outcome.boundary == BOUNDARY_LOCKED:
+                raise _structured_action_error(
+                    ACTION_ERROR_CODE_CONVERSATION_LOCKED,
+                    build_zero_tolerance_lock_reply(office_phone),
+                )
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_SAFETY_BLOCKED,
+                STRUCTURED_ACTION_SAFETY_BLOCKED_DETAIL,
+            )
+        if action_outcome.status == ACTION_STALE_CHOICE:
+            raise _structured_action_error(
+                ACTION_ERROR_CODE_STALE_CHOICE,
+                STRUCTURED_ACTION_STALE_DETAIL,
+                calendar_actions=action_outcome.calendar_actions,
+            )
+
+        # V2 audit item 5 — explicit outcome validation: executed is
+        # REQUIRED, never assumed. The status vocabulary is closed (Rule 4/
+        # Rule 16): after the three rejections above, anything other than
+        # ACTION_EXECUTED with a non-null BookingReply and a non-empty
+        # server-derived user label is outcome drift, and it fails CLOSED
+        # through the SAME visible booking-error boundary as a dispatch
+        # exception — never a false success, and never an executed-action
+        # transcript (no user-label row is written on this path).
+        booking_reply = action_outcome.reply
+        if (action_outcome.status != ACTION_EXECUTED
+                or booking_reply is None
+                or not (action_outcome.user_label or "").strip()):
+            print(f"CALENDAR ACTION OUTCOME DRIFT: status={action_outcome.status!r} conversation={conversation.id}")
+            try:
+                db.rollback()
+            except Exception as rollback_error:
+                print(f"CALENDAR ROLLBACK ERROR: exc_class={sanitized_exception_class(rollback_error)} conversation={conversation.id}")
+            reply_text = _booking_error_reply_text(db, client, conversation, office_phone)
+            db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+            db.commit()
+            return ChatResponse(
+                reply=reply_text,
+                conversation_id=str(conversation.id),
+                meta={"faq_match": False, "mode": "booking_error", "show_start_over": show_start_over},
+            )
+
+        # Executed: any booking notifications already completed inside the
+        # handler under the clean-session entry contract; only NOW are
+        # transcript rows written — the server-derived user label first,
+        # the assistant reply second (locked decisions 13–14). Every
+        # rejection above persisted nothing (locked decision 12).
+        db.add(Message(conversation_id=conversation.id, role="user",
+                       content=action_outcome.user_label))
+        db.add(Message(conversation_id=conversation.id, role="assistant",
+                       content=booking_reply.text))
+        db.commit()
+        action_meta = {"faq_match": False, "show_start_over": show_start_over}
+        action_meta.update(booking_reply.meta)
+        return ChatResponse(
+            reply=booking_reply.text,
+            conversation_id=str(conversation.id),
+            meta=action_meta,
         )
 
     if conversation is None:

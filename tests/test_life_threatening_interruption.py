@@ -218,11 +218,45 @@ class _FakeBookingState:
 
 
 _module("app.calendar_models", BookingState=_FakeBookingState)
+def _unexpected_calendar_action(*args, **kwargs):
+    """V4.4 drift tripwire: the structured Calendar action lane must never
+    run inside this emergency suite — every request double carries
+    action=None, so the real route never dispatches it. If a future change
+    routes here anyway, fail LOUDLY instead of pretending a Calendar
+    action succeeded."""
+    raise AssertionError(
+        "handle_booking_action was invoked inside the emergency suite: "
+        "the structured Calendar action lane is outside this test's scope"
+    )
+
+
 _module(
     "app.services.booking_conversation",
+    # Pre-C1-C inert stand-ins (behavior unchanged).
     begin_booking_after_intake=lambda *a, **k: None,
     cancel_active_booking=lambda *a, **k: True,
     handle_booking_message=lambda *a, **k: (False, None),
+    # V4.4 (C1-C compatibility — owner-run collection ImportError): the
+    # real app.routes.chat now imports the full structured-action surface
+    # at module import time, so this stub must expose every name or
+    # collection fails before ANY emergency test runs. All stand-ins are
+    # inert and side-effect-free — Calendar execution is outside this
+    # suite's scope. Each status / boundary constant is a stable unique
+    # string. The real route calls booking_boundary_state exactly once,
+    # inside the structured-action lane behind `req.action is not None`,
+    # and compares its result only against the three boundary constants
+    # below — with action=None in every request double the reader is never
+    # invoked, and None would match none of the constants anyway, so the
+    # REAL text-path emergency routing under test proceeds unchanged.
+    ACTION_BOUNDARY="stub_action_boundary",
+    ACTION_EXECUTED="stub_action_executed",
+    ACTION_NOT_ACTIVE="stub_action_not_active",
+    ACTION_STALE_CHOICE="stub_action_stale_choice",
+    BOUNDARY_FINAL_CLOSED="stub_boundary_final_closed",
+    BOUNDARY_LOCKED="stub_boundary_locked",
+    BOUNDARY_SAFETY_BLOCKED="stub_boundary_safety_blocked",
+    booking_boundary_state=lambda conversation: None,
+    handle_booking_action=_unexpected_calendar_action,
 )
 _module(
     "app.services.appointment_intent",

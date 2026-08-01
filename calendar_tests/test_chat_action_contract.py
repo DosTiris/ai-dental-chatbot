@@ -172,7 +172,13 @@ def test_action_transport_rejects_without_mutating_existing_conversation(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_NOT_ACTIVE_DETAIL
+    # C1-C: with Calendar actions disabled for this client the action
+    # lane answers the structured ACTION_NOT_ACTIVE envelope; rejection
+    # still persists and mutates NOTHING (locked decision 12).
+    assert exc.value.detail == {
+        "code": chat_module.ACTION_ERROR_CODE_NOT_ACTIVE,
+        "message": chat_module.STRUCTURED_ACTION_NOT_ACTIVE_DETAIL,
+    }
 
     db.refresh(conversation)
     assert db.query(Message).count() == before_messages
@@ -208,7 +214,14 @@ def test_action_for_other_tenant_does_not_create_replacement_conversation(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_STALE_DETAIL
+    # C1-C: missing / unknown / cross-tenant / malformed conversation ids
+    # share ONE byte-identical envelope (locked decision 5); exact dict
+    # equality across these tests proves it and proves the submitted
+    # conversation_id is never echoed.
+    assert exc.value.detail == {
+        "code": chat_module.ACTION_ERROR_CODE_CONVERSATION_UNAVAILABLE,
+        "message": chat_module.STRUCTURED_ACTION_STALE_DETAIL,
+    }
     assert db.query(Message).count() == before_messages
     assert db.query(Conversation).count() == before_conversations
 
@@ -226,7 +239,14 @@ def test_action_for_unknown_conversation_does_not_create_conversation(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_STALE_DETAIL
+    # C1-C: missing / unknown / cross-tenant / malformed conversation ids
+    # share ONE byte-identical envelope (locked decision 5); exact dict
+    # equality across these tests proves it and proves the submitted
+    # conversation_id is never echoed.
+    assert exc.value.detail == {
+        "code": chat_module.ACTION_ERROR_CODE_CONVERSATION_UNAVAILABLE,
+        "message": chat_module.STRUCTURED_ACTION_STALE_DETAIL,
+    }
     assert db.query(Message).count() == before_messages
     assert db.query(Conversation).count() == before_conversations
 
@@ -261,7 +281,14 @@ def test_action_with_malformed_conversation_id_is_stale_without_mutation(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_STALE_DETAIL
+    # C1-C: missing / unknown / cross-tenant / malformed conversation ids
+    # share ONE byte-identical envelope (locked decision 5); exact dict
+    # equality across these tests proves it and proves the submitted
+    # conversation_id is never echoed.
+    assert exc.value.detail == {
+        "code": chat_module.ACTION_ERROR_CODE_CONVERSATION_UNAVAILABLE,
+        "message": chat_module.STRUCTURED_ACTION_STALE_DETAIL,
+    }
     assert db.query(Message).count() == before_messages
     assert db.query(Conversation).count() == before_conversations
 
@@ -278,10 +305,11 @@ def test_locked_conversation_action_pins_c1b_fail_closed_precedence(db):
     before_messages = db.query(Message).count()
     before_conversations = db.query(Conversation).count()
 
-    # C1-B transports but never executes actions. This test records the
-    # deliberate transport-only ordering: an action fails closed before the
-    # normal locked-conversation reply. C1-C must resolve guard precedence
-    # before any structured action is allowed to execute.
+    # C1-C resolves the C1-B deferred guard precedence: a locked
+    # conversation now answers the stable CONVERSATION_LOCKED envelope
+    # (via the shared booking_boundary_state helper) with the SAME
+    # zero-tolerance patient wording the text path uses, before any
+    # execution and with no persistence or mutation.
     with pytest.raises(HTTPException) as exc:
         chat_module.chat(
             _action_request(client, conversation.id),
@@ -290,7 +318,12 @@ def test_locked_conversation_action_pins_c1b_fail_closed_precedence(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_NOT_ACTIVE_DETAIL
+    assert exc.value.detail["code"] == (
+        chat_module.ACTION_ERROR_CODE_CONVERSATION_LOCKED
+    )
+    assert isinstance(exc.value.detail["message"], str)
+    assert exc.value.detail["message"]
+    assert "calendar_actions" not in exc.value.detail
 
     db.refresh(conversation)
     assert db.query(Message).count() == before_messages
@@ -305,9 +338,11 @@ def test_emergency_text_with_action_pins_c1b_deferred_safety_ordering(db):
     before_messages = db.query(Message).count()
     before_conversations = db.query(Conversation).count()
 
-    # This is a recorded C1-B deferral, not the future execution contract.
-    # C1-C must resolve final-closed, locked, misconduct, obscenity, and
-    # emergency boundaries before executing any structured Calendar action.
+    # C1-C resolution of the recorded C1-B deferral: the action lane
+    # treats the message as an untrusted display echo (locked decision
+    # 1) — it is never classified, so emergency text alongside an
+    # action mutates nothing; with Calendar actions disabled for this
+    # client the outcome is the structured ACTION_NOT_ACTIVE envelope.
     with pytest.raises(HTTPException) as exc:
         chat_module.chat(
             _action_request(
@@ -320,7 +355,10 @@ def test_emergency_text_with_action_pins_c1b_deferred_safety_ordering(db):
         )
 
     assert exc.value.status_code == 409
-    assert exc.value.detail == chat_module.STRUCTURED_ACTION_NOT_ACTIVE_DETAIL
+    assert exc.value.detail == {
+        "code": chat_module.ACTION_ERROR_CODE_NOT_ACTIVE,
+        "message": chat_module.STRUCTURED_ACTION_NOT_ACTIVE_DETAIL,
+    }
 
     db.refresh(conversation)
     assert db.query(Message).count() == before_messages

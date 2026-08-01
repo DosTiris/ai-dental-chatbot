@@ -28,13 +28,14 @@
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
-from app.calendar_models import BookingState
+from app.calendar_models import BookingState, SlotStatus
+from app.models import Conversation
 
 # PATCH 2C (Senior Audit Critical #8): how long a DISPLAYED slot menu stays
 # usable before Mia refreshes it. Fixed for the MVP (not per-office) and
@@ -72,6 +73,110 @@ class BookingReply:
     handled: bool
     text: str = ""
     meta: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# C1-C structured Calendar actions — vocabulary, outcome type, and choice
+# builders. This module is the SINGLE owner (Rule 3) of choice issuance and
+# resolution; the browser submits only the opaque choice_id and is never
+# authoritative for transition meaning, slots, labels, dates, or times.
+# ---------------------------------------------------------------------------
+
+# Wire action type. MUST equal the Literal in app/schemas.ChatAction
+# ("calendar_choice"); a sync test in calendar_tests/
+# test_chat_action_execution.py pins the equality (same pattern as the
+# PreviewDay day-state sync test).
+CALENDAR_CHOICE_ACTION_TYPE = "calendar_choice"
+
+# Server-issued confirmation choice prefixes. The suffix is ALWAYS the
+# selected-slot UUID persisted on the conversation; resolution happens HERE
+# against booking_state + booking_selected_slot_id only (locked decision 3).
+CONFIRM_YES_CHOICE_PREFIX = "confirm-yes:"
+CONFIRM_NO_CHOICE_PREFIX = "confirm-no:"
+
+# booking_boundary_state() return vocabulary (closed — Rule 4). The route
+# and handle_booking_action BOTH call the helper (locked decision 6) so a
+# state change between the two checks still lands on the correct boundary.
+BOUNDARY_FINAL_CLOSED = "final_closed"
+BOUNDARY_LOCKED = "locked"
+BOUNDARY_SAFETY_BLOCKED = "safety_blocked"
+BOUNDARY_NONE = "none"
+ALL_BOUNDARY_STATES = {
+    BOUNDARY_FINAL_CLOSED,
+    BOUNDARY_LOCKED,
+    BOUNDARY_SAFETY_BLOCKED,
+    BOUNDARY_NONE,
+}
+
+# handle_booking_action outcome statuses (closed — Rule 4).
+ACTION_EXECUTED = "executed"
+ACTION_BOUNDARY = "boundary"
+ACTION_NOT_ACTIVE = "not_active"
+ACTION_STALE_CHOICE = "stale_choice"
+
+
+@dataclass(frozen=True)
+class ActionOutcome:
+    """Explicit outcome of one structured Calendar action (C1-C).
+
+    status vocabulary:
+        executed     — a transition ran (or was idempotently restated);
+                       reply and user_label are set. Transcript persistence
+                       is the ROUTE's job, AFTER this returns, preserving
+                       the clean-session notification entry contract
+                       (locked decision 14).
+        boundary     — a durable conversation boundary refused the action;
+                       boundary carries booking_boundary_state's reason.
+        not_active   — Calendar actions (or booking) are disabled for this
+                       client; nothing beyond settings was read.
+        stale_choice — the choice did not resolve against current server
+                       state (forged / superseded / expired / cross-tenant
+                       — indistinguishable by design). calendar_actions
+                       carries the still-live replacement set when one
+                       exists WITHOUT mutating state; otherwise None.
+    """
+    status: str
+    boundary: str = BOUNDARY_NONE
+    reply: Optional[BookingReply] = None
+    user_label: Optional[str] = None
+    calendar_actions: Optional[List[dict]] = None
+
+
+def _confirm_choice_actions(selected_slot_id) -> List[dict]:
+    """The two server-issued confirmation choices bound to the persisted
+    selected slot. Labels are display text only; meaning lives server-side
+    and is re-derived from booking_state + booking_selected_slot_id."""
+    sid = str(selected_slot_id)
+    return [
+        {
+            "label": "Yes — book it",
+            "message": "Yes — book it",
+            "action": {"type": CALENDAR_CHOICE_ACTION_TYPE,
+                       "choice_id": CONFIRM_YES_CHOICE_PREFIX + sid},
+        },
+        {
+            "label": "No — pick another time",
+            "message": "No — pick another time",
+            "action": {"type": CALENDAR_CHOICE_ACTION_TYPE,
+                       "choice_id": CONFIRM_NO_CHOICE_PREFIX + sid},
+        },
+    ]
+
+
+def _slot_choice_actions(slots, tz_name: str) -> List[dict]:
+    """One tappable choice per offered slot, in display order; choice_id is
+    the slot UUID (opaque to the browser, resolved here against the
+    conversation's persisted offer — never trusted on its own)."""
+    actions = []
+    for s in slots:
+        label = _fmt_time(s.start_datetime, tz_name)
+        actions.append({
+            "label": label,
+            "message": label,
+            "action": {"type": CALENDAR_CHOICE_ACTION_TYPE,
+                       "choice_id": str(s.id)},
+        })
+    return actions
 
 
 # ---------------------------------------------------------------------------
@@ -629,11 +734,18 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
         f"I don\u2019t have {preference} openings on {_fmt_day(day)}, but I do have: "
         if relaxed else f"Here\u2019s what\u2019s open on {_fmt_day(day)}: "
     )
+    reply_meta = {"mode": "booking", "state": conversation.booking_state,
+                  "offered_slots": conversation.booking_offered_slot_ids}
+    if settings.calendar_actions_enabled:
+        # C1-C: tappable versions of the SAME persisted offer. Text replies
+        # ("1", "2", a time) keep working identically; buttons are additive.
+        reply_meta["calendar_actions"] = _slot_choice_actions(
+            slots, settings.timezone_name
+        )
     return BookingReply(
         True,
         f"{prefix}{menu}. Which works best?",
-        {"mode": "booking", "state": conversation.booking_state,
-         "offered_slots": conversation.booking_offered_slot_ids},
+        reply_meta,
     )
 
 
@@ -730,6 +842,23 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
         return BookingReply(True, text,
                             {"mode": "booking", "state": _get_state(conversation)})
 
+    # C1-C mechanical extraction: the hold-and-advance transition now lives
+    # in _hold_offered_slot so the structured-action path can run the SAME
+    # owner code (Rule 3) without synthesizing text. Logic byte-preserved.
+    return _hold_offered_slot(
+        db, client, conversation, settings, chosen_id, offered, now_utc
+    )
+
+
+def _hold_offered_slot(db, client, conversation, settings, chosen_id,
+                       offered, now_utc) -> BookingReply:
+    """Place the hold on ONE validated member of the persisted offer and
+    advance to WAITING_FOR_CONFIRMATION. Extracted MECHANICALLY from
+    _handle_slot_selection for C1-C so the text path and the structured-
+    action path share the single transition owner; the moved logic is
+    byte-preserved apart from recomputing tz locally and the flag-gated
+    calendar_actions meta addition at the end."""
+    tz = ZoneInfo(settings.timezone_name)
     hold = appointment_hold_service.place_hold(
         db, client.id, uuid.UUID(chosen_id), conversation.id,
         settings=settings,
@@ -738,11 +867,69 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
         now_utc=now_utc,
     )
     if not hold.success:
-        # Lost the race (Rule 9's two-patients case) OR current policy now
-        # rejects the slot (Patch 2C): say so accurately, re-offer fresh.
+        # V3 (audit item 1): place_hold completed INTERNALLY (commit or
+        # rollback) even on failure, and this request may have entered from
+        # a stale WAITING_FOR_SLOT_SELECTION snapshot while a concurrent
+        # request already advanced the conversation (e.g. to a live
+        # confirmation). Reacquire + reload the tenant-scoped row BEFORE
+        # the re-offer decision. No slot release happens on this path:
+        # this request acquired no hold.
+        locked = _lock_conversation_row(db, client, conversation)
+        fresh_selected = getattr(conversation, "booking_selected_slot_id", None)
+        if (locked is None
+                or _get_state(conversation) != BookingState.WAITING_FOR_SLOT_SELECTION
+                or chosen_id not in _get_offered_ids(conversation)
+                or _offer_is_expired(conversation, now_utc)
+                or fresh_selected is not None):
+            # A newer state/selection won while this request was in flight:
+            # PRESERVE it — never overwrite a concurrent confirmation or
+            # appointment state with a blind re-offer. Release the row lock
+            # without writing and answer truthfully for the state that won.
+            db.commit()  # No writes: releases the FOR UPDATE row lock only.
+            return _truthful_current_state_reply(
+                db, client, conversation, settings, now_utc
+            )
+        # Still the same live selection wait (sequential case): lost the
+        # race for THIS slot (Rule 9's two-patients case) OR current policy
+        # now rejects it (Patch 2C) — say so accurately, re-offer fresh.
+        # The re-offer's writes commit under the row lock taken above.
         return _reoffer_after_conflict(
             db, client, conversation, settings, now_utc,
             ineligible=(hold.reason == "slot_ineligible"),
+        )
+
+    # V2 audit item 4 (race A): place_hold COMMITTED internally, so the
+    # conversation snapshot that entered this function is no longer
+    # authoritative — and any lock taken before place_hold would already
+    # have been released by that commit. Reacquire the tenant-scoped row
+    # under FOR UPDATE, reload the newest state, and only then decide
+    # winner or loser. This request wins only while the conversation still
+    # awaits a selection, the submitted choice is still a member of the
+    # live persisted offer, and no DIFFERENT slot has already won.
+    locked = _lock_conversation_row(db, client, conversation)
+    fresh_selected = getattr(conversation, "booking_selected_slot_id", None)
+    if (locked is None
+            or _get_state(conversation) != BookingState.WAITING_FOR_SLOT_SELECTION
+            or chosen_id not in _get_offered_ids(conversation)
+            or _offer_is_expired(conversation, now_utc)
+            or (fresh_selected is not None and str(fresh_selected) != chosen_id)):
+        # Loser: another request advanced this conversation between the
+        # hold commit and this lock. Release ONLY the hold THIS request
+        # just placed — and only when the surviving selection is a
+        # DIFFERENT slot (if the survivor selected this same slot, the
+        # hold this request just refreshed IS the surviving hold). The
+        # winner's conversation state is never mutated here.
+        if fresh_selected is None or str(fresh_selected) != chosen_id:
+            appointment_hold_service.release_hold(
+                db, client.id, uuid.UUID(chosen_id), conversation.id
+            )  # Commits internally: the row lock above is released here.
+        else:
+            db.commit()  # No writes: releases the FOR UPDATE row lock only.
+        # Reload once more (the release committed) before constructing the
+        # response, then answer truthfully for the state that won.
+        _reload_conversation(db, client, conversation)
+        return _truthful_current_state_reply(
+            db, client, conversation, settings, now_utc
         )
 
     conversation.booking_selected_slot_id = uuid.UUID(chosen_id)
@@ -760,11 +947,18 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
     chosen = next(s for s in offered if str(s.id) == chosen_id)
     when = (f"{_fmt_day(ensure_utc(chosen.start_datetime).astimezone(tz).date())} at "
             f"{_fmt_time(chosen.start_datetime, settings.timezone_name)}")
+    reply_meta = {"mode": "booking", "state": conversation.booking_state,
+                  "held_until": hold.held_until.isoformat() if hold.held_until else None}
+    if settings.calendar_actions_enabled:
+        # C1-C: tappable yes/no versions of the SAME confirmation question.
+        # Text replies keep working identically; buttons are additive.
+        reply_meta["calendar_actions"] = _confirm_choice_actions(
+            conversation.booking_selected_slot_id
+        )
     return BookingReply(
         True,
         f"To confirm: {conversation.lead_name} on {when}. Is that correct?",
-        {"mode": "booking", "state": conversation.booking_state,
-         "held_until": hold.held_until.isoformat() if hold.held_until else None},
+        reply_meta,
     )
 
 
@@ -798,26 +992,20 @@ def _handle_confirmation(db, client, conversation, settings, user_text, now_utc)
         return _confirmation_change_day(db, client, conversation, settings,
                                         slot_id, new_date, today_local, now_utc)
     if decision is None:
+        reply_meta = {"mode": "booking",
+                      "state": BookingState.WAITING_FOR_CONFIRMATION}
+        if settings.calendar_actions_enabled and slot_id is not None:
+            # C1-C: re-issue the tappable yes/no with the one re-ask.
+            reply_meta["calendar_actions"] = _confirm_choice_actions(slot_id)
         return BookingReply(
             True,
             "Should I book that time for you — yes or no?",
-            {"mode": "booking", "state": BookingState.WAITING_FOR_CONFIRMATION},
+            reply_meta,
         )
     if decision is False:
-        if slot_id is not None:
-            appointment_hold_service.release_hold(db, client.id, slot_id, conversation.id)
-        conversation.booking_state = BookingState.WAITING_FOR_DATE
-        conversation.booking_selected_slot_id = None
-        conversation.booking_offered_slot_ids = None
-        conversation.booking_offer_expires_at = None            # Patch 2C
-        conversation.booking_effective_time_preference = None   # Patch 2C
-        db.add(conversation)
-        db.commit()
-        return BookingReply(
-            True,
-            "No problem — what day would work better?",
-            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE},
-        )
+        # C1-C mechanical extraction: shared with the structured-action
+        # confirm-no path (Rule 3 single owner); logic byte-preserved.
+        return _decline_and_restart(db, client, conversation, settings, slot_id)
 
     return _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc)
 
@@ -835,7 +1023,69 @@ def _confirmation_change_day(db, client, conversation, settings, slot_id,
     return _offer_slots(db, client, conversation, settings, now_utc)
 
 
-def _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc) -> BookingReply:
+def _decline_and_restart(db, client, conversation, settings, slot_id) -> BookingReply:
+    """The confirmation 'no' transition: release this conversation's hold
+    and restart at the day question. C1-C shared single owner (Rule 3) for
+    the text path and the structured-action confirm-no path.
+
+    V2 audit item 4 (race B): release_hold COMMITS internally and reports
+    success even when the slot is no longer held — including when a racing
+    confirm-yes just BOOKED it — so every conversation mutation below
+    happens only after reacquiring + reloading the row, and an active
+    appointment always outranks the restart. A patient must never be asked
+    "what day would work better?" while their appointment already exists.
+    Sequential (non-race) behavior is unchanged: the reloaded state matches
+    the snapshot, and the restart proceeds exactly as before."""
+    if slot_id is not None:
+        appointment_hold_service.release_hold(db, client.id, slot_id, conversation.id)
+
+    # Reacquire + reload AFTER the internally committing release; decide on
+    # the newest row, never the entry snapshot (V2 item 4).
+    locked = _lock_conversation_row(db, client, conversation)
+    now_utc = client_now(settings).astimezone(ZoneInfo("UTC"))
+
+    existing = appointment_repository.get_appointment_by_conversation(
+        db, client.id, conversation.id
+    )
+    if existing is not None:
+        # A concurrent confirm-yes won the race: clear any stale dialog
+        # state and restate the appointment that actually exists.
+        _clear_booking_state(conversation)
+        db.add(conversation)
+        db.commit()
+        return _reply_existing_appointment(existing, settings)
+
+    fresh_selected = getattr(conversation, "booking_selected_slot_id", None)
+    if (locked is not None
+            and _get_state(conversation) == BookingState.WAITING_FOR_CONFIRMATION
+            and (slot_id is None
+                 or fresh_selected is None
+                 or str(fresh_selected) == str(slot_id))):
+        # Still the same pending confirmation this 'no' answered: restart
+        # at the day question (pre-V2 behavior, now under the row lock).
+        conversation.booking_state = BookingState.WAITING_FOR_DATE
+        conversation.booking_selected_slot_id = None
+        conversation.booking_offered_slot_ids = None
+        conversation.booking_offer_expires_at = None            # Patch 2C
+        conversation.booking_effective_time_preference = None   # Patch 2C
+        db.add(conversation)
+        db.commit()
+        return BookingReply(
+            True,
+            "No problem — what day would work better?",
+            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE},
+        )
+
+    # Another request already moved this conversation to a different valid
+    # state: preserve it (never overwrite the newer row from this older
+    # request), release the row lock without writing, and answer truthfully
+    # for the state that won.
+    db.commit()
+    return _truthful_current_state_reply(db, client, conversation, settings, now_utc)
+
+
+def _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc,
+                        *, restate_after_hold_loss: bool = False) -> BookingReply:
     """The single place where WAITING_FOR_CONFIRMATION becomes BOOKED —
     which is why notifications here can never fire twice (Rule 10)."""
     if slot_id is None:  # State corruption: never invent a slot; restart.
@@ -860,12 +1110,51 @@ def _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc) ->
     )
 
     if result.reason == "already_booked_by_conversation" and result.appointment:
+        # V2 audit item 4: finalize_booking committed internally — reacquire
+        # + reload before the terminal clear so this write never resurrects
+        # a stale snapshot over a concurrent request's newer state.
+        _lock_conversation_row(db, client, conversation)
         _clear_booking_state(conversation)
         db.add(conversation)
         db.commit()
         return _reply_existing_appointment(result.appointment, settings)
 
     if not result.success:
+        # V2 audit item 4: finalize_booking committed / rolled back
+        # internally, so the pre-call conversation snapshot is not
+        # authoritative. Reacquire the row under FOR UPDATE and reload
+        # BEFORE any recovery decision or conversation write.
+        locked = _lock_conversation_row(db, client, conversation)
+        # C1-C (approved C-3, ACTION PATH ONLY via the keyword flag): a
+        # concurrent same-slot duplicate can lose the race AFTER this
+        # conversation's other request already created the appointment
+        # (verified: finalize_booking's loser sees status BOOKED and
+        # reports hold_lost before reaching the INSERT and its unique-
+        # index handler). Re-check and RESTATE instead of re-offering —
+        # never a second booking, never a second notification. Text-path
+        # parity is a recorded deferred finding.
+        if restate_after_hold_loss and result.reason in ("hold_lost", "hold_expired"):
+            existing = appointment_repository.get_appointment_by_conversation(
+                db, client.id, conversation.id
+            )
+            if existing is not None:
+                _clear_booking_state(conversation)
+                db.add(conversation)
+                db.commit()
+                return _reply_existing_appointment(existing, settings)
+        # V2 audit item 4 (race B): if a concurrent request already moved
+        # this conversation out of this confirmation (e.g. confirm-no
+        # restarted at the day question), PRESERVE that state — never
+        # blindly re-offer over it, never overwrite the newer row from
+        # this older request. Answer truthfully for the state that won.
+        if (locked is None
+                or _get_state(conversation) != BookingState.WAITING_FOR_CONFIRMATION
+                or (getattr(conversation, "booking_selected_slot_id", None) is not None
+                    and str(conversation.booking_selected_slot_id) != str(slot_id))):
+            db.commit()  # No writes: releases the FOR UPDATE row lock only.
+            return _truthful_current_state_reply(
+                db, client, conversation, settings, now_utc
+            )
         # hold_lost / hold_expired / slot_missing / slot_ineligible: the
         # under-lock recheck failed — re-offer. On slot_ineligible the hold
         # was already released atomically inside finalize_booking; the
@@ -885,6 +1174,12 @@ def _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc) ->
     notification_service.send_booking_notifications(
         db, client, result.appointment, settings
     )
+    # V2 audit item 4: the successful finalize committed internally —
+    # reacquire + reload before the terminal clear so this write never
+    # resurrects a stale snapshot over a concurrent request's newer state.
+    # The cleared terminal state is authoritative in EVERY interleaving
+    # here, because the appointment now exists (Rule 14 terminal cleanup).
+    _lock_conversation_row(db, client, conversation)
     _clear_booking_state(conversation)
     db.add(conversation)
     db.commit()
@@ -956,3 +1251,415 @@ def _restate_or_reset(db, client, conversation, settings) -> BookingReply:
         return _reply_existing_appointment(existing, settings)
     return BookingReply(True, "What day would work best for your appointment?",
                         {"mode": "booking", "state": BookingState.NONE})
+
+
+# ---------------------------------------------------------------------------
+# C1-C structured-action boundary + execution owner.
+# ---------------------------------------------------------------------------
+
+def _conversation_locked_for_actions(conversation) -> bool:
+    """Locked check for the Calendar action boundary: abuse_locked_until in
+    the future. NOTE (Rule 3, documented duplication): chat.py's
+    conversation_is_locked() remains the chat-path owner of this rule;
+    importing it here would create a route<->service import cycle, so this
+    module reads the SAME single persisted column with the SAME comparison.
+    A drift test in calendar_tests/test_chat_action_execution.py pins both
+    readers to identical verdicts on the same conversation row."""
+    until = getattr(conversation, "abuse_locked_until", None)
+    if until is None:
+        return False
+    try:
+        return until > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def booking_boundary_state(conversation) -> str:
+    """
+    Purpose: The single reason-returning durable-boundary reader for
+             structured Calendar actions (C1-C locked decision 6).
+    Inputs:  conversation row.
+    Returns: one of ALL_BOUNDARY_STATES, evaluated in the SAME relative
+             order the chat text path enforces its guards: final_closed,
+             then locked, then the durable emergency flag.
+    Database effects: none (pure read).
+    Possible failures: none; missing columns read as unset.
+    """
+    if bool(getattr(conversation, "final_closed", False)):
+        return BOUNDARY_FINAL_CLOSED
+    if _conversation_locked_for_actions(conversation):
+        return BOUNDARY_LOCKED
+    if bool(getattr(conversation, "lead_is_emergency", False)):
+        return BOUNDARY_SAFETY_BLOCKED
+    return BOUNDARY_NONE
+
+
+def handle_booking_action(db, client, conversation, choice_id) -> ActionOutcome:
+    """
+    Purpose: Execute ONE structured Calendar action (C1-C). The single
+             owner of choice resolution, freshness, replay defense, and the
+             defense-in-depth boundary re-check; the transitions themselves
+             run through the SAME handlers the text path uses (Rule 3).
+    Inputs:  live session, client row, conversation row, and the opaque
+             choice_id from the validated ChatAction. The request's message
+             field is an untrusted display echo and is NEVER passed here
+             (locked decision 1).
+    Returns: ActionOutcome (closed status vocabulary above).
+    Database effects: none for not_active / boundary / stale outcomes
+        (state is never mutated on a rejection, EXCEPT the safety-blocked
+        Calendar-owned cleanup below, mirroring handle_booking_message);
+        executed outcomes perform exactly the text path's transactions via
+        the shared handlers.
+    External effects: notifications only via _finalize_and_reply's single
+        success branch, exactly as the text path. This returns BEFORE the
+        route persists any transcript rows, preserving the clean-session
+        notification entry contract (locked decision 14).
+    Possible failures: service/db exceptions propagate to chat.py's logged
+        boundary — no broad except here (Rule 4).
+    """
+    # V4 audit item 1 — REAL database boundary recheck: the route judged
+    # the boundary on its OWN ORM snapshot, and a boundary committed by
+    # another PostgreSQL session between that first read and this
+    # execution is not necessarily visible on that snapshot. Reload the
+    # tenant-scoped row (populate_existing under no_autoflush; no lock
+    # taken) so the defense-in-depth check below is judged against the
+    # NEWEST committed state. This is a point-in-time read: no claim is
+    # made that it spans the internally committing service calls later in
+    # the dispatch — the post-service reconciliation (V2 item 4 / V3
+    # item 1) owns those windows. An unresolvable tenant-scoped row fails
+    # CLOSED with the no-replacement stale rejection (no mutation).
+    if _reload_conversation(db, client, conversation) is None:
+        return ActionOutcome(ACTION_STALE_CHOICE)
+
+    # V2 audit item 3 — defense-in-depth precedence: the durable boundary
+    # is re-checked BEFORE feature availability, so a boundary state change
+    # between the route's first read and this execution always wins — even
+    # when booking_enabled / calendar_actions_enabled is false. NOT_ACTIVE
+    # must never mask LOCKED / SAFETY_BLOCKED / FINAL_CLOSED.
+    boundary = booking_boundary_state(conversation)
+    if boundary == BOUNDARY_SAFETY_BLOCKED:
+        # Defense in depth, mirroring handle_booking_message: an emergency-
+        # flagged conversation never books, and any lingering dialog state
+        # (a live hold included) is cleaned up by the Calendar-owned reset.
+        if (_get_state(conversation) != BookingState.NONE
+                or getattr(conversation, "booking_selected_slot_id", None) is not None):
+            cancel_active_booking(db, client, conversation)
+        return ActionOutcome(ACTION_BOUNDARY, boundary=boundary)
+    if boundary != BOUNDARY_NONE:
+        return ActionOutcome(ACTION_BOUNDARY, boundary=boundary)
+
+    settings = load_calendar_settings(client)
+    if not (settings.booking_enabled and settings.calendar_actions_enabled):
+        return ActionOutcome(ACTION_NOT_ACTIVE)
+
+    now_utc = client_now(settings).astimezone(ZoneInfo("UTC"))
+    state = _get_state(conversation)
+    choice = str(choice_id or "").strip()
+
+    if state == BookingState.WAITING_FOR_SLOT_SELECTION:
+        return _resolve_selection_action(
+            db, client, conversation, settings, choice, now_utc
+        )
+    if state == BookingState.WAITING_FOR_CONFIRMATION:
+        return _resolve_confirmation_action(
+            db, client, conversation, settings, choice, now_utc
+        )
+
+    # NONE / BOOKED / date / preference states issue no choices. V2 audit
+    # item 1 — ONE deliberate exception: a confirm-yes token provably bound
+    # to THIS conversation's active appointment's consumed slot is a
+    # response-loss retry of an already-successful booking. Restate the
+    # appointment (HTTP 200): never re-finalize, never notify, never touch
+    # the notification-attempt ledger, never mutate state. Every other
+    # token (mismatched slot, confirm-no, random) stays STALE_CHOICE. No
+    # replacement set exists without mutating state, so none is returned
+    # (widget falls back).
+    if choice.startswith(CONFIRM_YES_CHOICE_PREFIX):
+        existing = appointment_repository.get_appointment_by_conversation(
+            db, client.id, conversation.id
+        )
+        if (existing is not None
+                and choice == CONFIRM_YES_CHOICE_PREFIX + str(existing.slot_id)):
+            return ActionOutcome(
+                ACTION_EXECUTED,
+                reply=_reply_existing_appointment(existing, settings),
+                user_label="Yes — book it",
+            )
+    return ActionOutcome(ACTION_STALE_CHOICE)
+
+
+def _resolve_selection_action(db, client, conversation, settings, choice,
+                              now_utc) -> ActionOutcome:
+    """WAITING_FOR_SLOT_SELECTION: the choice must be a member of THIS
+    conversation's persisted offer AND the offer must be unexpired
+    (booking_offer_expires_at — the existing Patch 2C authority). A valid
+    re-submission after an interrupted transition re-runs the hold (ONE
+    legitimate held_until refresh — approved C-5 recovery); everything
+    else is STALE_CHOICE, with the still-live offer re-issued as the
+    replacement set when it exists (no state mutation on rejection)."""
+    offered_ids = _get_offered_ids(conversation)
+    offer_live = bool(offered_ids) and not _offer_is_expired(conversation, now_utc)
+
+    if offer_live and choice in offered_ids:
+        offered = _load_offered_slots(db, client, conversation)
+        chosen = next((s for s in offered if str(s.id) == choice), None)
+        if chosen is not None:
+            reply = _hold_offered_slot(
+                db, client, conversation, settings, choice, offered, now_utc
+            )
+            label = "Selected " + _fmt_time(
+                chosen.start_datetime, settings.timezone_name
+            )
+            return ActionOutcome(ACTION_EXECUTED, reply=reply, user_label=label)
+        # The offered row vanished (staff edit): fall through to stale.
+
+    replacement = None
+    if offer_live:
+        live_rows = _load_offered_slots(db, client, conversation)
+        if live_rows:
+            replacement = _slot_choice_actions(live_rows, settings.timezone_name)
+    return ActionOutcome(ACTION_STALE_CHOICE, calendar_actions=replacement)
+
+
+def _resolve_confirmation_action(db, client, conversation, settings, choice,
+                                 now_utc) -> ActionOutcome:
+    """WAITING_FOR_CONFIRMATION resolution. Exactly three live choices
+    exist, all bound to the persisted selected slot: the slot id itself (a
+    pure replay of the completed selection — approved decision 7: restate,
+    never call place_hold, never touch held_until), confirm-yes, and
+    confirm-no. Anything else is STALE_CHOICE."""
+    selected = getattr(conversation, "booking_selected_slot_id", None)
+    if selected is None:
+        return ActionOutcome(ACTION_STALE_CHOICE)
+    sid = str(selected)
+
+    if choice == sid:
+        # V2 audit item 2: a replay restatement is only truthful while the
+        # selected slot still has a LIVE hold owned by this conversation.
+        # Expired, released, booked, missing, or foreign-owned holds make
+        # the choice stale — with NO replacement confirmation buttons,
+        # because those buttons would advertise a confirmation that can no
+        # longer succeed. held_until is never refreshed or extended here.
+        if not _selected_hold_is_live(db, client, conversation, now_utc):
+            return ActionOutcome(ACTION_STALE_CHOICE)
+        reply = _restate_pending_confirmation(db, client, conversation, settings)
+        if reply is None:
+            return ActionOutcome(ACTION_STALE_CHOICE)
+        return ActionOutcome(
+            ACTION_EXECUTED, reply=reply,
+            user_label="Selected the offered time",
+        )
+    if choice == CONFIRM_YES_CHOICE_PREFIX + sid:
+        reply = _finalize_and_reply(
+            db, client, conversation, settings, selected, now_utc,
+            restate_after_hold_loss=True,
+        )
+        return ActionOutcome(
+            ACTION_EXECUTED, reply=reply, user_label="Yes — book it",
+        )
+    if choice == CONFIRM_NO_CHOICE_PREFIX + sid:
+        reply = _decline_and_restart(db, client, conversation, settings, selected)
+        return ActionOutcome(
+            ACTION_EXECUTED, reply=reply,
+            user_label="No — pick another time",
+        )
+
+    # V2 audit item 2: replacement confirmation choices are re-issued ONLY
+    # over a live owned hold (same rule as the replay above). A valid
+    # confirm-yes / confirm-no token above still enters its transition
+    # owner unchanged — finalize_booking keeps ownership of the normal
+    # hold-expired / hold-lost re-offer outcome.
+    if not _selected_hold_is_live(db, client, conversation, now_utc):
+        return ActionOutcome(ACTION_STALE_CHOICE)
+    return ActionOutcome(
+        ACTION_STALE_CHOICE,
+        calendar_actions=_confirm_choice_actions(selected),
+    )
+
+
+def _restate_pending_confirmation(db, client, conversation, settings):
+    """Replay short-circuit (locked decision 7): restate the pending
+    confirmation from persisted state + the slot row. NO service call, NO
+    state change, held_until untouched (the fail-first test pins the value
+    byte-identical). Returns None when the slot row no longer exists for
+    this tenant (the choice is then reported stale)."""
+    slot_id = getattr(conversation, "booking_selected_slot_id", None)
+    rows = appointment_repository.get_slots_by_ids(db, client.id, [slot_id])
+    if not rows:
+        return None
+    slot = rows[0]
+    tz = ZoneInfo(settings.timezone_name)
+    when = (f"{_fmt_day(ensure_utc(slot.start_datetime).astimezone(tz).date())} at "
+            f"{_fmt_time(slot.start_datetime, settings.timezone_name)}")
+    reply_meta = {"mode": "booking",
+                  "state": BookingState.WAITING_FOR_CONFIRMATION}
+    if settings.calendar_actions_enabled:
+        reply_meta["calendar_actions"] = _confirm_choice_actions(slot_id)
+    return BookingReply(
+        True,
+        f"To confirm: {conversation.lead_name} on {when}. Is that correct?",
+        reply_meta,
+    )
+
+
+# ---------------------------------------------------------------------------
+# V2 (C1-C audit items 2 and 4): confirmation-stage hold validity and per-
+# conversation concurrency reconciliation. place_hold / release_hold /
+# finalize_booking commit INTERNALLY, so any conversation-row lock taken
+# before one of those calls is released by that internal commit and is not
+# authoritative afterward. The rule enforced by these helpers: after every
+# internally committing service call, reacquire the tenant-scoped row under
+# SELECT ... FOR UPDATE, reload its newest state, and revalidate BEFORE
+# changing any conversation field. A request that began from an older ORM
+# snapshot must never overwrite a newer committed state.
+# ---------------------------------------------------------------------------
+
+def _selected_hold_is_live(db, client, conversation, now_utc) -> bool:
+    """
+    Purpose: Confirmation-stage hold validity (V2 audit item 2). Verifies —
+             WITHOUT refreshing or extending anything — that the persisted
+             selected slot still exists for this tenant, is HELD, is held
+             by THIS conversation, and has held_until in the future.
+    Inputs:  live session, client row, conversation row, now_utc.
+    Returns: True only when all four conditions hold.
+    Database effects: none (pure tenant-scoped read; held_until untouched).
+    Possible failures: none; a missing row or unset field reads as not-live.
+    """
+    slot_id = getattr(conversation, "booking_selected_slot_id", None)
+    if slot_id is None:
+        return False
+    rows = appointment_repository.get_slots_by_ids(db, client.id, [slot_id])
+    if not rows:
+        return False
+    slot = rows[0]
+    if slot.status != SlotStatus.HELD:
+        return False
+    if slot.held_by_conversation_id != conversation.id:
+        return False
+    if slot.held_until is None:
+        return False
+    return ensure_utc(slot.held_until) > ensure_utc(now_utc)
+
+
+def _lock_conversation_row(db, client, conversation):
+    """
+    Purpose: Reacquire the tenant-scoped conversation row under
+             SELECT ... FOR UPDATE and RELOAD its newest committed state
+             (V2 audit item 4). Called AFTER an internally committing
+             service call and BEFORE any conversation mutation, so the
+             mutation decision is made against the newest row — never a
+             stale ORM snapshot.
+    Inputs:  live session, client row, the in-session conversation object.
+    Returns: the SAME identity-mapped conversation object with refreshed
+             state, or None if the row no longer exists for this tenant.
+    Database effects: takes the PostgreSQL row lock; the CALLER's next
+        commit (or rollback) releases it. No writes happen here.
+    Possible failures: db exceptions propagate to the caller's boundary.
+    """
+    # no_autoflush: this helper must never flush a pending stale mutation
+    # to the database as a side effect of its own SELECT.
+    with db.no_autoflush:
+        return (
+            db.query(Conversation)
+            .filter(
+                Conversation.id == conversation.id,
+                Conversation.client_id == client.id,
+            )
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+
+
+def _reload_conversation(db, client, conversation) -> None:
+    """
+    Purpose: Non-locking populate_existing reload (V2 audit item 4):
+             refresh the in-session conversation object to the newest
+             committed row. No lock is taken. V4 audit item 1 also uses
+             this as the REAL-database boundary reload at action entry.
+    Returns: the SAME identity-mapped conversation object with refreshed
+             state, or None if the tenant-scoped row can no longer be
+             resolved (deleted or cross-tenant) — callers fail closed.
+    Database effects: none (SELECT only).
+    Possible failures: db exceptions propagate to the caller's boundary.
+    """
+    with db.no_autoflush:
+        return (
+            db.query(Conversation)
+            .filter(
+                Conversation.id == conversation.id,
+                Conversation.client_id == client.id,
+            )
+            .populate_existing()
+            .first()
+        )
+
+
+def _truthful_current_state_reply(db, client, conversation, settings,
+                                  now_utc) -> BookingReply:
+    """
+    Purpose: Build a truthful reply for a request that LOST a per-
+             conversation race (V2 audit item 4). The caller must have just
+             reloaded the conversation row; this function mutates NOTHING —
+             the surviving request owns the state.
+    Inputs:  live session, client row, freshly reloaded conversation,
+             settings, now_utc.
+    Returns: BookingReply describing the CURRENT persisted state. An active
+             appointment outranks everything; a live owned confirmation is
+             restated (confirmation choices only over a live hold — audit
+             item 2); a live persisted offer is re-shown; otherwise the
+             question matching the persisted state is repeated, with the
+             persisted state reported unchanged in the reply meta.
+    Database effects: none (reads only).
+    Possible failures: db exceptions propagate to the caller's boundary.
+    """
+    existing = appointment_repository.get_appointment_by_conversation(
+        db, client.id, conversation.id
+    )
+    if existing is not None:
+        return _reply_existing_appointment(existing, settings)
+
+    state = _get_state(conversation)
+    if state == BookingState.WAITING_FOR_CONFIRMATION:
+        if _selected_hold_is_live(db, client, conversation, now_utc):
+            reply = _restate_pending_confirmation(db, client, conversation, settings)
+            if reply is not None:
+                return reply
+        # Dead hold: never advertise confirmation choices over it (item 2).
+        # The text handler for this state accepts a new day, so the day
+        # question is answerable exactly as asked.
+        return BookingReply(
+            True, "What day would work best for your appointment?",
+            {"mode": "booking", "state": state},
+        )
+    if state == BookingState.WAITING_FOR_TIME_PREFERENCE:
+        return BookingReply(
+            True, "Do you prefer morning or afternoon?",
+            {"mode": "booking", "state": state},
+        )
+    if state == BookingState.WAITING_FOR_SLOT_SELECTION:
+        if not _offer_is_expired(conversation, now_utc):
+            rows = _load_offered_slots(db, client, conversation)
+            if rows:
+                # Re-show the SAME persisted live offer (approved wording
+                # from _offer_slots, day prefix reused when the stored day
+                # is readable); no offer fields are rewritten.
+                menu = _slot_menu(rows, settings.timezone_name)
+                day = _get_pref_date(conversation)
+                prefix = (f"Here’s what’s open on {_fmt_day(day)}: "
+                          if day is not None else "")
+                reply_meta = {"mode": "booking", "state": state,
+                              "offered_slots": _get_offered_ids(conversation)}
+                if settings.calendar_actions_enabled:
+                    reply_meta["calendar_actions"] = _slot_choice_actions(
+                        rows, settings.timezone_name
+                    )
+                return BookingReply(
+                    True, f"{prefix}{menu}. Which works best?", reply_meta,
+                )
+    # WAITING_FOR_DATE / NONE / anything else without an appointment: the
+    # day question, with the persisted state reported unchanged.
+    return BookingReply(
+        True, "What day would work best for your appointment?",
+        {"mode": "booking", "state": state},
+    )

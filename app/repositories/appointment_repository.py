@@ -131,6 +131,26 @@ def get_slot_for_update(
             AppointmentSlot.id == slot_id,
         )
         .with_for_update()
+        # V4.2 (owner-run PostgreSQL evidence — real concurrency defect):
+        # the SELECT ... FOR UPDATE always FETCHES the latest committed row
+        # values, but when this session's identity map already holds a
+        # non-expired copy of the slot (loaded earlier in the SAME
+        # transaction — e.g. the displayed offer was re-read moments before
+        # place_hold), SQLAlchemy's default is to KEEP the stale in-memory
+        # attributes and discard the freshly fetched ones. Every status /
+        # owner / expiry check inside place_hold, release_hold, and
+        # finalize_booking would then judge stale state even though the
+        # row lock itself is real — allowing a hold over another
+        # conversation's newer hold, a finalize over a released hold, or a
+        # release of a just-booked slot. populate_existing() forces the
+        # locked read's fetched values onto the identity-mapped instance,
+        # so this SINGLE owner (Rule 3) hands all three services the
+        # latest committed row in every interleaving. Safe here because
+        # callers never carry uncommitted slot mutations into this read
+        # (services mutate the slot only AFTER it), and every service exit
+        # commits or rolls back — expiring the session — before any later
+        # read in the same request.
+        .populate_existing()
         .first()
     )
 

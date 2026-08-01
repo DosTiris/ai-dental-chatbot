@@ -604,6 +604,373 @@ async function main() {
     );
   }
 
+  // ------------------------------------------------------------------
+  // C1-C: structured-action failure handling (locked decisions 15-17).
+  // ------------------------------------------------------------------
+
+  function rejectedJson(status, payload) {
+    return Promise.resolve({
+      ok: false,
+      status: status,
+      json: () => Promise.resolve(payload),
+    });
+  }
+
+  function botMessages(sb) {
+    return sb.elementsById.messages.children
+      .filter((child) => String(child.className).indexOf("msg bot") === 0)
+      .map((child) => child.textContent);
+  }
+
+  async function sendAction(sb) {
+    run(sb.context, 'conversationId = "conv-existing"');
+    run(sb.context, 'document.getElementById("input").value = "2:00 PM"');
+    await run(
+      sb.context,
+      'sendMessage({type:"calendar_choice",choice_id:"choice-a"})'
+    );
+  }
+
+  // Recognized STALE_CHOICE with a replacement set renders the server
+  // message and ONLY the recognized replacement buttons.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: {
+          code: "STALE_CHOICE",
+          message: "That time is gone. Fresh options:",
+          calendar_actions: [{
+            label: "10:00 AM", message: "10:00 AM",
+            action: { type: "calendar_choice", choice_id: "slot-2" },
+          }],
+        },
+      }),
+    });
+    await sendAction(sb);
+    const buttons = quickReplyButtons(sb.elementsById);
+    ok(
+      "stale choice renders replacement buttons from detail.calendar_actions",
+      buttons.length === 1 && buttons[0].textContent === "10:00 AM"
+    );
+    ok(
+      "stale choice shows the server-owned message",
+      botMessages(sb).indexOf("That time is gone. Fresh options:") !== -1
+    );
+    ok(
+      "stale choice does not retry the request",
+      chatPosts(sb.fetchCalls).length === 1
+    );
+    ok(
+      "in-flight lock clears after a recognized 409",
+      run(sb.context, "structuredActionInFlight === false")
+    );
+  }
+
+  // Recognized STALE_CHOICE WITHOUT a replacement set falls back to the
+  // legacy service menu (never re-renders the submitted group).
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: { code: "STALE_CHOICE", message: "Please type instead." },
+      }),
+    });
+    await sendAction(sb);
+    const buttons = quickReplyButtons(sb.elementsById);
+    ok(
+      "stale choice without replacement falls back to service menu",
+      buttons.length > 0 &&
+      buttons.every((b) => b.textContent !== "choice-a")
+    );
+  }
+
+  // Recognized ACTION_NOT_ACTIVE falls back to the service menu.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: { code: "ACTION_NOT_ACTIVE", message: "Please type a message." },
+      }),
+    });
+    await sendAction(sb);
+    ok(
+      "not-active shows server message and service menu",
+      botMessages(sb).indexOf("Please type a message.") !== -1 &&
+      quickReplyButtons(sb.elementsById).length > 0
+    );
+  }
+
+  // Recognized CONVERSATION_LOCKED disables further typing.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: { code: "CONVERSATION_LOCKED", message: "This chat is closed." },
+      }),
+    });
+    await sendAction(sb);
+    ok(
+      "locked conversation disables the input and send button",
+      run(sb.context, "document.getElementById(\"input\").disabled === true") &&
+      run(sb.context, "document.getElementById(\"sendBtn\").disabled === true")
+    );
+  }
+
+  // Unknown 409 machine code: generic wording, NO replacement rendering,
+  // NO retry (fail-closed, locked decision 15).
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: { code: "SOMETHING_NEW", message: "??", calendar_actions: [{
+          label: "X", message: "X",
+          action: { type: "calendar_choice", choice_id: "x" } }] },
+      }),
+    });
+    await sendAction(sb);
+    const msgs = botMessages(sb);
+    ok(
+      "unknown 409 code uses the generic unprocessable wording",
+      msgs.length === 1 &&
+      msgs[0] === run(sb.context, "ACTION_MSG_UNPROCESSABLE")
+    );
+    ok(
+      "unknown 409 code renders no buttons and does not retry",
+      quickReplyButtons(sb.elementsById).length === 0 &&
+      chatPosts(sb.fetchCalls).length === 1
+    );
+  }
+
+  // HTTP 422 keeps the same fail-closed generic path.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(422, { detail: [{ msg: "invalid" }] }),
+    });
+    await sendAction(sb);
+    ok(
+      "422 uses the generic unprocessable wording with no buttons",
+      botMessages(sb)[0] === run(sb.context, "ACTION_MSG_UNPROCESSABLE") &&
+      quickReplyButtons(sb.elementsById).length === 0
+    );
+  }
+
+  // Malformed (unparseable) body on an HTTP 200 action response is a
+  // failure, not a fake bot reply.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new Error("bad json")),
+      }),
+    });
+    await sendAction(sb);
+    ok(
+      "malformed 200 action response uses the generic unprocessable wording",
+      botMessages(sb)[0] === run(sb.context, "ACTION_MSG_UNPROCESSABLE")
+    );
+    ok(
+      "in-flight lock clears after a malformed response",
+      run(sb.context, "structuredActionInFlight === false")
+    );
+  }
+
+  // HTTP 5xx gets its own distinct wording.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(500, { detail: "boom" }),
+    });
+    await sendAction(sb);
+    ok(
+      "500 uses the server-error wording",
+      botMessages(sb)[0] === run(sb.context, "ACTION_MSG_SERVER_ERROR")
+    );
+  }
+
+  // Genuine fetch/network failure gets its own distinct wording, and the
+  // in-flight lock still clears.
+  {
+    const sb = buildSandbox({
+      chatResponder: () => Promise.reject(new Error("net down")),
+    });
+    await sendAction(sb);
+    ok(
+      "network failure uses the network wording",
+      botMessages(sb)[0] === run(sb.context, "ACTION_MSG_NETWORK")
+    );
+    ok(
+      "in-flight lock clears after a network failure",
+      run(sb.context, "structuredActionInFlight === false")
+    );
+  }
+
+  // The four failure classes stay pairwise distinct (locked decision 17).
+  {
+    const sb = buildSandbox();
+    const wordings = [
+      run(sb.context, "ACTION_MSG_SERVER_ERROR"),
+      run(sb.context, "ACTION_MSG_UNPROCESSABLE"),
+      run(sb.context, "ACTION_MSG_NETWORK"),
+      "That time is gone. Fresh options:",
+    ];
+    ok(
+      "failure wordings are pairwise distinct",
+      new Set(wordings).size === wordings.length
+    );
+  }
+
+  // Legacy message-only sends keep the existing generic connection
+  // wording on failure (byte-compatible behavior).
+  {
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(500, { detail: "boom" }),
+    });
+    run(sb.context, 'conversationId = "conv-existing"');
+    run(sb.context, 'document.getElementById("input").value = "hello"');
+    await run(sb.context, "sendMessage()");
+    const msgs = botMessages(sb);
+    ok(
+      "legacy message failure keeps the existing connection wording",
+      msgs.length === 1 &&
+      msgs[0].indexOf("having trouble connecting") !== -1
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // V2 (C1-C audit item 6): recognized CONVERSATION_UNAVAILABLE and
+  // SAFETY_BLOCKED envelopes. Grounded in the widget's REAL capabilities:
+  // the server-owned message renders; NO replacement buttons render (that
+  // branch is STALE_CHOICE-only, so an illegitimate calendar_actions
+  // payload on these codes is ignored); nothing retries; typing stays
+  // ENABLED (only CONVERSATION_LOCKED disables input); the submitted
+  // action group cleared at send is never re-rendered; and startOver()
+  // remains the recovery path. There is NO call-office button renderer in
+  // this widget \u2014 "call the office" exists only as message/placeholder
+  // text \u2014 so no such control is asserted.
+  // ------------------------------------------------------------------
+
+  for (const failureCode of ["CONVERSATION_UNAVAILABLE", "SAFETY_BLOCKED"]) {
+    const serverMessage = "Server-owned message for " + failureCode + ".";
+    const sb = buildSandbox({
+      chatResponder: () => rejectedJson(409, {
+        detail: {
+          code: failureCode,
+          message: serverMessage,
+          // Illegitimate payload on a non-STALE code: must be ignored.
+          calendar_actions: [{
+            label: "X", message: "X",
+            action: { type: "calendar_choice", choice_id: "x" },
+          }],
+        },
+      }),
+    });
+    // Pre-render a live action group so the clear-at-send contract is
+    // observable for this code too.
+    run(sb.context, 'renderQuickReplies([{label:"10:00 AM",' +
+      'message:"10:00 AM",' +
+      'action:{type:"calendar_choice",choice_id:"slot-1"}}])');
+    await sendAction(sb);
+    ok(
+      failureCode + " shows the server-owned message",
+      botMessages(sb).indexOf(serverMessage) !== -1
+    );
+    ok(
+      failureCode + " renders no buttons and ignores non-stale calendar_actions",
+      quickReplyButtons(sb.elementsById).length === 0
+    );
+    ok(
+      failureCode + " does not retry the request",
+      chatPosts(sb.fetchCalls).length === 1
+    );
+    ok(
+      failureCode + " leaves typing enabled (no input lockout)",
+      run(sb.context, 'document.getElementById("input").disabled === false') &&
+      run(sb.context, 'document.getElementById("sendBtn").disabled === false')
+    );
+    ok(
+      failureCode + " never re-renders the cleared submitted action group",
+      quickReplyButtons(sb.elementsById)
+        .every((b) => b.textContent !== "10:00 AM")
+    );
+    ok(
+      failureCode + " clears the in-flight lock",
+      run(sb.context, "structuredActionInFlight === false")
+    );
+    ok(
+      failureCode + " keeps the startOver recovery path available",
+      run(sb.context, 'typeof startOver === "function"') &&
+      sb.html.includes('onclick="startOver()"')
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // V3 (audit item 2): parsed-but-malformed structured-action HTTP 200
+  // bodies. The widget must validate the success shape BEFORE the normal
+  // rendering path: a non-null object with non-empty string reply and
+  // conversation_id, and meta (when present) an object. Failures use the
+  // SAME class as an unparseable body: ACTION_MSG_UNPROCESSABLE, no
+  // retry, no buttons, and never the legacy fallback help reply.
+  // ------------------------------------------------------------------
+
+  const malformedSuccessBodies = [
+    ["parsed empty object", {}],
+    ["missing reply", { conversation_id: "conv-1", meta: {} }],
+    ["non-string reply", { reply: 42, conversation_id: "conv-1", meta: {} }],
+    ["missing conversation_id", { reply: "Okay.", meta: {} }],
+    ["malformed meta", { reply: "Okay.", conversation_id: "conv-1",
+                         meta: "not-an-object" }],
+    // V4 (audit item 2): non-empty means non-BLANK after trimming.
+    ["whitespace-only reply", { reply: "   \u00a0 ", conversation_id: "conv-1",
+                                meta: {} }],
+    ["whitespace-only conversation_id", { reply: "Okay.",
+                                          conversation_id: "   ", meta: {} }],
+  ];
+  for (const [label, body] of malformedSuccessBodies) {
+    const sb = buildSandbox({
+      chatResponder: () => successfulJson(body),
+    });
+    await sendAction(sb);
+    const msgs = botMessages(sb);
+    ok(
+      "malformed 200 action body (" + label + ") uses the generic " +
+        "unprocessable wording, never the legacy fallback",
+      msgs.length === 1 &&
+      msgs[0] === run(sb.context, "ACTION_MSG_UNPROCESSABLE") &&
+      msgs[0].indexOf("appointments, services, insurance") === -1
+    );
+    ok(
+      "malformed 200 action body (" + label + ") renders no buttons, " +
+        "does not retry, and clears the in-flight lock",
+      quickReplyButtons(sb.elementsById).length === 0 &&
+      chatPosts(sb.fetchCalls).length === 1 &&
+      run(sb.context, "structuredActionInFlight === false")
+    );
+  }
+
+  // A VALID final_closed HTTP 200 action response still renders normally
+  // through the new shape validation (regression guard for the pinned
+  // final_closed 200 contract).
+  {
+    const finalClosedReply =
+      "This conversation has ended. Please tap Start over to begin again.";
+    const sb = buildSandbox({
+      chatResponder: () => successfulJson({
+        reply: finalClosedReply,
+        conversation_id: "conv-existing",
+        meta: { final_closed: true },
+      }),
+    });
+    await sendAction(sb);
+    ok(
+      "valid final_closed 200 action response renders the server reply",
+      botMessages(sb).indexOf(finalClosedReply) !== -1 &&
+      botMessages(sb).indexOf(
+        run(sb.context, "ACTION_MSG_UNPROCESSABLE")
+      ) === -1
+    );
+    ok(
+      "valid final_closed 200 keeps typing available and clears in-flight",
+      run(sb.context, 'document.getElementById("input").disabled === false') &&
+      run(sb.context, "structuredActionInFlight === false")
+    );
+  }
+
   // Static boundaries.
   {
     const sb = buildSandbox();

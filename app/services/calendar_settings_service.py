@@ -45,6 +45,11 @@ DEFAULT_REQUIRE_STAFF_CONFIRMATION = True  # Early-rollout safety: appointments
                                            # save as "pending" and patient wording
                                            # says "request received" until the
                                            # office trusts the system.
+DEFAULT_CALENDAR_ACTIONS_ENABLED = False   # C1-C structured Calendar actions
+                                           # (tappable slot / confirm buttons)
+                                           # are OPT-IN per office and OFF by
+                                           # default. Strict-bool parsing below
+                                           # means garbage can never enable them.
 DEFAULT_TIMEZONE = "America/New_York"
 
 
@@ -58,6 +63,8 @@ class CalendarSettings:
     max_booking_days: int
     require_staff_confirmation: bool
     timezone_name: str
+    # C1-C: appended last (positional-compat) with the fail-safe default.
+    calendar_actions_enabled: bool = DEFAULT_CALENDAR_ACTIONS_ENABLED
 
 
 def _read_int(raw: dict, key: str, default: int, minimum: int, maximum: int) -> int:
@@ -226,4 +233,9 @@ def load_calendar_settings(client) -> CalendarSettings:
             raw, "require_staff_confirmation", DEFAULT_REQUIRE_STAFF_CONFIRMATION
         ),
         timezone_name=resolve_client_timezone(client),
+        # C1-C: strict JSON boolean only (same Critical #6 rule) — a string
+        # "true" or number 1 must NOT enable structured Calendar actions.
+        calendar_actions_enabled=_read_strict_bool(
+            raw, "calendar_actions_enabled", DEFAULT_CALENDAR_ACTIONS_ENABLED
+        ),
     )

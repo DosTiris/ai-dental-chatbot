@@ -723,6 +723,24 @@
     const DEFAULT_CLIENT_KEY = "demo_clinic_key";
     const CALENDAR_CHOICE_ACTION_TYPE = "calendar_choice";
     const CHAT_ACTION_CHOICE_ID_MAX_CHARS = 200;
+    // C1-C structured-action failure handling (locked decisions 15-17).
+    // Recognized machine codes for HTTP 409 detail envelopes; the widget
+    // branches on detail.code ONLY, never on human-readable wording.
+    const RECOGNIZED_ACTION_ERROR_CODES = [
+      "ACTION_NOT_ACTIVE",
+      "STALE_CHOICE",
+      "CONVERSATION_UNAVAILABLE",
+      "CONVERSATION_LOCKED",
+      "SAFETY_BLOCKED"
+    ];
+    // Three DISTINCT local failure wordings; a recognized 409 shows the
+    // server’s own detail.message instead (the fourth distinct class).
+    const ACTION_MSG_SERVER_ERROR =
+      "Something went wrong on our end. Please try again in a moment, or type your answer instead.";
+    const ACTION_MSG_UNPROCESSABLE =
+      "That option couldn’t be processed. Please type your answer instead.";
+    const ACTION_MSG_NETWORK =
+      "I couldn’t reach the chat service. Please check your connection and try again, or type your answer.";
     const DEFAULT_OPENING_MESSAGE = "Hi, I’m Mia — the AI dental receptionist for this office. I can help request an appointment, answer common questions, or check services, insurance, hours, and location. How can I help today?";
     const DEFAULT_MOBILE_OPENING_MESSAGE = "Hi, I’m Mia — the office’s AI dental receptionist. I can help with appointments, services, insurance, hours, or location. How can I help today?";
 
@@ -1205,6 +1223,74 @@
       if (typing) typing.remove();
     }
 
+    function disableChatInput(placeholderText) {
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+      if (placeholderText) inputEl.placeholder = placeholderText;
+    }
+
+    function isValidActionSuccessShape(data) {
+      // V3 (audit item 2): minimum success contract for a structured-
+      // action HTTP 200 BODY before it may enter the normal rendering
+      // path — a non-null non-array object with a non-BLANK (after
+      // trimming) string `reply` and `conversation_id`, and `meta` (when
+      // present) a non-null non-array object. The server route always
+      // returns exactly this shape for an executed action (including the
+      // pinned final_closed 200); anything else is a parsed-but-malformed
+      // response and is handled as the SAME failure class as an
+      // unparseable body (locked decision 17).
+      if (typeof data !== "object" || data === null || Array.isArray(data)) {
+        return false;
+      }
+      if (typeof data.reply !== "string" || data.reply.trim() === "") {
+        return false;
+      }
+      if (typeof data.conversation_id !== "string" ||
+          data.conversation_id.trim() === "") {
+        return false;
+      }
+      if (data.meta !== undefined &&
+          (typeof data.meta !== "object" || data.meta === null ||
+           Array.isArray(data.meta))) {
+        return false;
+      }
+      return true;
+    }
+
+    function handleActionFailureResponse(status, data, parseFailed) {
+      // Fail-closed (locked decision 15): the submitted action group was
+      // already cleared at send time and is NEVER re-rendered, re-enabled,
+      // or retried from here. Replacement buttons render ONLY from a
+      // recognized STALE_CHOICE detail.calendar_actions payload (locked
+      // decision 16); renderQuickReplies re-validates every entry.
+      if (!parseFailed && status === 409 &&
+          data && typeof data.detail === "object" && data.detail !== null &&
+          typeof data.detail.code === "string" &&
+          RECOGNIZED_ACTION_ERROR_CODES.indexOf(data.detail.code) !== -1) {
+        const code = data.detail.code;
+        const serverMessage =
+          typeof data.detail.message === "string" && data.detail.message
+            ? data.detail.message
+            : ACTION_MSG_UNPROCESSABLE;
+        addMessage("bot", serverMessage);
+        if (code === "STALE_CHOICE" && Array.isArray(data.detail.calendar_actions)) {
+          renderQuickReplies(data.detail.calendar_actions);
+        } else if (code === "STALE_CHOICE" || code === "ACTION_NOT_ACTIVE") {
+          renderQuickReplies(getServiceReplyOptions());
+        } else if (code === "CONVERSATION_LOCKED") {
+          disableChatInput("Please call the office directly.");
+        }
+        return;
+      }
+      if (parseFailed || status < 500) {
+        // Unknown 409 code, HTTP 422, or a malformed/unparseable action
+        // response: one generic wording, no retry, no re-enable.
+        addMessage("bot", ACTION_MSG_UNPROCESSABLE);
+        return;
+      }
+      addMessage("bot", ACTION_MSG_SERVER_ERROR);
+    }
+
     async function sendMessage(action = null) {
       const message = inputEl.value.trim();
       if (!message) return;
@@ -1241,7 +1327,28 @@
           body: JSON.stringify(requestBody)
         });
 
-        const data = await res.json().catch(() => ({}));
+        // C1-C: structured-action sends keep the four response classes
+        // distinguishable (locked decision 17): recognized 409 envelope /
+        // HTTP 5xx / malformed response / genuine network failure below.
+        // Legacy message-only sends keep their existing behavior.
+        let parseFailed = false;
+        const data = await res.json().catch(() => { parseFailed = true; return {}; });
+        if (normalizedAction && (!res.ok || parseFailed)) {
+          hideTyping();
+          handleActionFailureResponse(res.status, data, parseFailed);
+          return;
+        }
+        // V3 (audit item 2): a PARSED structured-action HTTP 200 body must
+        // still satisfy the success shape before normal rendering. A
+        // parsed-but-malformed success is treated exactly like an
+        // unparseable body: ACTION_MSG_UNPROCESSABLE, no retry, no
+        // re-render of the cleared action group, and never the legacy
+        // fallback help reply. Legacy message-only sends are untouched.
+        if (normalizedAction && !isValidActionSuccessShape(data)) {
+          hideTyping();
+          handleActionFailureResponse(res.status, data, true);
+          return;
+        }
         if (!res.ok) {
           throw new Error(data.detail || "Request failed");
         }
@@ -1291,7 +1398,14 @@
       } catch (err) {
         console.error(err);
         hideTyping();
-        addMessage("bot", "I’m having trouble connecting right now. Please call the office directly or try again in a moment.");
+        if (normalizedAction) {
+          // Genuine fetch/network failure for an action send — distinct
+          // wording from server-side and malformed-response failures
+          // (locked decision 17).
+          addMessage("bot", ACTION_MSG_NETWORK);
+        } else {
+          addMessage("bot", "I’m having trouble connecting right now. Please call the office directly or try again in a moment.");
+        }
       } finally {
         if (normalizedAction) {
           structuredActionInFlight = false;
