@@ -335,12 +335,20 @@ def run_chat(user_text, conversation=None, messages=None, client=None, db=None):
         client = client or FakeClient()
         conversation = conversation if conversation is not None else FakeConversation()
         db = FakeDB(client, conversation, messages)
+    # The chat() contract is ChatRequest, and every real request carries an
+    # `action` attribute (schema default None). This hand-built double must
+    # mirror that contract; omitting the field triggered C1-B stop
+    # condition 19 (AttributeError before emergency behavior executed).
     req = SimpleNamespace(
         message=user_text,
         client_key="test-key",
         conversation_id=str(conversation.id),
         visitor_id="visitor-1",
+        action=None,
     )
+    # Drift tripwire: fail loudly at construction if the double ever stops
+    # mirroring the ChatRequest optional-action contract.
+    assert req.action is None
     request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
     with mock.patch.object(chat_mod, "mark_completed_and_notify_office") as notify_spy, \
          mock.patch.object(chat_mod, "notify_office_of_completed_lead") as completed_lead_spy, \

@@ -6,13 +6,53 @@ from typing import Optional, Dict, Any # in app/schemas.py
 # Prototype B B1 contract imports (see the B1 section below).
 from datetime import date, datetime, timedelta  # B1 contract fields
 from typing import List, Literal  # B1: locked vocabularies via Literal
-from pydantic import Field, field_validator, model_validator  # B1 rules
+from pydantic import ConfigDict, Field, field_validator, model_validator  # B1 rules
+
+CHAT_ACTION_CHOICE_ID_MAX_CHARS = 200
+
+
+class ChatAction(BaseModel):
+    """
+    Backward-compatible structured patient action transport for /chat.
+
+    C1-B transports only an opaque Calendar choice. It does not execute
+    availability, hold, booking, notification, or reset behavior. Unknown
+    action types and extra fields fail validation instead of being guessed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["calendar_choice"]
+    choice_id: str = Field(
+        min_length=1,
+        max_length=CHAT_ACTION_CHOICE_ID_MAX_CHARS,
+    )
+
+    @field_validator("choice_id", mode="before")
+    @classmethod
+    def _choice_id_is_non_blank(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("choice_id must not be blank")
+        return value
+
 
 class ChatRequest(BaseModel):  # Request body schema for /chat
     message: str  # User message text
     client_key: str  # Your per-office API key (from widget)
     visitor_id: Optional[str] = None  # Optional browser visitor ID
     conversation_id: Optional[str] = None  # Optional conversation ID to continue a session
+    action: Optional[ChatAction] = None  # Optional structured patient action
+
+    @model_validator(mode="after")
+    def _structured_action_requires_existing_conversation(self):
+        if self.action is not None and not (self.conversation_id or "").strip():
+            raise ValueError(
+                "conversation_id is required when action is supplied"
+            )
+        return self
+
 
 class ChatResponse(BaseModel):  # Response schema for /chat
     reply: str  # Assistant reply

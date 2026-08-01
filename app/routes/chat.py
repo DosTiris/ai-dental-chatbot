@@ -114,6 +114,19 @@ SYSTEM_PROMPT = (
 MAX_USER_CHARS = 300
 MAX_CONTEXT_MESSAGES = 12
 
+# C1-B transport gate: the request schema and widget can carry an opaque
+# Calendar choice, but Calendar action execution is intentionally deferred to
+# the later state-machine gate. A structured action must never fall through
+# and be interpreted as ordinary free text.
+STRUCTURED_ACTION_NOT_ACTIVE_DETAIL = (
+    "This calendar option is not active for this conversation yet. "
+    "Please continue by typing a message."
+)
+STRUCTURED_ACTION_STALE_DETAIL = (
+    "This calendar option is no longer available. "
+    "Please continue by typing a message."
+)
+
 # ---------------------------------------------------------
 # Public widget config helpers
 # Reads safe Mia display settings from clients.settings JSONB
@@ -7866,6 +7879,38 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             )
         except Exception:
             conversation = None
+
+    # C1-B structured-action transport is fail-closed until C1-C adds the
+    # Calendar state-machine owner. An action must target an existing
+    # tenant-scoped conversation, must not create a replacement conversation,
+    # and must not be persisted or interpreted as ordinary free text.
+    if req.action is not None:
+        if conversation is None:
+            raise HTTPException(
+                status_code=409,
+                detail=STRUCTURED_ACTION_STALE_DETAIL,
+            )
+
+        # Preserve the existing persistent-stop contract even for a stale
+        # structured control. No action execution occurs here.
+        if bool(getattr(conversation, "final_closed", False)):
+            return ChatResponse(
+                reply=(
+                    "This conversation has ended. "
+                    "Please tap Start Over to begin a new request."
+                ),
+                conversation_id=str(conversation.id),
+                meta={
+                    "mode": "final_closed",
+                    "faq_match": False,
+                    "show_start_over": show_start_over,
+                },
+            )
+
+        raise HTTPException(
+            status_code=409,
+            detail=STRUCTURED_ACTION_NOT_ACTIVE_DETAIL,
+        )
 
     if conversation is None:
         conversation = Conversation(
