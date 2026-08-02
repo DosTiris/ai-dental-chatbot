@@ -64,6 +64,11 @@ class _FakeAPIRouter:
         return lambda f: f
 
 
+class _FakeResponse:
+    def __init__(self, *args, **kwargs):
+        self.headers = {}
+
+
 if "fastapi" not in sys.modules:
     _module(
         "fastapi",
@@ -71,6 +76,12 @@ if "fastapi" not in sys.modules:
         HTTPException=_FakeHTTPException,
         Request=object,
         Depends=lambda *a, **k: None,
+        # V4 (C2-A.1 compatibility — owner-run collection ImportError):
+        # the real app.routes.chat now imports Response for the public
+        # widget availability preview's Cache-Control handling. The
+        # emergency suite never invokes that route; this fake only keeps
+        # the offline import surface synchronized with real FastAPI.
+        Response=_FakeResponse,
     )
 
 if "sqlalchemy" not in sys.modules:
@@ -206,7 +217,21 @@ class _FakeChatResponse:
         self.__dict__.update(kw)
 
 
-_module("app.schemas", ChatRequest=_FakeChatRequest, ChatResponse=_FakeChatResponse)
+# V4 (C2-A.1 compatibility): the real app.routes.chat imports
+# AvailabilityPreviewRequest at module import time for the public widget
+# availability preview. The name is only BOUND during this suite — the
+# preview route is never invoked here — so an inert placeholder class
+# keeps collection working without faking any validation behavior.
+class _FakeAvailabilityPreviewRequest:
+    pass
+
+
+_module(
+    "app.schemas",
+    ChatRequest=_FakeChatRequest,
+    ChatResponse=_FakeChatResponse,
+    AvailabilityPreviewRequest=_FakeAvailabilityPreviewRequest,
+)
 
 # Calendar integration compatibility stubs. The focused emergency test keeps
 # exercising the real app.routes.chat routing, but calendar dependencies are
@@ -276,6 +301,37 @@ _module(
     normalize_notification_field=lambda value, limit=None, **k: (str(value or "")[:limit] if limit else str(value or "")),
     render_email_html=lambda *a, **k: "",
     sanitized_exception_class=lambda exc: exc.__class__.__name__,
+)
+
+def _unexpected_preview_call(*args, **kwargs):
+    raise AssertionError(
+        "C2-A.1 preview machinery was invoked inside the emergency suite: "
+        "the public widget availability preview is outside this test's scope"
+    )
+
+
+# V4 (C2-A.1 compatibility — owner-run collection ImportError): the real
+# app.routes.chat now imports, at module import time, the availability
+# preview owner, the calendar settings loader, and the admin route's 422
+# formatter. Stubbing these THREE app modules at the boundary (the same
+# pattern used above for booking_conversation / appointment_intent /
+# notification_service) keeps the offline harness synchronized without
+# importing the real calendar/service modules, whose own import chains
+# (fastapi Header/Query, SQLAlchemy models, admin auth) are deliberately
+# outside this suite's scope. Every stand-in is a LOUD guard: if any
+# emergency path ever reached the preview machinery, the suite would fail
+# with the AssertionError above rather than silently faking behavior.
+_module(
+    "app.services.availability_preview_service",
+    build_availability_preview=_unexpected_preview_call,
+)
+_module(
+    "app.services.calendar_settings_service",
+    load_calendar_settings=_unexpected_preview_call,
+)
+_module(
+    "app.routes.calendar",
+    _preview_request_error_detail=_unexpected_preview_call,
 )
 
 # ---------------------------------------------------------------------------

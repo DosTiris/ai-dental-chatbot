@@ -50,6 +50,12 @@ DEFAULT_CALENDAR_ACTIONS_ENABLED = False   # C1-C structured Calendar actions
                                            # are OPT-IN per office and OFF by
                                            # default. Strict-bool parsing below
                                            # means garbage can never enable them.
+DEFAULT_CALENDAR_PICKER_ENABLED = False    # C2-A.1 public widget availability
+                                           # preview (the visual picker's read-
+                                           # only month-grid transport) is
+                                           # OPT-IN per office and OFF by
+                                           # default. Same strict-bool rule:
+                                           # garbage can never enable it.
 DEFAULT_TIMEZONE = "America/New_York"
 
 
@@ -65,6 +71,10 @@ class CalendarSettings:
     timezone_name: str
     # C1-C: appended last (positional-compat) with the fail-safe default.
     calendar_actions_enabled: bool = DEFAULT_CALENDAR_ACTIONS_ENABLED
+    # C2-A.1: appended after calendar_actions_enabled for the same
+    # positional-compat reason, with the same fail-safe default direction
+    # (a missing or malformed value can never expose the public preview).
+    calendar_picker_enabled: bool = DEFAULT_CALENDAR_PICKER_ENABLED
 
 
 def _read_int(raw: dict, key: str, default: int, minimum: int, maximum: int) -> int:
@@ -237,5 +247,11 @@ def load_calendar_settings(client) -> CalendarSettings:
         # "true" or number 1 must NOT enable structured Calendar actions.
         calendar_actions_enabled=_read_strict_bool(
             raw, "calendar_actions_enabled", DEFAULT_CALENDAR_ACTIONS_ENABLED
+        ),
+        # C2-A.1: strict JSON boolean only (same Critical #6 rule) — the
+        # public widget preview must never be opened by a truthy string,
+        # a number, null, or any other non-boolean value.
+        calendar_picker_enabled=_read_strict_bool(
+            raw, "calendar_picker_enabled", DEFAULT_CALENDAR_PICKER_ENABLED
         ),
     )

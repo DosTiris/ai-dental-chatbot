@@ -39,7 +39,11 @@ const PICKER_B_HTML = process.env.MIA_PICKER_B_HTML ||
 const PROTOTYPE_A_HTML = process.env.MIA_PROTOTYPE_A_HTML ||
   path.join(__dirname, "..", "static", "admin", "calendar-picker-prototype.html");
 
-// The owner-frozen Prototype A content hash (B3 design gate / handoff).
+// The owner-frozen Prototype A CANONICAL Git content hash (B3 design gate /
+// handoff): the SHA-256 of the committed LF blob. Raw working-tree bytes may
+// legitimately differ per checkout (Git materializes CRLF on Windows); the
+// frozen contract is the canonical content, verified normalization-aware in
+// section 13 below.
 const PROTOTYPE_A_SHA256 =
   "16b2f76c62ae377ea7dadbf21a965640ff7e828934197b4eb91e32c93e1e7570";
 
@@ -638,9 +642,28 @@ async function main() {
 
   // ---- 13. Frozen Prototype A and B3 scope guard --------------------------
   {
-    const prototypeA = fs.readFileSync(PROTOTYPE_A_HTML);
-    const digest = crypto.createHash("sha256").update(prototypeA).digest("hex");
-    ok("Prototype A remains byte-for-byte unchanged at its frozen SHA-256",
+    // V5 (cross-platform normalization correction, owner-approved): the
+    // FROZEN CONTRACT is the canonical Git CONTENT of Prototype A — the
+    // committed LF blob — not the raw working-tree bytes, which Git
+    // legitimately materializes as CRLF on Windows checkouts while
+    // `git diff` stays clean. The assertion therefore normalizes CRLF to
+    // LF in memory and hashes the canonical UTF-8 bytes against the SAME
+    // frozen SHA-256 as before. A lone CR is not a representation Git
+    // normalization produces, so it FAILS the frozen assertion rather
+    // than being normalized away. Any actual canonical content change
+    // still changes the digest and fails. No Git invocation; the
+    // MIA_PROTOTYPE_A_HTML override keeps working unchanged.
+    const prototypeARaw = fs.readFileSync(PROTOTYPE_A_HTML, "utf8");
+    const loneCrCount =
+      (prototypeARaw.match(/\r/g) || []).length -
+      (prototypeARaw.match(/\r\n/g) || []).length;
+    const prototypeACanonical = prototypeARaw.replace(/\r\n/g, "\n");
+    const digest = loneCrCount === 0
+      ? crypto.createHash("sha256")
+          .update(Buffer.from(prototypeACanonical, "utf8"))
+          .digest("hex")
+      : "LONE_CR_REPRESENTATION_REJECTED";
+    ok("Prototype A canonical Git content remains unchanged at its frozen SHA-256 (LF and Git-materialized CRLF checkouts both accepted; lone CR rejected)",
        digest === PROTOTYPE_A_SHA256);
     const pageName = path.basename(PICKER_B_HTML);
     ok("B3 page is a NEW file distinct from every pre-existing admin page",

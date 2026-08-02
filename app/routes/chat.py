@@ -13,7 +13,7 @@
 #  9) Deterministic receptionist flow (lead capture / scheduling)
 # 10) OpenAI fallback for general questions
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request, Depends, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from openai import OpenAI
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from datetime import date as _date
 from zoneinfo import ZoneInfo
 from difflib import get_close_matches
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Literal
 import time
 import uuid
 import re
@@ -39,6 +39,27 @@ from app.config import OPENAI_API_KEY
 from app.database import SessionLocal
 from app.models import Client, Conversation, Message, ClientFAQ, FAQEvent
 from app.schemas import ChatRequest, ChatResponse
+
+# C2-A.1 (public widget availability preview) — EXISTING OWNERS ONLY:
+#   - AvailabilityPreviewRequest owns every date/range rule (valid ISO date,
+#     ordering, the 31-day inclusive cap); nothing is re-validated here.
+#   - build_availability_preview is the single availability-computation
+#     owner (B1); this route only delegates (Rule 2/3 — no fork, no copy).
+#   - load_calendar_settings owns flag parsing (strict JSON booleans).
+#   - pydantic here serves ONLY the minimal public response DTOs below.
+from pydantic import BaseModel, ConfigDict
+from pydantic import ValidationError as PydanticValidationError
+from app.schemas import AvailabilityPreviewRequest
+from app.services.availability_preview_service import build_availability_preview
+from app.services.calendar_settings_service import load_calendar_settings
+# The compact "field: message; ..." 422 rendering for a rejected
+# AvailabilityPreviewRequest already has ONE owner: the B2 admin route's
+# _preview_request_error_detail. Importing it keeps the established 422
+# contract byte-identical with a single owner (Rule 3). Duplicating the
+# formatter here was rejected, and moving it to a shared module would
+# modify app/routes/calendar.py — outside the approved C2-A.1 file scope.
+# No import cycle exists: app/routes/calendar.py never imports this module.
+from app.routes.calendar import _preview_request_error_detail
 # B2 (enabled-service owner extraction): get_client_enabled_service_keys
 # now lives in mia_service_library (single owner, Rule 3); chat.py only
 # imports it. DEFAULT_ENABLED_SERVICE_KEYS, SPECIALTY_PRESETS, and
@@ -5037,6 +5058,247 @@ def get_chat_config(client_key: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Client not found")
 
     return build_public_widget_config(client)
+
+
+# ===========================================================================
+# C2-A.1 — PUBLIC READ-ONLY WIDGET AVAILABILITY PREVIEW
+#
+# The visual Calendar picker's month-grid transport. Advisory and strictly
+# read-only: it never creates/releases/mutates a hold, never writes booking
+# state, slots, appointments, or notifications, and never commits. Every
+# transactional step (date/preference transitions, concrete slot selection,
+# hold creation, confirmation, decline/release, idempotent booking,
+# stale-choice recovery, notification dispatch) remains owned by C1-C.
+# ===========================================================================
+
+# Indistinguishability contract (locked): unknown client_key, inactive or
+# nonexistent tenant, and EVERY disabled/incomplete flag combination return
+# this same status + body — the existing public /chat/config convention.
+# Which gate failed is never revealed.
+WIDGET_PREVIEW_NOT_FOUND_DETAIL = "Client not found"
+
+
+class WidgetPreviewDay(BaseModel):
+    """One office-local calendar day for the public month grid.
+
+    Deliberately SMALLER than the admin PreviewDay: only the three fields
+    the month grid needs. `selectable` is excluded because it is derived
+    (state == "open") and re-deriving it in the widget adds no authority.
+    The state vocabulary is the LOCKED four-value set owned by
+    availability_preview_service.ALL_DAY_STATES; "closed" is impossible by
+    construction (the backend cannot distinguish closed office hours from
+    unpublished availability). A sync test pins this Literal to the owner.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_date: _date
+    weekday: str
+    state: Literal["open", "full", "unavailable", "past"]
+
+
+class WidgetAvailabilityPreviewResponse(BaseModel):
+    """Complete public payload for the widget month grid — nothing more.
+
+    Contract locks (C2-A.1): no practice_name, no flag values, no counts,
+    no slot lists, no slot/internal IDs, no patient/conversation/hold data.
+    `extra="forbid"` plus the exact field list below make an accidental
+    future leak a validation failure, not a silent exposure.
+
+    earliest_bookable_day / latest_bookable_day are the AUTHORITATIVE
+    booking-window bounds so the widget can clamp month navigation without
+    browser-owned horizon logic. They restate the two existing policy
+    boundaries (single rule owners, not new rules):
+      - earliest = the office-local DATE of (now + minimum_notice_minutes)
+        — the exact too_soon elapsed-time boundary
+        (availability_rules.evaluate_slot_policy's min_start): no slot
+        starting before that instant is bookable, so no earlier local
+        date can contain a bookable slot. Derived by adding the notice
+        to the aware-UTC now FIRST and converting to the tenant timezone
+        SECOND, so 23h/25h DST days resolve to the date a wall clock in
+        the office would show.
+      - latest   = office-local today + max_booking_days — the exact
+        beyond_horizon local-date boundary (same policy owner).
+    earliest may exceed latest (e.g. a long notice with max_booking_days
+    = 0): that truthfully describes a tenant policy with no currently
+    bookable date window, and the widget must render it as such rather
+    than invent one. Neither bound is computed from slot existence.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timezone: str
+    requested_start_day: _date
+    requested_end_day: _date
+    earliest_bookable_day: _date
+    latest_bookable_day: _date
+    days: List[WidgetPreviewDay]
+
+
+# Every response this endpoint intentionally produces — 400, 404, 422,
+# and 200 — must carry Cache-Control: no-store, so no intermediary or
+# browser ever serves a stale (or cached-error) grid. HTTPException
+# bypasses the route's Response object, so error raises go through this
+# ONE route-local builder (no middleware; no other endpoint affected).
+WIDGET_PREVIEW_CACHE_HEADER = {"Cache-Control": "no-store"}
+
+
+def _widget_preview_error(status_code: int, detail) -> HTTPException:
+    """
+    Purpose: the single builder for every intentional non-200 response of
+        the widget availability preview, attaching the locked
+        Cache-Control: no-store header that plain HTTPException raises
+        would otherwise drop.
+    Inputs:  status_code and detail exactly as HTTPException takes them.
+    Returns: an HTTPException ready to raise; carries the no-store header.
+    Database effects: none. External effects: none.
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail=detail,
+        headers=dict(WIDGET_PREVIEW_CACHE_HEADER),
+    )
+
+
+@router.get(
+    "/chat/calendar/availability-preview",
+    response_model=WidgetAvailabilityPreviewResponse,
+)
+def widget_calendar_availability_preview(
+    response: Response,
+    client_key: str,
+    start_day: Optional[str] = None,
+    end_day: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: C2-A.1 — the public, read-only month-grid transport for the
+        visual Calendar picker. Orders the gates and delegates; every rule
+        lives in its existing owner (Rule 2/3).
+    Locked processing order:
+        1. client_key presence (blank -> 400, /chat/config convention)
+        2. tenant resolution (api_key + active)      -> 404 on failure
+        3. feature gating: booking_enabled AND calendar_actions_enabled
+           AND calendar_picker_enabled, each an explicit strict JSON true
+           (load_calendar_settings ownership)        -> the SAME 404
+        4. existing AvailabilityPreviewRequest construction from the RAW
+           date values — start_day/end_day are OPTIONAL at the framework
+           layer precisely so that an OMITTED date, like a malformed one,
+           reveals no date semantics before the gates: an unknown or
+           disabled tenant with missing OR malformed dates gets the
+           indistinguishable 404, never a 422. The B1 model owns the
+           missing-value rejection itself (None fails its date fields),
+           so no date validation is re-implemented here.
+        5. existing build_availability_preview call (B1 owner, unchanged)
+        6. minimal public DTO mapping + booking-window bounds
+    Inputs: client_key (per-office widget key, query, required — the
+        /chat/config convention); start_day / end_day as RAW OPTIONAL
+        office-local YYYY-MM-DD strings — deliberately NOT FastAPI date
+        or required parameters, for the gate-ordering reason above.
+        selected_day, service_key, slot selection, and every patient/
+        conversation/hold concept are OUTSIDE the C2-A.1 contract: they
+        are not declared, and undeclared query parameters are ignored
+        (FastAPI default), matching /chat/config.
+    Returns: WidgetAvailabilityPreviewResponse — day states only from the
+        locked open/full/unavailable/past vocabulary, plus the
+        authoritative booking-window bounds. EVERY intentional response
+        of this endpoint — 400, 404, 422, and 200 — carries
+        Cache-Control: no-store (errors via _widget_preview_error, the
+        200 via the Response object below).
+    Database effects: SELECT only — the tenant lookup above plus exactly
+        ONE appointment_slots range SELECT inside the B1 service. No
+        INSERT/UPDATE/DELETE, no SELECT FOR UPDATE, no commit/flush, no
+        hold placement or release (an expired hold may be INTERPRETED as
+        available, but its row is left byte-untouched).
+    External effects: none — no notification, hold, booking, or
+        conversation service is called.
+    Possible failures: 400 "client_key is required" (blank key only);
+        404 WIDGET_PREVIEW_NOT_FOUND_DETAIL for unknown key, inactive
+        tenant, and every disabled flag combination — all indistinguishable
+        and issued BEFORE any date semantics; 422 for missing or invalid
+        dates / ordering / the 31-day cap (the B1 model's rules, rendered
+        by the existing single formatter); database errors propagate
+        (Rule 16 — fail visibly, never a false success). All of these
+        carry the no-store header.
+    """
+    client_key = (client_key or "").strip()
+    if not client_key:
+        raise _widget_preview_error(400, "client_key is required")
+
+    client = (
+        db.query(Client)
+        .filter(Client.api_key == client_key, Client.active == True)
+        .first()
+    )
+    if not client:
+        raise _widget_preview_error(404, WIDGET_PREVIEW_NOT_FOUND_DETAIL)
+
+    # Feature gate BEFORE any date semantics. All three flags must be
+    # explicitly true; missing/malformed/non-boolean values already read
+    # as False through the strict-bool owner, and the rejection is
+    # byte-identical to the unknown-key 404 (locked indistinguishability).
+    settings = load_calendar_settings(client)
+    if not (
+        settings.booking_enabled
+        and settings.calendar_actions_enabled
+        and settings.calendar_picker_enabled
+    ):
+        raise _widget_preview_error(404, WIDGET_PREVIEW_NOT_FOUND_DETAIL)
+
+    try:
+        # The B1 model owns EVERY date rule (missing value, valid ISO
+        # date, ordering, the 31-day inclusive cap) — nothing is
+        # re-implemented here. Raw values (None included, when a date was
+        # omitted) enter validation only past the two gates above.
+        preview_request = AvailabilityPreviewRequest(
+            start_day=start_day,
+            end_day=end_day,
+            selected_day=None,   # locked out of the C2-A.1 contract
+            service_key=None,    # locked out of the C2-A.1 contract
+        )
+    except PydanticValidationError as exc:
+        raise _widget_preview_error(422, _preview_request_error_detail(exc))
+
+    # ONE injected "now" feeds the preview computation AND both
+    # booking-window bounds below, so the three can never disagree about
+    # the current instant.
+    now_utc = datetime.now(ZoneInfo("UTC"))
+    preview = build_availability_preview(db, client, preview_request, now_utc)
+
+    # Booking-window bounds restate the two EXISTING policy boundaries
+    # (see the response model's field documentation) from the same
+    # settings snapshot and the same now the preview itself used.
+    tz = ZoneInfo(settings.timezone_name)
+    # earliest: the too_soon rule's min_start (an EXACT elapsed-time rule
+    # — evaluate_slot_policy adds the notice to aware-UTC now), converted
+    # to the office wall clock only AFTER the addition, so DST-transition
+    # days (23h/25h) resolve to the true office-local date of the cutoff.
+    notice_cutoff_utc = now_utc + timedelta(
+        minutes=settings.minimum_notice_minutes
+    )
+    earliest_bookable = notice_cutoff_utc.astimezone(tz).date()
+    # latest: the beyond_horizon LOCAL-DATE rule, anchored to today.
+    today_local = now_utc.astimezone(tz).date()
+    latest_bookable = today_local + timedelta(days=settings.max_booking_days)
+
+    # Advisory read-only payload: never cached, never stored (locked).
+    response.headers["Cache-Control"] = "no-store"
+
+    return WidgetAvailabilityPreviewResponse(
+        timezone=preview.timezone_name,
+        requested_start_day=preview_request.start_day,
+        requested_end_day=preview_request.end_day,
+        earliest_bookable_day=earliest_bookable,
+        latest_bookable_day=latest_bookable,
+        days=[
+            WidgetPreviewDay(
+                local_date=day.local_date,
+                weekday=day.weekday,
+                state=day.state,
+            )
+            for day in preview.days
+        ],
+    )
 
 
 # =========================================================
