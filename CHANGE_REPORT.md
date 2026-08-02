@@ -5586,3 +5586,96 @@ Widget currently renders any non-OK response as the generic connection-failure m
 
 ### Rollback
 Revert the single implementation commit (`git revert b4d70b159f39c61127df086fd044f1a221c898e4`), or reverse-apply patch `73cc4891…` (proven to restore all baseline hashes exactly). The documentation-only closure commit is independently revertible.
+
+---
+
+# C1-C STRUCTURED CALENDAR ACTIONS — PRODUCTION VALIDATION CLOSURE (2026-08-01)
+
+Per Constitution Rule 13. Documentation-only entry: no executable
+production code, tests, migrations, schemas, settings, or tenant data
+were modified by this closure patch. All results below are
+owner-observed on the owner's infrastructure.
+
+## Deployment
+
+- Commit `6a9179987b8bd7c122d12c439edc8ebdb134fa2c` was fast-forwarded
+  to `origin/main`. Render auto-deployed that exact commit: build
+  succeeded, Uvicorn started normally, application startup completed,
+  and Render marked the deployment Live. No import, startup, migration,
+  or database errors were observed.
+- Remote rollback tag: `before-c1c-main-integration-20260801-172725`
+  → `925520135c88f185ce8bc6697d6fe33ab18b584a`.
+
+## Pre-production acceptance (owner-observed, complete)
+
+- Python compilation passed.
+- C1-C transport contract: 14/14 passed.
+- C1-C structured-action execution: 53/53 passed.
+- Full calendar_tests/: 1,053/1,053 passed.
+- Widget Node tests: 78/78 passed.
+- Life-threatening interruption suite: 46 tests, 84 subtests passed.
+- Git whitespace and exact scope checks passed.
+
+## Controlled tenant
+
+- Tenant: Demo Dental, client id
+  `04bfd2ae-f0ac-4077-8206-40cc5f5d62e0`, America/New_York.
+- Notifications routed only to Dos Tiris-controlled destinations.
+- Staff confirmation remained required throughout.
+- `booking_enabled` and `calendar_actions_enabled` were enabled only
+  temporarily for this controlled validation; all other tenants
+  remained disabled at all times.
+
+## Production behavior verified (owner-observed)
+
+1. The existing legacy/capture-first flow remained functional with
+   Calendar actions disabled.
+2. Structured Calendar actions appeared only after the Demo Dental
+   tenant flag was enabled.
+3. With no future published slots, Mia returned the correct
+   no-openings response.
+4. Three controlled slots were published: Monday, August 3, 2026 at
+   9:00 AM, 9:30 AM, and 10:00 AM.
+5. Selecting 9:30 AM created a five-minute database hold owned by the
+   conversation.
+6. Confirming the time created exactly one appointment, changed the
+   slot to booked, cleared hold ownership fields, and displayed the
+   staff-confirmation wording.
+7. The booked 9:30 AM slot disappeared from later offers.
+8. Selecting 10:00 AM and choosing "No — pick another time" released
+   the hold, created zero appointments, and created zero notification
+   attempts.
+9. Start Over left zero active holds.
+10. A life-threatening interruption during a held 9:00 AM slot
+    returned the 911/ER safety response, removed/disabled booking
+    actions, locked text input until Start Over, released the hold,
+    and created no appointment or notification.
+11. The confirmed booking created exactly one `office_sms` ledger row
+    and one `office_email` ledger row, with no duplicates.
+12. Twilio marked the exact SMS Delivered.
+13. Resend marked "New Mia appointment — Kevin Test" Delivered.
+
+## Final cleanup (owner-verified)
+
+- Demo Dental `booking_enabled` returned to false;
+  `calendar_actions_enabled` returned to false.
+- The synthetic appointment and its two `notification_attempt` rows
+  were removed; all three controlled test slots were removed.
+- Cleanup verification: remaining_test_appointments = 0,
+  remaining_test_notifications = 0, remaining_test_slots = 0.
+- Conversation history was intentionally left untouched.
+- No tenant currently has C1-C activated as part of this validation.
+
+## Classification
+
+C1-C implementation, regression, deployment, controlled production
+booking, race-sensitive hold/release behavior, safety interruption,
+notification deduplication, provider acceptance, and cleanup all
+passed. The feature remains DEFAULT-OFF: use by a real pilot office
+requires an explicit tenant-scoped activation plus published future
+`appointment_slots`.
+
+- CHECKPOINT (Rule 18): C1-C production validation closed 2026-08-01
+  with owner approval. Rollback point: tag
+  `before-c1c-main-integration-20260801-172725`
+  (`925520135c88f185ce8bc6697d6fe33ab18b584a`).
