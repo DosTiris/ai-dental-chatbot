@@ -5679,3 +5679,96 @@ requires an explicit tenant-scoped activation plus published future
   with owner approval. Rollback point: tag
   `before-c1c-main-integration-20260801-172725`
   (`925520135c88f185ce8bc6697d6fe33ab18b584a`).
+
+
+# C2-A.1 PUBLIC READ-ONLY WIDGET AVAILABILITY PREVIEW — PRODUCTION VALIDATION CLOSURE (2026-08-02)
+
+Implementing commit: `118f29e` — "Add read-only widget availability
+preview" (five-path scope: `app/routes/chat.py`,
+`app/services/calendar_settings_service.py`,
+`tests/test_life_threatening_interruption.py`,
+`tests/test_calendar_picker_prototype_b.js`,
+`calendar_tests/test_widget_availability_preview.py`). Final delivered
+revision: v5 (v1→v5 lineage: v2 contract corrections — every-outcome
+`Cache-Control: no-store`, omitted-date gate ordering, notice-derived
+earliest bound, permanent fixed-clock DST tests; v3 normalization-aware
+installer; v4 emergency-harness import-boundary sync, zero assertion
+changes; v5 Prototype-B frozen-guard canonical-content normalization,
+frozen hash unchanged).
+
+## Implementation summary
+
+`GET /chat/calendar/availability-preview` — the visual Calendar
+picker's advisory, strictly read-only month-grid transport. Gate order:
+blank key → 400 (/chat/config convention); tenant resolution then
+`booking_enabled` AND `calendar_actions_enabled` AND the NEW strict-bool
+tenant flag `calendar_picker_enabled` (default OFF, `clients.settings`
+JSONB, no migration) → indistinguishable 404 before any date semantics,
+for omitted and malformed dates alike; date rules stay owned by the
+existing `AvailabilityPreviewRequest` + single 422 formatter; the B1
+`build_availability_preview` owner computes day states (locked
+open/full/unavailable/past vocabulary). Public DTOs expose only the
+locked field set plus authoritative booking-window bounds (earliest =
+office-local date of now + `minimum_notice_minutes`, the too_soon rule;
+latest = today + `max_booking_days`; earliest may truthfully exceed
+latest). Every intentional response carries `Cache-Control: no-store`.
+SELECT-only: no hold, booking, notification, conversation, or state
+write of any kind. Every C1-C transactional pathway is unchanged.
+
+## Pre-production acceptance (owner-observed, complete)
+
+Owner transcript
+`C2A1_V5_OWNER_VERIFICATION_20260802_153523.txt`: Python compilation
+passed for all four Python files; focused C2-A.1 suite 56/56; full
+`calendar_tests/` 1,109/1,109; life-threatening interruption suite 46
+tests with exactly 84 subtests executed; Node structured-action suite
+78/78; Node Calendar portal suite 37/37; Node Prototype B suite 81/81;
+frozen Prototype A unchanged (blob `e31e2292…`); exact five-file
+implementation scope intact; disposable PostgreSQL container removed;
+no production or tenant database contacted during the run.
+
+## Deployment
+
+Render deployed commit `118f29e` successfully: build successful,
+application startup complete, Uvicorn running, status Live, no startup
+failure. Base URL `https://ai-dental-chatbot.onrender.com`.
+
+## Production behavior verified (owner-observed, disabled state)
+
+Owner transcript
+`C2A1_PRODUCTION_DISABLED_SMOKE_20260802_155741.txt`, using ONLY a
+randomly generated fake client key against
+`GET /chat/calendar/availability-preview`:
+
+- Unknown client + valid dates → 404, `Cache-Control: no-store`,
+  `{"detail":"Client not found"}`.
+- Unknown client + malformed dates → identical 404 / no-store body.
+- Unknown client + OMITTED dates → identical 404 / no-store body
+  (tenant gating precedes any date-validation exposure).
+- Blank client key → 400, `Cache-Control: no-store`,
+  `{"detail":"client_key is required"}` (/chat/config convention).
+
+Confirmed: the deployed route is reachable; unknown tenants fail
+closed; intentional outcomes are no-store; no real tenant key was used;
+`calendar_picker_enabled` was not enabled for any office; no office
+behavior changed; no hold, booking, appointment, or notification action
+was requested; no production write was performed.
+
+## Classification
+
+C2-A.1 implementation, contract corrections, regression (Python and
+Node), emergency-suite compatibility, cross-platform test
+normalization, owner-authoritative local verification, Render
+deployment, and the production disabled-state smoke test all passed.
+The feature remains DEFAULT-OFF for every tenant: patient-visible use
+requires an explicit tenant-scoped `calendar_picker_enabled` activation
+on top of the existing booking and calendar-action gates. No dental
+office was activated as part of this validation. C2-A.2 (widget visual
+Calendar integration — the date stage consuming this preview) is the
+next approved track and has not been implemented.
+
+- CHECKPOINT (Rule 18): C2-A.1 production validation closed 2026-08-02
+  with owner approval. Rollback point: commit `118f29e` is itself the
+  rollback boundary for the documentation commit that records this
+  closure; the implementation rollback remains
+  `git revert 118f29ecfa84d9e01f30ca65524de18948c23658`.
