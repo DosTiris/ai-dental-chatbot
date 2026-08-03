@@ -5772,3 +5772,125 @@ next approved track and has not been implemented.
   rollback boundary for the documentation commit that records this
   closure; the implementation rollback remains
   `git revert 118f29ecfa84d9e01f30ca65524de18948c23658`.
+
+# C2-A.2 PATIENT-WIDGET VISUAL DATE PICKER - PRODUCTION VALIDATION CLOSURE (2026-08-02)
+
+Implementing commit: `973987b` - "Add patient-widget visual date
+picker (C2-A.2)" (four-path scope:
+`app/services/booking_conversation.py`,
+`calendar_tests/test_widget_date_picker.py`,
+`static/chat.html`, and
+`tests/test_widget_date_picker.js`). Final delivered revision: v10.
+The v1-v7 candidates remained unapplied while owner audit corrected
+date-state coverage, stale-action and Start Over handling, bounded month
+clamping, selected-state lifecycle, installer rollback, manifest, and
+backup requirements. V8 introduced the final patient-facing visibility
+correction; v9 and v10 corrected package proof artifacts and metadata
+without changing the owner-approved four repository result files.
+
+## Implementation summary
+
+When the server truthfully returns
+`meta.calendar_picker.stage = "date"`, the patient widget requests the
+strictly read-only public endpoint
+`GET /chat/calendar/availability-preview` and renders an accessible
+month grid. Open dates are enabled; full, unavailable, and past dates
+remain visibly locked. No daily slot counts, internal slot identifiers,
+admin credentials, admin endpoints, browser-storage picker state, hold
+requests, booking requests, confirmation requests, or cancellation
+requests are introduced.
+
+Selecting an open date submits exactly one existing
+`calendar_choice` action through `POST /chat`. The backend remains the
+owner of date validation and the typed-date transition. During the
+unresolved action, the selected picker row stays attached, the selected
+button retains `aria-pressed=true`, and all picker and navigation
+controls remain disabled. One bounded `requestAnimationFrame` restores
+the live selected button with
+`scrollIntoView({ block: "nearest" })` after the widget's own echo and
+typing-indicator scroll operations. The picker clears only at the
+authoritative response boundary. Start Over removes it immediately and
+prevents an abandoned response from restoring conversation state.
+
+Preview transport is fail-closed for malformed or inconsistent dates,
+weekday mismatches, incomplete ranges, impossible bounds, network and
+HTTP failures, unknown day states, and superseded requests. Month
+clamping uses an explicit one-jump patient budget and zero remaining
+budget for the internal jump, preventing automatic loops if returned
+bounds change. Retry begins a fresh bounded patient attempt. Existing
+service menus, structured quick replies, ordinary typed-date behavior,
+emergency handling, conversation-unavailable handling, and
+safety-blocked handling remain intact. No visual time-selection stage is
+included; that remains deferred to C2-A.3.
+
+## Pre-production acceptance (owner-observed, complete)
+
+Owner transcript
+`C2A2_V10_OWNER_VERIFICATION_V2_20260802_223755.txt`: Python
+compilation passed; focused C2-A.2 backend suite 50/50; focused C2-A.1
+availability-preview suite 56/56; full `calendar_tests/` 1,159/1,159;
+life-threatening interruption suite 46 tests, OK; C2-A.2 Node frontend
+suite 108/108; Node structured-action suite 78/78; Node Calendar portal
+suite 37/37; Node Prototype B and frozen Prototype A guard suite 81/81;
+Git whitespace validation passed; exact four-file scope and result Git
+blobs remained intact; no files were staged; the disposable PostgreSQL
+16 database `mia_calendar_test` was removed; no production database was
+contacted.
+
+Approved result pins included production widget SHA-256
+`7d9ede705e79a5293edd0a004759fe650955e37ce90a7603086e4645c858b78c`
+and Git blob `19972a662968c2b0cdb310eb9f0efd967061053d`.
+The verified external pre-write backup is
+`Mia-C2A2-v10-backup-20260802_222930.zip`.
+
+## Deployment
+
+GitHub `origin/main` was advanced from
+`14319ba59cab301141149451c9931e60761bfe7a` to
+`973987b15a75645eecfcb984021b70c474b4e4eb` after the rollback tag
+`before-c2a2-main-20260802-225354` was created and pushed.
+
+Render automatically deployed commit `973987b` successfully: build
+successful, application startup complete, Uvicorn running, service
+status Live, and no startup failure. Base URL:
+`https://ai-dental-chatbot.onrender.com`.
+
+## Production artifact verified (owner-observed, feature disabled)
+
+A cache-bypassed read-only download of production
+`/static/chat.html` exactly matched the approved SHA-256:
+
+`7d9ede705e79a5293edd0a004759fe650955e37ce90a7603086e4645c858b78c`
+
+The deployed asset contained the required bounded-jump constants,
+public availability-preview route, selected-date visibility restoration,
+and existing `calendar_choice` action support. The forbidden admin
+availability-preview route was absent. This verification contacted no
+database, created no conversation, changed no tenant setting, and
+performed no production write.
+
+Confirmed: the approved C2-A.2 widget code reached production;
+`calendar_picker_enabled` remains default-off and was not enabled for
+any dental office; no patient-visible office behavior changed; no hold,
+booking, appointment, confirmation, cancellation, or notification
+action was requested.
+
+## Classification
+
+C2-A.2 implementation, owner audit, package integrity, installer and
+rollback behavior, Python and Node regression, emergency compatibility,
+real-browser selected-date visibility, owner-authoritative local
+verification, guarded commit and push, Render deployment, and exact
+production static-asset verification all passed.
+
+The feature remains DEFAULT-OFF for every tenant. Patient-visible use
+still requires an explicit tenant-scoped `calendar_picker_enabled`
+activation on top of the existing `booking_enabled` and
+`calendar_actions_enabled` gates. No dental office was activated as part
+of this validation. C2-A.3 - visual time-stage integration and recovery
+- is the next approved track and has not been implemented.
+
+- CHECKPOINT (Rule 18): C2-A.2 production validation closed 2026-08-02
+  with owner approval. Rollback tag:
+  `before-c2a2-main-20260802-225354`. Implementation rollback:
+  `git revert 973987b15a75645eecfcb984021b70c474b4e4eb`.
