@@ -397,6 +397,66 @@
       cursor: pointer;
     }
 
+    /* C2-A.3 visual time stages (tokens mirror the C2-A.2 date picker). */
+    .time-pref-row,
+    .slot-panel-row {
+      margin: 10px 0 2px;
+      animation: miaMessageIn 210ms ease-out both;
+    }
+    .time-pref-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .time-pref-btn {
+      background: color-mix(in srgb, var(--mia-button-bg) 88%, white);
+      color: var(--mia-button-text);
+      border: 1px solid color-mix(in srgb, var(--mia-border) 80%, white);
+      border-radius: 999px;
+      padding: 9px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+    .time-pref-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      border-color: var(--mia-primary);
+    }
+    .time-pref-btn:disabled { cursor: default; opacity: 0.55; }
+    .time-pref-btn.tp-selected {
+      background: var(--mia-primary, #2563eb);
+      color: #ffffff;
+      border-color: var(--mia-primary, #2563eb);
+      opacity: 1;
+    }
+    .slot-panel {
+      background: var(--mia-panel, #111827);
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 14px;
+      padding: 10px;
+      max-width: 320px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .slot-chip {
+      background: var(--mia-button-bg, #111827);
+      color: var(--mia-button-text, #e5e7eb);
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .slot-chip:hover:not(:disabled) { border-color: var(--mia-primary, #2563eb); }
+    .slot-chip:disabled { cursor: default; opacity: 0.55; }
+    .slot-chip.sp-selected {
+      background: var(--mia-primary, #2563eb);
+      color: #ffffff;
+      border-color: var(--mia-primary, #2563eb);
+      opacity: 1;
+    }
+
     .quick-replies,
     .booking-link-row {
       display: flex;
@@ -1104,6 +1164,16 @@
       document.querySelectorAll(".date-picker-row").forEach(el => {
         if (!el.classList.contains("dp-submitting")) el.remove();
       });
+      // C2-A.3: the two visual time-stage rows follow the SAME retained
+      // in-flight convention — a row whose submission is unresolved stays
+      // attached (its own click handler owns the removal boundary); every
+      // other time-stage row clears here.
+      document.querySelectorAll(".time-pref-row").forEach(el => {
+        if (!el.classList.contains("tp-submitting")) el.remove();
+      });
+      document.querySelectorAll(".slot-panel-row").forEach(el => {
+        if (!el.classList.contains("sp-submitting")) el.remove();
+      });
     }
 
     function normalizeChatAction(action) {
@@ -1257,6 +1327,12 @@
     // or confirmation behavior lives here.
     // ------------------------------------------------------------------
     const DATE_SELECT_CHOICE_PREFIX = "pick-date:";
+    // C2-A.3 — visual time stages: the two additional stage values on the
+    // EXISTING meta.calendar_picker channel, and the two ordinary-message
+    // preference buttons (typed-parity transport; no ChatAction).
+    const PICKER_STAGE_TIME_PREFERENCE = "time_preference";
+    const PICKER_STAGE_SLOT_SELECTION = "slot_selection";
+    const TIME_PREFERENCE_BUTTONS = ["Morning", "Afternoon"];
     const PICKER_DAY_STATES = ["open", "full", "unavailable", "past"];
     const PICKER_MONTH_NAMES = ["January","February","March","April","May",
       "June","July","August","September","October","November","December"];
@@ -1700,6 +1776,149 @@
       });
     }
 
+    // ------------------------------------------------------------------
+    // C2-A.3 — visual time stages.
+    // Stage time_preference: two ordinary-message buttons ("Morning",
+    // "Afternoon") submitted through the EXISTING typed-message POST /chat
+    // path — no ChatAction, no choice vocabulary, and NO change to the
+    // ordinary-message input-lock semantics (duplicate protection is
+    // row-level only). Stage slot_selection: the server's validated
+    // calendar_actions rendered as a distinct time panel; a click submits
+    // the EXISTING slot-UUID calendar_choice action (the existing hold
+    // path — unchanged). Both stages keep the SUBMITTED row attached,
+    // selected (aria-pressed), disabled, and visible for the whole
+    // unresolved window (the C2-A.2 V2-defect-2 retained lifecycle), and
+    // remove ONLY the exact captured element at the authoritative response
+    // boundary. Start Over and chatEpoch invalidation own the other two
+    // removal paths.
+    // ------------------------------------------------------------------
+
+    function finishRetainedRow(row) {
+      // Authoritative-boundary cleanup: remove ONLY the exact submitted
+      // element, and only while it is still attached. A successful reply
+      // that opened a fresh stage has already rendered its own new row
+      // before this runs, so removing this older captured one can never
+      // delete the new row (owner guardrail 1: no class-wide removal at
+      // the response boundary).
+      if (row && row.isConnected) row.remove();
+    }
+
+    function restoreSelectedVisibility(btn) {
+      // V8 pattern: one bounded frame after the widget's own scrolling,
+      // bring the live selected control back into view. block:"nearest"
+      // scrolls the minimum necessary; a detached button is skipped.
+      // Never runs in response to patient scrolling.
+      requestAnimationFrame(() => {
+        if (btn.isConnected) {
+          btn.scrollIntoView({ block: "nearest" });
+        }
+      });
+    }
+
+    function renderTimePreferenceRow() {
+      const row = document.createElement("div");
+      row.className = "time-pref-row";
+      row.setAttribute("role", "group");
+      row.setAttribute("aria-label", "Time of day");
+      let submitted = false;
+      // Same control-tracking pattern as the C2-A.2 picker (dpControls):
+      // the disable sweep uses this list, never a live DOM query.
+      const rowControls = [];
+
+      TIME_PREFERENCE_BUTTONS.forEach((label) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "time-pref-btn";
+        btn.textContent = label;
+        btn.setAttribute("aria-pressed", "false");
+        btn.addEventListener("click", () => {
+          // Row-level duplicate protection only — the widget's global
+          // ordinary-message in-flight behavior is deliberately unchanged
+          // (owner guardrail 2).
+          if (submitted || btn.disabled) return;
+          submitted = true;
+          btn.classList.add("tp-selected");
+          btn.setAttribute("aria-pressed", "true");
+          rowControls.forEach((b) => { b.disabled = true; });
+          // The submitting tag makes clearActionRows (which sendMessage
+          // calls synchronously) spare THIS row for the whole in-flight
+          // window; finishRetainedRow owns the removal boundary.
+          row.classList.add("tp-submitting");
+          inputEl.value = label;
+          Promise.resolve(sendMessage()).finally(() => {
+            finishRetainedRow(row);
+          });
+          restoreSelectedVisibility(btn);
+        });
+        rowControls.push(btn);
+        row.appendChild(btn);
+      });
+
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function renderSlotPanel(actions) {
+      // Renders ONLY validated server-issued structured slot choices; the
+      // label is the server-formatted local time and the slot UUID stays
+      // confined to choice_id — never rendered as text. Returns true when
+      // at least one chip rendered (same contract as renderQuickReplies).
+      if (!Array.isArray(actions)) return false;
+      const row = document.createElement("div");
+      row.className = "slot-panel-row";
+      const panel = document.createElement("div");
+      panel.className = "slot-panel";
+      panel.setAttribute("role", "group");
+      panel.setAttribute("aria-label", "Available times");
+      let submitted = false;
+      const panelControls = [];
+
+      actions.forEach((option) => {
+        const normalized = normalizeQuickReplyOption(option);
+        if (!normalized || !normalized.action) return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "slot-chip";
+        btn.textContent = normalized.label;
+        btn.setAttribute("aria-pressed", "false");
+        btn.addEventListener("click", () => {
+          // Mirrors pickDate's pre-checks: row-level single submission
+          // plus the EXISTING structured-action in-flight lock.
+          if (submitted || btn.disabled || structuredActionInFlight) return;
+          submitted = true;
+          btn.classList.add("sp-selected");
+          btn.setAttribute("aria-pressed", "true");
+          panelControls.forEach((b) => { b.disabled = true; });
+          row.classList.add("sp-submitting");
+          // V2 (owner audit): the request origin is an IMMUTABLE
+          // REQUEST-LOCAL object threaded through this individual
+          // sendMessage call — no shared state exists, so no other
+          // request can ever overwrite, inherit, or clear it, and no
+          // clearing logic is needed.
+          const requestOrigin = Object.freeze({
+            kind: "slot_panel",
+            choiceId: normalized.action.choice_id,
+            epoch: chatEpoch,
+          });
+          inputEl.value = normalized.message;
+          Promise.resolve(
+            sendMessage(normalized.action, requestOrigin)
+          ).finally(() => {
+            finishRetainedRow(row);
+          });
+          restoreSelectedVisibility(btn);
+        });
+        panelControls.push(btn);
+        panel.appendChild(btn);
+      });
+
+      if (!panel.children.length) return false;
+      row.appendChild(panel);
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return true;
+    }
+
     function showTyping(options = {}) {
       if (document.getElementById("typingIndicator")) return;
 
@@ -1753,7 +1972,7 @@
       return true;
     }
 
-    function handleActionFailureResponse(status, data, parseFailed, actionChoiceId) {
+    function handleActionFailureResponse(status, data, parseFailed, actionChoiceId, requestOrigin = null) {
       // Fail-closed (locked decision 15): the submitted action group was
       // already cleared at send time and is NEVER re-rendered, re-enabled,
       // or retried from here. Replacement buttons render ONLY from a
@@ -1770,7 +1989,28 @@
             : ACTION_MSG_UNPROCESSABLE;
         addMessage("bot", serverMessage);
         if (code === "STALE_CHOICE" && Array.isArray(data.detail.calendar_actions)) {
-          renderQuickReplies(data.detail.calendar_actions);
+          // C2-A.3 (owner amendment, Option B / V2): ORIGIN-QUALIFIED
+          // routing from the IMMUTABLE REQUEST-LOCAL origin threaded
+          // through this individual request. Only a failure whose frozen
+          // origin declares kind "slot_panel" AND matches the failing
+          // choice_id AND the current epoch renders its validated
+          // replacements through the visual slot panel ("Available
+          // times" group, server labels, UUIDs never displayed). Every
+          // other origin — generic structured actions pass null — keeps
+          // the established generic replacement rendering
+          // byte-identically. The 409 envelope stays state-free; origin
+          // is never inferred from labels, UUID shapes, or response
+          // contents.
+          const slotOrigin =
+            requestOrigin !== null &&
+            requestOrigin.kind === "slot_panel" &&
+            requestOrigin.choiceId === actionChoiceId &&
+            requestOrigin.epoch === chatEpoch;
+          if (slotOrigin) {
+            renderSlotPanel(data.detail.calendar_actions);
+          } else {
+            renderQuickReplies(data.detail.calendar_actions);
+          }
         } else if (code === "STALE_CHOICE" &&
                    typeof actionChoiceId === "string" &&
                    actionChoiceId.indexOf(DATE_SELECT_CHOICE_PREFIX) === 0) {
@@ -1801,7 +2041,7 @@
       addMessage("bot", ACTION_MSG_SERVER_ERROR);
     }
 
-    async function sendMessage(action = null) {
+    async function sendMessage(action = null, requestOrigin = null) {
       const message = inputEl.value.trim();
       if (!message) return;
       // V3 defect 1: capture the epoch BEFORE any asynchronous work.
@@ -1852,7 +2092,8 @@
         if (normalizedAction && (!res.ok || parseFailed)) {
           hideTyping();
           handleActionFailureResponse(res.status, data, parseFailed,
-                                      normalizedAction.choice_id);
+                                      normalizedAction.choice_id,
+                                      requestOrigin);
           return;
         }
         // V3 (audit item 2): a PARSED structured-action HTTP 200 body must
@@ -1864,7 +2105,8 @@
         if (normalizedAction && !isValidActionSuccessShape(data)) {
           hideTyping();
           handleActionFailureResponse(res.status, data, true,
-                                      normalizedAction.choice_id);
+                                      normalizedAction.choice_id,
+                                      requestOrigin);
           return;
         }
         if (!res.ok) {
@@ -1887,10 +2129,24 @@
         const replyText = String(reply || "").toLowerCase();
 
         let calendarActionsRendered = false;
+        // C2-A.3: read the picker stage once; unknown or malformed values
+        // resolve to null and change nothing (old-widget safety mirrored).
+        const pickerStage =
+          data.meta &&
+          data.meta.calendar_picker &&
+          typeof data.meta.calendar_picker === "object" &&
+          !Array.isArray(data.meta.calendar_picker)
+            ? data.meta.calendar_picker.stage
+            : null;
         if (data.meta && Array.isArray(data.meta.calendar_actions)) {
-          calendarActionsRendered = renderQuickReplies(
-            data.meta.calendar_actions
-          );
+          // slot_selection routes the SAME validated actions to the
+          // dedicated visual time panel; every other actions payload
+          // (confirmation yes/no, gates-off tenants) keeps the existing
+          // generic quick-reply rendering byte-identically.
+          calendarActionsRendered =
+            pickerStage === PICKER_STAGE_SLOT_SELECTION
+              ? renderSlotPanel(data.meta.calendar_actions)
+              : renderQuickReplies(data.meta.calendar_actions);
         }
         if (
           !calendarActionsRendered &&
@@ -1907,6 +2163,13 @@
           data.meta.calendar_picker.stage === "date"
         ) {
           renderDatePicker();
+        }
+
+        // C2-A.3: the time-preference stage renders the two
+        // ordinary-message buttons. Exact-string comparison; any other
+        // stage value renders nothing here.
+        if (pickerStage === PICKER_STAGE_TIME_PREFERENCE) {
+          renderTimePreferenceRow();
         }
 
         if (data.meta && data.meta.show_booking_button) {
@@ -1956,6 +2219,7 @@
       pickerBounds = null;
       pickerSubmitted = false;
       document.querySelectorAll(".date-picker-row").forEach(el => el.remove());
+      document.querySelectorAll(".time-pref-row, .slot-panel-row").forEach(el => el.remove());
       // V3 defect 1: abandon every in-flight POST /chat — its completion
       // (success OR failure) becomes side-effect-free — and release the
       // abandoned action's lock so the NEW conversation starts working

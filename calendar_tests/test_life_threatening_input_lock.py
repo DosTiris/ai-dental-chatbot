@@ -241,7 +241,20 @@ def test_widget_start_over_releases_input():
     source = widget_source()
 
     start = source.index("function startOver()")
-    body = source[start:start + 1200]
+    brace = source.index("{", start)
+    depth, end = 0, brace
+
+    while True:
+        ch = source[end]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        end += 1
+
+    body = source[start:end + 1]
 
     assert "inputEl.disabled = false;" in body
     assert "sendBtn.disabled = false;" in body

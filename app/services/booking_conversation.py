@@ -108,6 +108,38 @@ CONFIRM_NO_CHOICE_PREFIX = "confirm-no:"
 # surface: it can propose a date, never book one.
 DATE_SELECT_CHOICE_PREFIX = "pick-date:"
 
+# C2-A.3 (visual time stages): the server-defined stage-signal vocabulary
+# for the EXISTING meta.calendar_picker channel introduced by C2-A.2.
+# "date" (owned by _date_stage_meta, untouched) tells the widget to render
+# the visual date picker; these two values tell it to render the visual
+# time-preference row and the visual exact-slot panel. Old widgets ignore
+# unknown stage values (locked C2-A.2 decision D-2), so both are additive:
+# no already-deployed widget changes behavior.
+PICKER_STAGE_TIME_PREFERENCE = "time_preference"
+PICKER_STAGE_SLOT_SELECTION = "slot_selection"
+
+
+def _picker_stage_signal(settings, stage) -> Optional[dict]:
+    """
+    Purpose: single owner (Rule 3) of the C2-A.3 time-stage gate — the ONE
+             place that decides whether a visual time-stage signal may be
+             emitted, mirroring _date_stage_meta's strict triple gate.
+    Inputs:  settings — the request-level CalendarSettings snapshot;
+             stage — PICKER_STAGE_TIME_PREFERENCE or
+             PICKER_STAGE_SLOT_SELECTION.
+    Returns: {"stage": stage} when booking_enabled, calendar_actions_enabled,
+             AND calendar_picker_enabled are ALL strict True; otherwise None,
+             and the caller attaches nothing — the reply meta stays
+             byte-identical to the pre-C2-A.3 text-only behavior.
+    Database effects: none. External effects: none.
+    """
+    if (settings.booking_enabled is True
+            and settings.calendar_actions_enabled is True
+            and settings.calendar_picker_enabled is True):
+        return {"stage": stage}
+    return None
+
+
 # booking_boundary_state() return vocabulary (closed — Rule 4). The route
 # and handle_booking_action BOTH call the helper (locked decision 6) so a
 # state change between the two checks still lands on the correct boundary.
@@ -563,10 +595,20 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc,
         conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
         db.add(conversation)
         db.commit()
+        # C2-A.3: this reply leaves the conversation at the time-preference
+        # question, so it carries the visual time-stage signal when — and
+        # only when — the triple gate is strict true (single gate owner:
+        # _picker_stage_signal). Text and transitions are unchanged.
+        meta = {"mode": "booking", "state": conversation.booking_state}
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_TIME_PREFERENCE
+        )
+        if picker_signal is not None:
+            meta["calendar_picker"] = picker_signal
         return BookingReply(
             True,
             f"Great — {_fmt_day(parsed_date)}. Do you prefer morning or afternoon?",
-            {"mode": "booking", "state": conversation.booking_state},
+            meta,
         )
 
     # No resolvable date. A seeded preference ("Weekday morning", or a
@@ -631,10 +673,16 @@ def _after_date_stored(db, client, conversation, settings, parsed_date,
     conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
     db.add(conversation)
     db.commit()
+    # C2-A.3: time-preference stage reply — visual-stage signal attached
+    # only under the strict triple gate (single owner: _picker_stage_signal).
+    meta = {"mode": "booking", "state": conversation.booking_state}
+    picker_signal = _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
+    if picker_signal is not None:
+        meta["calendar_picker"] = picker_signal
     return BookingReply(
         True,
         f"Got it — {_fmt_day(parsed_date)}. Do you prefer morning or afternoon?",
-        {"mode": "booking", "state": conversation.booking_state},
+        meta,
     )
 
 
@@ -682,21 +730,39 @@ def _handle_time_preference(db, client, conversation, settings, user_text, now_u
 
     preference = parse_time_preference(user_text)
     if preference is None and new_date is None:
+        # C2-A.3: the re-ask also leaves the conversation at the
+        # time-preference question, so it carries the same gated signal.
+        # The wording (including \u201cany time\u201d) is unchanged; the
+        # buttons coexist with typed alternatives, never replace them.
+        meta = {"mode": "booking",
+                "state": BookingState.WAITING_FOR_TIME_PREFERENCE}
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_TIME_PREFERENCE
+        )
+        if picker_signal is not None:
+            meta["calendar_picker"] = picker_signal
         return BookingReply(
             True,
             "Do you prefer morning or afternoon? You can also say "
             "\u201cany time\u201d.",
-            {"mode": "booking", "state": BookingState.WAITING_FOR_TIME_PREFERENCE},
+            meta,
         )
     if preference is None:
         # They gave a new day but no preference; keep asking the one question.
         conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
         db.add(conversation)
         db.commit()
+        # C2-A.3: time-preference stage reply — same gated signal.
+        meta = {"mode": "booking", "state": conversation.booking_state}
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_TIME_PREFERENCE
+        )
+        if picker_signal is not None:
+            meta["calendar_picker"] = picker_signal
         return BookingReply(
             True,
             f"Okay — {_fmt_day(new_date)}. Morning or afternoon?",
-            {"mode": "booking", "state": conversation.booking_state},
+            meta,
         )
 
     conversation.booking_time_preference = preference
@@ -786,6 +852,15 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
         reply_meta["calendar_actions"] = _slot_choice_actions(
             slots, settings.timezone_name
         )
+        # C2-A.3: the slot_selection stage signal attaches ONLY alongside
+        # slot calendar_actions, and only under the strict triple gate
+        # (single owner: _picker_stage_signal). A reply without actions
+        # never carries it.
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_SLOT_SELECTION
+        )
+        if picker_signal is not None:
+            reply_meta["calendar_picker"] = picker_signal
     return BookingReply(
         True,
         f"{prefix}{menu}. Which works best?",
@@ -1770,9 +1845,19 @@ def _truthful_current_state_reply(db, client, conversation, settings,
             {"mode": "booking", "state": state},
         )
     if state == BookingState.WAITING_FOR_TIME_PREFERENCE:
+        # C2-A.3: the race-loser restate genuinely leaves the conversation
+        # at the time-preference question, so it carries the gated signal —
+        # mirroring how the WAITING_FOR_DATE restate below carries
+        # _date_stage_meta (V2 defect 1 pattern).
+        meta = {"mode": "booking", "state": state}
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_TIME_PREFERENCE
+        )
+        if picker_signal is not None:
+            meta["calendar_picker"] = picker_signal
         return BookingReply(
             True, "Do you prefer morning or afternoon?",
-            {"mode": "booking", "state": state},
+            meta,
         )
     if state == BookingState.WAITING_FOR_SLOT_SELECTION:
         if not _offer_is_expired(conversation, now_utc):
@@ -1791,6 +1876,13 @@ def _truthful_current_state_reply(db, client, conversation, settings,
                     reply_meta["calendar_actions"] = _slot_choice_actions(
                         rows, settings.timezone_name
                     )
+                    # C2-A.3: same gated slot_selection signal as
+                    # _offer_slots — attached only alongside actions.
+                    picker_signal = _picker_stage_signal(
+                        settings, PICKER_STAGE_SLOT_SELECTION
+                    )
+                    if picker_signal is not None:
+                        reply_meta["calendar_picker"] = picker_signal
                 return BookingReply(
                     True, f"{prefix}{menu}. Which works best?", reply_meta,
                 )

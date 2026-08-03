@@ -252,8 +252,10 @@ def test_meta_present_on_out_of_range_typed_day_reask(db):
 
 
 def test_meta_never_on_non_date_states(db):
-    # The signal is date-stage ONLY: the time-preference question that
-    # FOLLOWS a stored date must not carry it (C2-A.2 end boundary).
+    # C2-A.3 retarget (owner-authorized): the DATE signal is date-stage
+    # ONLY and must not leak into the time-preference question that
+    # FOLLOWS a stored date (C2-A.2 end boundary) — but that question now
+    # legitimately carries the APPROVED C2-A.3 time-preference signal.
     client = _client(db)
     conversation = _conversation(db, client)
     slot = _slot(db, client)
@@ -265,7 +267,8 @@ def test_meta_never_on_non_date_states(db):
         db, client, conversation, f"pick-date:{day.isoformat()}"
     )
     assert outcome.status == bc.ACTION_EXECUTED
-    assert "calendar_picker" not in outcome.reply.meta
+    assert outcome.reply.meta["calendar_picker"] == {"stage": "time_preference"}
+    assert outcome.reply.meta["calendar_picker"]["stage"] != "date"
 
 
 # ---------------------------------------------------------------------------
@@ -323,9 +326,13 @@ def test_open_date_follows_typed_transition_and_stops_at_time_stage(db):
     # ...and exactly the typed path's next (and LAST C2-A.2) question.
     assert "morning or afternoon" in outcome.reply.text
     assert outcome.reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    # 14. No C2-A.3 emission: only the established meta keys exist and no
-    # calendar_actions (time buttons) are attached.
-    assert set(outcome.reply.meta.keys()) == {"mode", "state"}
+    # 14 (C2-A.3 retarget, owner-authorized): the reply carries exactly
+    # mode, state, and the approved C2-A.3 time-preference signal — and
+    # no calendar_actions (time buttons) are attached at this preference
+    # question.
+    assert set(outcome.reply.meta.keys()) == {"mode", "state", "calendar_picker"}
+    assert outcome.reply.meta["calendar_picker"] == {"stage": "time_preference"}
+    assert "calendar_actions" not in outcome.reply.meta
     # 10. The transcript label is SERVER-formatted from the accepted date.
     assert outcome.user_label == _expected_label(day)
     # 11. Nothing was booked, held, or notified at the date stage.
