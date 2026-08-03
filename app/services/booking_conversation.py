@@ -36,6 +36,11 @@ from sqlalchemy.orm import Session
 
 from app.calendar_models import BookingState, SlotStatus
 from app.models import Conversation
+# C2-A.2: the visual date picker's server-side revalidation reuses the ONE
+# availability-preview owner (B1) — never a second availability computation.
+from pydantic import ValidationError as PydanticValidationError
+from app.schemas import AvailabilityPreviewRequest
+from app.services.availability_preview_service import build_availability_preview
 
 # PATCH 2C (Senior Audit Critical #8): how long a DISPLAYED slot menu stays
 # usable before Mia refreshes it. Fixed for the MVP (not per-office) and
@@ -93,6 +98,15 @@ CALENDAR_CHOICE_ACTION_TYPE = "calendar_choice"
 # against booking_state + booking_selected_slot_id only (locked decision 3).
 CONFIRM_YES_CHOICE_PREFIX = "confirm-yes:"
 CONFIRM_NO_CHOICE_PREFIX = "confirm-no:"
+
+# C2-A.2 (visual date picker): the server-DEFINED date-stage choice prefix.
+# The suffix is the patient-visible ISO office-local date (YYYY-MM-DD) — a
+# piece of patient data, NEVER a backend identifier — and it is resolved
+# ONLY at WAITING_FOR_DATE, only while all three feature gates are strict
+# true, and only after this module re-validates the date as genuinely open
+# through the ONE availability-preview owner. The browser stays a display
+# surface: it can propose a date, never book one.
+DATE_SELECT_CHOICE_PREFIX = "pick-date:"
 
 # booking_boundary_state() return vocabulary (closed — Rule 4). The route
 # and handle_booking_action BOTH call the helper (locked decision 6) so a
@@ -161,6 +175,23 @@ def _confirm_choice_actions(selected_slot_id) -> List[dict]:
                        "choice_id": CONFIRM_NO_CHOICE_PREFIX + sid},
         },
     ]
+
+
+def _date_stage_meta(settings) -> dict:
+    """The reply meta for EVERY response that leaves the conversation at
+    WAITING_FOR_DATE (C2-A.2). When — and only when — booking_enabled,
+    calendar_actions_enabled, and calendar_picker_enabled are ALL strict
+    true, the meta additionally carries the visual-picker signal
+    `calendar_picker: {"stage": "date"}`. Deliberately a NEW meta key and
+    NOT a calendar_actions entry: the existing button renderer and every
+    already-deployed widget ignore unknown meta keys, so old widgets keep
+    the typed-date flow byte-identically (locked decision D-2)."""
+    meta = {"mode": "booking", "state": BookingState.WAITING_FOR_DATE}
+    if (settings.booking_enabled is True
+            and settings.calendar_actions_enabled is True
+            and settings.calendar_picker_enabled is True):
+        meta["calendar_picker"] = {"stage": "date"}
+    return meta
 
 
 def _slot_choice_actions(slots, tz_name: str) -> List[dict]:
@@ -553,7 +584,7 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc,
     return BookingReply(
         True,
         "What day would work best for your appointment?",
-        {"mode": "booking", "state": conversation.booking_state},
+        _date_stage_meta(settings),
     )
 
 
@@ -568,7 +599,7 @@ def _handle_date(db, client, conversation, settings, user_text, now_utc) -> Book
             True,
             "Which day would you like? You can say something like "
             "\u201cThursday\u201d, \u201ctomorrow\u201d, or \u201cJuly 16\u201d.",
-            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE},
+            _date_stage_meta(settings),
         )
 
     reply = _validate_and_store_date(db, conversation, settings, parsed_date, today_local)
@@ -580,6 +611,19 @@ def _handle_date(db, client, conversation, settings, user_text, now_utc) -> Book
         parse_time_preference(user_text)
         or conversation.booking_time_preference
     )
+    return _after_date_stored(
+        db, client, conversation, settings, parsed_date, now_utc, preference
+    )
+
+
+def _after_date_stored(db, client, conversation, settings, parsed_date,
+                       now_utc, preference) -> BookingReply:
+    """The ONE continuation after _validate_and_store_date succeeds
+    (Rule 3): honor an already-known time preference by offering slots, or
+    ask the single remaining morning/afternoon question. Extracted verbatim
+    from _handle_date for C2-A.2 so the visual picker's date resolver runs
+    EXACTLY the typed path's transition — the approved plan forbids a
+    second date-storage or continuation implementation."""
     if preference is not None:
         conversation.booking_time_preference = preference
         return _offer_slots(db, client, conversation, settings, now_utc)
@@ -618,7 +662,7 @@ def _validate_and_store_date(db, conversation, settings, parsed_date, today_loca
         db.commit()
         return BookingReply(
             True, failure_text,
-            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE},
+            _date_stage_meta(settings),
         )
 
     conversation.booking_state = BookingState.WAITING_FOR_DATE
@@ -693,7 +737,7 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
         db.add(conversation)
         db.commit()
         return BookingReply(True, "What day would work best for you?",
-                            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE})
+                            _date_stage_meta(settings))
 
     preference = conversation.booking_time_preference or PREF_ANY
     slots = availability_service.get_available_slots(
@@ -792,7 +836,7 @@ def _suggest_other_days(db, client, conversation, settings, day, now_utc) -> Boo
                 "The office can help directly. "
                 "What other specific day would you like me to check?")
     return BookingReply(True, text,
-                        {"mode": "booking", "state": BookingState.WAITING_FOR_DATE})
+                        _date_stage_meta(settings))
 
 
 def _handle_slot_selection(db, client, conversation, settings, user_text, now_utc) -> BookingReply:
@@ -839,6 +883,10 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
             conversation.booking_state = BookingState.WAITING_FOR_DATE
             db.add(conversation)
             db.commit()
+            # V2 defect 1: this reply LEAVES the conversation at the date
+            # stage, so it must carry the picker signal like every other
+            # date-stage reply.
+            return BookingReply(True, text, _date_stage_meta(settings))
         return BookingReply(True, text,
                             {"mode": "booking", "state": _get_state(conversation)})
 
@@ -1073,7 +1121,7 @@ def _decline_and_restart(db, client, conversation, settings, slot_id) -> Booking
         return BookingReply(
             True,
             "No problem — what day would work better?",
-            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE},
+            _date_stage_meta(settings),  # V2 defect 1: date-stage reply
         )
 
     # Another request already moved this conversation to a different valid
@@ -1093,7 +1141,7 @@ def _finalize_and_reply(db, client, conversation, settings, slot_id, now_utc,
         db.add(conversation)
         db.commit()
         return BookingReply(True, "Let me pull up times again — what day works best?",
-                            {"mode": "booking", "state": BookingState.WAITING_FOR_DATE})
+                            _date_stage_meta(settings))  # V2 defect 1
 
     result = booking_service.finalize_booking(
         db, client.id, slot_id, conversation.id,
@@ -1364,8 +1412,15 @@ def handle_booking_action(db, client, conversation, choice_id) -> ActionOutcome:
         return _resolve_confirmation_action(
             db, client, conversation, settings, choice, now_utc
         )
+    if state == BookingState.WAITING_FOR_DATE:
+        # C2-A.2: the visual picker's date-stage resolution (its own gate,
+        # shape, and open-date revalidation live in the resolver).
+        return _resolve_date_action(
+            db, client, conversation, settings, choice, now_utc
+        )
 
-    # NONE / BOOKED / date / preference states issue no choices. V2 audit
+    # NONE / BOOKED / preference states issue no choices (the date state
+    # accepts ONLY the C2-A.2 picker prefix, resolved above). V2 audit
     # item 1 — ONE deliberate exception: a confirm-yes token provably bound
     # to THIS conversation's active appointment's consumed slot is a
     # response-loss retry of an already-successful booking. Restate the
@@ -1386,6 +1441,88 @@ def handle_booking_action(db, client, conversation, choice_id) -> ActionOutcome:
                 user_label="Yes — book it",
             )
     return ActionOutcome(ACTION_STALE_CHOICE)
+
+
+def _resolve_date_action(db, client, conversation, settings, choice,
+                         now_utc) -> ActionOutcome:
+    """WAITING_FOR_DATE (C2-A.2): resolve ONE visual-picker date choice.
+
+    Acceptance requires ALL of:
+      1. calendar_picker_enabled strict true (booking_enabled and
+         calendar_actions_enabled were already verified by the caller) —
+         otherwise the choice could never have been issued and it resolves
+         to the indistinguishable STALE_CHOICE, exactly like a forgery;
+      2. the server-defined prefix and an EXACT ISO calendar date suffix
+         (YYYY-MM-DD; a malformed or impossible date is STALE_CHOICE);
+      3. the ONE availability-preview owner (B1) — called with the SAME
+         parameters the public widget preview shows (service_key=None) —
+         currently classifies the date "open". "past", "full",
+         "unavailable", or anything else is STALE_CHOICE with NO state
+         mutation: the browser proposes, the server decides.
+
+    On acceptance the date runs the EXACT typed-date transition —
+    _validate_and_store_date then _after_date_stored — so precisely one
+    date-storage implementation exists (Rule 3). The transcript user_label
+    is SERVER-formatted from the accepted date (locked decision D-3); the
+    request's message field is never consulted. C2-A.2 ends at the
+    existing time-preference stage: no time UI, no slot, hold, booking, or
+    notification behavior is added or changed here.
+    Database effects: none for every rejection; acceptance performs the
+    typed path's own commits. External effects: none.
+    """
+    if settings.calendar_picker_enabled is not True:
+        return ActionOutcome(ACTION_STALE_CHOICE)
+    if not choice.startswith(DATE_SELECT_CHOICE_PREFIX):
+        return ActionOutcome(ACTION_STALE_CHOICE)
+
+    raw_day = choice[len(DATE_SELECT_CHOICE_PREFIX):]
+    if len(raw_day) != 10 or raw_day[4] != "-" or raw_day[7] != "-":
+        return ActionOutcome(ACTION_STALE_CHOICE)
+    try:
+        picked = date.fromisoformat(raw_day)
+    except ValueError:
+        return ActionOutcome(ACTION_STALE_CHOICE)
+
+    # Server-authoritative revalidation through the single preview owner.
+    # fromisoformat guarantees the model's date fields; start==end makes
+    # ordering and the 31-day cap unviolable, so the explicit rejection
+    # below is an unreachable-by-construction guard kept for Rule 16
+    # visibility rather than a broad except.
+    try:
+        preview = build_availability_preview(
+            db, client,
+            AvailabilityPreviewRequest(
+                start_day=raw_day, end_day=raw_day,
+                selected_day=None, service_key=None,
+            ),
+            ensure_utc(now_utc),
+        )
+    except PydanticValidationError:
+        return ActionOutcome(ACTION_STALE_CHOICE)
+    day_state = preview.days[0].state if preview.days else None
+    if day_state != "open":
+        return ActionOutcome(ACTION_STALE_CHOICE)
+
+    today_local = client_now(settings).date()
+    # Human-readable, SERVER-formatted transcript label ("Wednesday,
+    # August 14") — de-padded day, never browser text.
+    label = f"{picked.strftime('%A, %B')} {picked.day}"
+
+    reply = _validate_and_store_date(
+        db, conversation, settings, picked, today_local
+    )
+    if reply is not None:
+        # A clock-edge race (midnight / horizon boundary between the
+        # preview read and the store): the typed path's own re-ask reply
+        # is returned as the executed outcome — state stays at
+        # WAITING_FOR_DATE and nothing advanced (Rule 16: visible, honest).
+        return ActionOutcome(ACTION_EXECUTED, reply=reply, user_label=label)
+
+    continuation = _after_date_stored(
+        db, client, conversation, settings, picked, now_utc,
+        conversation.booking_time_preference,
+    )
+    return ActionOutcome(ACTION_EXECUTED, reply=continuation, user_label=label)
 
 
 def _resolve_selection_action(db, client, conversation, settings, choice,
@@ -1658,7 +1795,15 @@ def _truthful_current_state_reply(db, client, conversation, settings,
                     True, f"{prefix}{menu}. Which works best?", reply_meta,
                 )
     # WAITING_FOR_DATE / NONE / anything else without an appointment: the
-    # day question, with the persisted state reported unchanged.
+    # day question, with the persisted state reported unchanged. V2 defect
+    # 1: the picker signal is attached ONLY when the surviving persisted
+    # state genuinely is WAITING_FOR_DATE — a race won by another state
+    # must not advertise a date picker it cannot consume.
+    if state == BookingState.WAITING_FOR_DATE:
+        return BookingReply(
+            True, "What day would work best for your appointment?",
+            _date_stage_meta(settings),
+        )
     return BookingReply(
         True, "What day would work best for your appointment?",
         {"mode": "booking", "state": state},

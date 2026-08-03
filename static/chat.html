@@ -307,6 +307,96 @@
       margin-right: 2px;
     }
 
+    /* C2-A.2 visual date picker (design adapted from frozen Prototype A
+       v2.2.1 tokens; themed via the existing --mia-* variables). */
+    .date-picker-row {
+      margin: 10px 0 2px;
+      animation: miaMessageIn 210ms ease-out both;
+    }
+    .date-picker {
+      background: var(--mia-panel, #111827);
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 14px;
+      padding: 12px;
+      max-width: 320px;
+    }
+    .date-picker .dp-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .date-picker .dp-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--mia-text, #e5e7eb);
+    }
+    .date-picker .dp-nav {
+      background: var(--mia-button-bg, #111827);
+      color: var(--mia-button-text, #e5e7eb);
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 8px;
+      width: 30px;
+      height: 30px;
+      cursor: pointer;
+    }
+    .date-picker .dp-nav:disabled {
+      opacity: 0.35;
+      cursor: default;
+    }
+    .date-picker .dp-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+    }
+    .date-picker .dp-dow {
+      font-size: 11px;
+      text-align: center;
+      color: var(--mia-muted, #94a3b8);
+      padding: 2px 0;
+    }
+    .date-picker .dp-day {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--mia-text, #e5e7eb);
+      font-size: 13px;
+      padding: 6px 0;
+      text-align: center;
+    }
+    .date-picker .dp-day.dp-open {
+      background: var(--mia-button-bg, #111827);
+      border-color: var(--mia-border, #1e293b);
+      cursor: pointer;
+    }
+    .date-picker .dp-day.dp-open:hover,
+    .date-picker .dp-day.dp-open:focus {
+      border-color: var(--mia-primary, #2563eb);
+    }
+    .date-picker .dp-day.dp-locked {
+      opacity: 0.35;
+      cursor: default;
+    }
+    .date-picker .dp-day.dp-selected {
+      background: var(--mia-primary, #2563eb);
+      color: #ffffff;
+      border-color: var(--mia-primary, #2563eb);
+    }
+    .date-picker .dp-status {
+      font-size: 12px;
+      color: var(--mia-muted, #94a3b8);
+      margin-top: 8px;
+    }
+    .date-picker .dp-retry {
+      margin-top: 8px;
+      background: var(--mia-button-bg, #111827);
+      color: var(--mia-button-text, #e5e7eb);
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+
     .quick-replies,
     .booking-link-row {
       display: flex;
@@ -775,6 +865,16 @@
     let openingStarted = false;
     let openingSequenceToken = 0;
     let structuredActionInFlight = false;
+    // V3 (owner audit defect 1): the conversation/reset EPOCH. Every
+    // sendMessage captures it at entry; Start Over increments it. An
+    // asynchronous POST /chat completion whose captured epoch no longer
+    // matches is from an ABANDONED conversation and must produce ZERO
+    // side effects — no conversationId restore, no localStorage write,
+    // no bot message, no picker/buttons/map/booking link, no error
+    // wording, and no clearing of the in-flight guard that now belongs
+    // to a newer action. Same generation pattern as
+    // openingSequenceToken / pickerFetchSeq.
+    let chatEpoch = 0;
 
     const messagesEl = document.getElementById("messages");
     const inputEl = document.getElementById("input");
@@ -998,6 +1098,12 @@
 
     function clearActionRows() {
       document.querySelectorAll(".quick-replies, .booking-link-row").forEach(el => el.remove());
+      // V2 defect 2: a picker whose date submission is IN FLIGHT must
+      // remain attached and visible until the action resolves; pickDate
+      // owns that removal boundary. Every other picker row clears here.
+      document.querySelectorAll(".date-picker-row").forEach(el => {
+        if (!el.classList.contains("dp-submitting")) el.remove();
+      });
     }
 
     function normalizeChatAction(action) {
@@ -1143,6 +1249,396 @@
       sendMessage(action);
     }
 
+    // ------------------------------------------------------------------
+    // C2-A.2 — visual date picker (date stage ONLY).
+    // Consumes the C2-A.1 read-only availability preview and returns the
+    // selected date through the EXISTING structured-action path. The
+    // browser proposes; the server decides. No slot, hold, time, review,
+    // or confirmation behavior lives here.
+    // ------------------------------------------------------------------
+    const DATE_SELECT_CHOICE_PREFIX = "pick-date:";
+    const PICKER_DAY_STATES = ["open", "full", "unavailable", "past"];
+    const PICKER_MONTH_NAMES = ["January","February","March","April","May",
+      "June","July","August","September","October","November","December"];
+    const PICKER_WEEKDAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday",
+      "Thursday","Friday","Saturday"];
+    const PICKER_MSG_LOAD_FAILED =
+      "I couldn’t load the calendar. You can retry, or just type a day instead.";
+    // Every preview response must be superseded-safe: only the NEWEST
+    // request may render (stale responses are dropped by sequence).
+    // V7 (owner audit): EXPLICIT CLAMP BUDGET. A PATIENT-INITIATED
+    // request (opening the picker, pressing Retry, tapping month
+    // navigation) may consume AT MOST ONE automatic server-directed
+    // month jump; the internal jump request itself carries ZERO
+    // remaining budget. When a zero-budget response reports the
+    // requested month outside its newly returned nonempty bounds
+    // (bounds changed between responses), the widget must NOT jump
+    // again and must NOT render the invalid month — it shows the
+    // visible failure with Retry while typed dates stay usable. Every
+    // Retry is a fresh patient-initiated bounded attempt, so no
+    // automatic request loop is possible.
+    const PICKER_PATIENT_JUMP_BUDGET = 1;
+    const PICKER_NO_JUMP_BUDGET = 0;
+    let pickerFetchSeq = 0;
+    let pickerBounds = null;    // {earliest, latest} ISO strings from server
+    let pickerSubmitted = false;
+
+    function pickerIsoParts(iso) {
+      // Canonical real-date validation (V2 defect 3): the text pattern is
+      // not enough — 2026-02-30 and 2026-13-01 must fail. The parsed
+      // parts must ROUND-TRIP through a UTC date back to the exact
+      // original string.
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+      if (!m) return null;
+      const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+      const probe = new Date(Date.UTC(y, mo - 1, d));
+      if (probe.getUTCFullYear() !== y ||
+          probe.getUTCMonth() !== mo - 1 ||
+          probe.getUTCDate() !== d) {
+        return null;
+      }
+      return { y: y, mo: mo, d: d };
+    }
+
+    function pickerMonthKey(iso) {
+      const p = pickerIsoParts(iso);
+      return p ? p.y * 12 + (p.mo - 1) : null;
+    }
+
+    function pickerMonthWindow(year, monthIndex) {
+      const last = new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+      const mm = String(monthIndex + 1).padStart(2, "0");
+      return {
+        start: `${year}-${mm}-01`,
+        end: `${year}-${mm}-${String(last).padStart(2, "0")}`,
+      };
+    }
+
+    function pickerValidPreviewShape(data, win) {
+      // Fail closed (V2 defect 3): a malformed body, an unknown day
+      // state, an impossible date, OR any misalignment with the range we
+      // actually requested is treated exactly like a fetch failure —
+      // never partially rendered, never guessed around.
+      if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+      if (typeof data.timezone !== "string" || !data.timezone.trim()) return false;
+      // The response must echo the EXACT requested inclusive window.
+      if (data.requested_start_day !== win.start) return false;
+      if (data.requested_end_day !== win.end) return false;
+      if (!pickerIsoParts(data.earliest_bookable_day)) return false;
+      if (!pickerIsoParts(data.latest_bookable_day)) return false;
+      if (!Array.isArray(data.days)) return false;
+      // The days must be the complete, unique, chronological sequence for
+      // the requested range — one entry per calendar day, no gaps, no
+      // duplicates, nothing outside the window, nothing reordered.
+      const emptyWindow = data.earliest_bookable_day > data.latest_bookable_day;
+      let expected = win.start;
+      for (let i = 0; i < data.days.length; i++) {
+        const day = data.days[i];
+        if (!day || typeof day !== "object") return false;
+        const parts = pickerIsoParts(day.local_date);
+        if (!parts) return false;
+        if (day.local_date !== expected) return false;
+        // V3 defect 2: the weekday must be the CANONICAL weekday of
+        // local_date (UTC calendar arithmetic) — a real date paired with
+        // the wrong weekday is a malformed response, not a label source.
+        const canonicalWeekday = PICKER_WEEKDAY_NAMES[
+          new Date(Date.UTC(parts.y, parts.mo - 1, parts.d)).getUTCDay()
+        ];
+        if (day.weekday !== canonicalWeekday) return false;
+        if (PICKER_DAY_STATES.indexOf(day.state) === -1) return false;
+        // V3 defect 3: an "open" claim must be CONSISTENT with the
+        // declared authoritative bounds — never silently downgraded.
+        // Locked days outside the bounds are legitimate (past days,
+        // horizon days) and still render locked.
+        if (day.state === "open") {
+          if (emptyWindow) return false;
+          if (day.local_date < data.earliest_bookable_day) return false;
+          if (day.local_date > data.latest_bookable_day) return false;
+        }
+        expected = pickerNextIso(expected);
+      }
+      return expected === pickerNextIso(win.end);
+    }
+
+    function pickerNextIso(iso) {
+      // The next calendar day of a CANONICAL ISO date (UTC arithmetic).
+      const p = pickerIsoParts(iso);
+      const t = new Date(Date.UTC(p.y, p.mo - 1, p.d + 1));
+      const mm = String(t.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(t.getUTCDate()).padStart(2, "0");
+      return `${t.getUTCFullYear()}-${mm}-${dd}`;
+    }
+
+    function renderDatePicker() {
+      // A fresh signal fully rebuilds the picker (reopen = clean state).
+      document.querySelectorAll(".date-picker-row").forEach((el) => el.remove());
+      pickerSubmitted = false;
+      const row = document.createElement("div");
+      row.className = "date-picker-row";
+      const panel = document.createElement("div");
+      panel.className = "date-picker";
+      panel.setAttribute("role", "group");
+      panel.setAttribute("aria-label", "Choose an appointment day");
+      row.appendChild(panel);
+      messagesEl.appendChild(row);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      const now = new Date();
+      fetchPickerMonth(panel, now.getFullYear(), now.getMonth(),
+                       PICKER_PATIENT_JUMP_BUDGET);
+    }
+
+    function pickerShowStatus(panel, text, retry, year, monthIndex) {
+      panel.innerHTML = "";
+      const status = document.createElement("div");
+      status.className = "dp-status";
+      status.textContent = text;
+      panel.appendChild(status);
+      if (retry) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "dp-retry";
+        btn.textContent = "Retry";
+        // V7 (owner audit): a Retry is a fresh PATIENT-INITIATED bounded
+        // attempt — it carries its own single-jump budget, so a retried
+        // INITIAL failure still gets one server-directed clamp in either
+        // direction. Loop-safe: a zero-budget out-of-window response
+        // fails visibly instead of rendering or re-jumping, and every
+        // further attempt requires another click.
+        btn.addEventListener("click", () =>
+          fetchPickerMonth(panel, year, monthIndex,
+                           PICKER_PATIENT_JUMP_BUDGET)
+        );
+        panel.appendChild(btn);
+      }
+    }
+
+    async function fetchPickerMonth(panel, year, monthIndex, jumpBudget) {
+      const seq = ++pickerFetchSeq;
+      const win = pickerMonthWindow(year, monthIndex);
+      pickerShowStatus(panel, "Loading available days…", false, year, monthIndex);
+      let data = null;
+      try {
+        const url = `${API_BASE}/chat/calendar/availability-preview` +
+          `?client_key=${encodeURIComponent(clientKey)}` +
+          `&start_day=${win.start}&end_day=${win.end}`;
+        const res = await fetch(url);
+        if (seq !== pickerFetchSeq) return; // superseded — newest wins
+        if (!res.ok) {
+          pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
+          return;
+        }
+        data = await res.json().catch(() => null);
+      } catch (err) {
+        if (seq !== pickerFetchSeq) return;
+        pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
+        return;
+      }
+      if (seq !== pickerFetchSeq) return;
+      if (!pickerValidPreviewShape(data, win)) {
+        pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
+        return;
+      }
+      pickerBounds = {
+        earliest: data.earliest_bookable_day,
+        latest: data.latest_bookable_day,
+      };
+      const monthKey = year * 12 + monthIndex;
+      const earliestKey = pickerMonthKey(pickerBounds.earliest);
+      const latestKey = pickerMonthKey(pickerBounds.latest);
+      if (pickerBounds.earliest > pickerBounds.latest) {
+        // DAY-level ISO comparison (lexicographic == chronological):
+        // a truthful empty booking window — NO date is bookable.
+        pickerShowStatus(
+          panel,
+          "Online day selection isn’t available right now — you can type a day instead.",
+          false, year, monthIndex
+        );
+        return;
+      }
+      if (jumpBudget >= 1 && earliestKey !== null && monthKey < earliestKey) {
+        // The request landed BEFORE the bookable window: consume the
+        // single automatic clamp and jump to the earliest bookable month
+        // (supersession-safe; the invalid month is never rendered; the
+        // jump request carries ZERO remaining budget).
+        fetchPickerMonth(
+          panel,
+          Math.floor(earliestKey / 12),
+          earliestKey % 12,
+          PICKER_NO_JUMP_BUDGET
+        );
+        return;
+      }
+      if (jumpBudget >= 1 && latestKey !== null && monthKey > latestKey) {
+        // V4 (owner audit): the symmetric clamp — the request landed
+        // AFTER the bookable window (e.g. the office's latest bookable
+        // month precedes the browser's current month). Consume the single
+        // automatic clamp and jump to the latest allowed month under the
+        // same supersession rules; the out-of-window month is never
+        // rendered; the jump request carries ZERO remaining budget.
+        fetchPickerMonth(
+          panel,
+          Math.floor(latestKey / 12),
+          latestKey % 12,
+          PICKER_NO_JUMP_BUDGET
+        );
+        return;
+      }
+      if ((earliestKey !== null && monthKey < earliestKey) ||
+          (latestKey !== null && monthKey > latestKey)) {
+        // V7 (owner audit): the jump budget is exhausted, yet the
+        // server's NEWLY RETURNED nonempty bounds still exclude this
+        // month — the bounds changed between responses. Never render the
+        // invalid month and never chain a second automatic jump: show
+        // the visible failure with Retry (a fresh patient-initiated
+        // bounded attempt); typed dates remain usable throughout.
+        pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
+        return;
+      }
+      renderPickerGrid(panel, year, monthIndex, data, monthKey,
+                       earliestKey, latestKey);
+    }
+
+    function renderPickerGrid(panel, year, monthIndex, data, monthKey,
+                              earliestKey, latestKey) {
+      panel.innerHTML = "";
+      const head = document.createElement("div");
+      head.className = "dp-head";
+      const prev = document.createElement("button");
+      prev.type = "button";
+      prev.className = "dp-nav";
+      prev.textContent = "‹";
+      prev.setAttribute("aria-label", "Previous month");
+      prev.disabled = monthKey <= earliestKey;   // clamp: server bounds only
+      const title = document.createElement("div");
+      title.className = "dp-title";
+      title.textContent = `${PICKER_MONTH_NAMES[monthIndex]} ${year}`;
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "dp-nav";
+      next.textContent = "›";
+      next.setAttribute("aria-label", "Next month");
+      next.disabled = monthKey >= latestKey;     // clamp: server bounds only
+      prev.addEventListener("click", () => {
+        if (prev.disabled) return;
+        const k = monthKey - 1;
+        // V7 (owner audit): navigation is patient-initiated — it carries
+        // its own single-jump budget for server bounds that shifted
+        // since this grid rendered.
+        fetchPickerMonth(panel, Math.floor(k / 12), k % 12,
+                         PICKER_PATIENT_JUMP_BUDGET);
+      });
+      next.addEventListener("click", () => {
+        if (next.disabled) return;
+        const k = monthKey + 1;
+        fetchPickerMonth(panel, Math.floor(k / 12), k % 12,
+                         PICKER_PATIENT_JUMP_BUDGET);
+      });
+      head.appendChild(prev);
+      head.appendChild(title);
+      head.appendChild(next);
+      panel.appendChild(head);
+
+      const grid = document.createElement("div");
+      grid.className = "dp-grid";
+      ["Su","Mo","Tu","We","Th","Fr","Sa"].forEach((dow) => {
+        const cell = document.createElement("div");
+        cell.className = "dp-dow";
+        cell.textContent = dow;
+        grid.appendChild(cell);
+      });
+      const firstDow = new Date(Date.UTC(year, monthIndex, 1)).getUTCDay();
+      for (let i = 0; i < firstDow; i++) {
+        grid.appendChild(document.createElement("div"));
+      }
+      // Every interactive control is registered so a submission can
+      // disable the WHOLE picker at once (V2 defect 2).
+      panel.dpControls = [prev, next];
+      data.days.forEach((day) => {
+        const parts = pickerIsoParts(day.local_date);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = String(parts.d);
+        if (day.state === "open") {
+          btn.className = "dp-day dp-open";
+          // State-specific accessible semantics (V2 defect 4): the label
+          // names the availability state, never color alone.
+          btn.setAttribute(
+            "aria-label",
+            `Choose ${day.weekday} ${day.local_date} — available`
+          );
+          btn.setAttribute("aria-pressed", "false");
+          btn.addEventListener("click", () =>
+            pickDate(panel, btn, day.local_date, day.weekday, parts)
+          );
+        } else {
+          // full / unavailable / past all render locked — the widget
+          // never reinterprets or upgrades a server day state — and each
+          // carries ITS OWN state word in the accessible label.
+          btn.className = "dp-day dp-locked";
+          btn.disabled = true;
+          btn.setAttribute("aria-disabled", "true");
+          btn.setAttribute(
+            "aria-label", `${day.weekday} ${day.local_date} — ${day.state}`
+          );
+        }
+        panel.dpControls.push(btn);
+        grid.appendChild(btn);
+      });
+      panel.appendChild(grid);
+      const hint = document.createElement("div");
+      hint.className = "dp-status";
+      hint.textContent = "Pick an available day, or type one instead.";
+      panel.appendChild(hint);
+    }
+
+    function pickDate(panel, btn, iso, weekday, parts) {
+      // Single-submission guard: one date per picker instance, and never
+      // while another structured action is in flight (sendMessage's own
+      // duplicate defense still applies underneath).
+      if (pickerSubmitted || structuredActionInFlight) return;
+      pickerSubmitted = true;
+      // V2 defect 2: the selected state must stay ATTACHED and VISIBLE
+      // for the whole in-flight window. Mark the selection (visually and
+      // accessibly), disable every picker control, tag the row as
+      // submitting so clearActionRows spares it, and remove it only when
+      // the action promise RESOLVES (success or handled failure). A
+      // successful reply that re-opens a picker rebuilds a fresh one
+      // before this removal runs — removing a detached row is a no-op.
+      btn.classList.add("dp-selected");
+      btn.setAttribute("aria-pressed", "true");
+      (panel.dpControls || []).forEach((control) => {
+        control.disabled = true;
+      });
+      const row = panel.parentElement;
+      if (row) row.classList.add("dp-submitting");
+      const label = `${weekday}, ${PICKER_MONTH_NAMES[parts.mo - 1]} ${parts.d}`;
+      // Display echo only — the transcript label is server-issued.
+      inputEl.value = label;
+      Promise.resolve(sendMessage({
+        type: CALENDAR_CHOICE_ACTION_TYPE,
+        choice_id: DATE_SELECT_CHOICE_PREFIX + iso,
+      })).finally(() => {
+        if (row) row.remove();
+      });
+      // V8 (owner audit): sendMessage's synchronous phase has just
+      // appended the patient echo and the typing indicator and scrolled
+      // #messages to the bottom, which can push the selected date cell
+      // above the visible viewport on small screens. One bounded frame
+      // later — strictly AFTER the widget's own scrolling and never in
+      // response to patient scrolling — bring the live selected button
+      // back into view. block:"nearest" scrolls the minimum necessary
+      // and is a no-op when the button is already visible; if the row
+      // was removed first (action resolved, or Start Over invalidated
+      // it), the detached button is skipped. This scroll ownership is
+      // date-action-specific: ordinary messages, service buttons, and
+      // quick replies keep their existing bottom-scroll behavior.
+      requestAnimationFrame(() => {
+        if (btn.isConnected) {
+          btn.scrollIntoView({ block: "nearest" });
+        }
+      });
+    }
+
     function resetInputPlaceholder() {
       inputEl.placeholder = mobileQuery.matches ? "Type a question..." : "Ask Mia about appointments, services, insurance...";
     }
@@ -1257,7 +1753,7 @@
       return true;
     }
 
-    function handleActionFailureResponse(status, data, parseFailed) {
+    function handleActionFailureResponse(status, data, parseFailed, actionChoiceId) {
       // Fail-closed (locked decision 15): the submitted action group was
       // already cleared at send time and is NEVER re-rendered, re-enabled,
       // or retried from here. Replacement buttons render ONLY from a
@@ -1275,6 +1771,20 @@
         addMessage("bot", serverMessage);
         if (code === "STALE_CHOICE" && Array.isArray(data.detail.calendar_actions)) {
           renderQuickReplies(data.detail.calendar_actions);
+        } else if (code === "STALE_CHOICE" &&
+                   typeof actionChoiceId === "string" &&
+                   actionChoiceId.indexOf(DATE_SELECT_CHOICE_PREFIX) === 0) {
+          // V4 (owner audit): a no-replacement STALE_CHOICE for a date
+          // pick is STATE-FREE — the 409 envelope carries no
+          // authoritative booking state and no meta.calendar_picker, and
+          // the same envelope covers duplicate-after-success,
+          // wrong-state, expired, and forged submissions alike. So: the
+          // server message (already shown above) stands alone; no
+          // service-menu buttons, no replacement picker, no automatic
+          // availability refetch, no submission loop. Typed input stays
+          // usable, and a fresh picker may render ONLY when a later
+          // authoritative HTTP 200 response carries
+          // meta.calendar_picker {"stage":"date"}.
         } else if (code === "STALE_CHOICE" || code === "ACTION_NOT_ACTIVE") {
           renderQuickReplies(getServiceReplyOptions());
         } else if (code === "CONVERSATION_LOCKED") {
@@ -1294,6 +1804,8 @@
     async function sendMessage(action = null) {
       const message = inputEl.value.trim();
       if (!message) return;
+      // V3 defect 1: capture the epoch BEFORE any asynchronous work.
+      const epoch = chatEpoch;
 
       const normalizedAction = action === null
         ? null
@@ -1333,9 +1845,14 @@
         // Legacy message-only sends keep their existing behavior.
         let parseFailed = false;
         const data = await res.json().catch(() => { parseFailed = true; return {}; });
+        // V3 defect 1: a response from an ABANDONED epoch (Start Over ran
+        // while this request was in flight) is dropped BEFORE any UI,
+        // conversationId, storage, picker, button, or error side effect.
+        if (epoch !== chatEpoch) return;
         if (normalizedAction && (!res.ok || parseFailed)) {
           hideTyping();
-          handleActionFailureResponse(res.status, data, parseFailed);
+          handleActionFailureResponse(res.status, data, parseFailed,
+                                      normalizedAction.choice_id);
           return;
         }
         // V3 (audit item 2): a PARSED structured-action HTTP 200 body must
@@ -1346,7 +1863,8 @@
         // fallback help reply. Legacy message-only sends are untouched.
         if (normalizedAction && !isValidActionSuccessShape(data)) {
           hideTyping();
-          handleActionFailureResponse(res.status, data, true);
+          handleActionFailureResponse(res.status, data, true,
+                                      normalizedAction.choice_id);
           return;
         }
         if (!res.ok) {
@@ -1382,6 +1900,15 @@
           renderQuickReplies(getServiceReplyOptions());
         }
 
+        if (
+          data.meta &&
+          data.meta.calendar_picker &&
+          typeof data.meta.calendar_picker === "object" &&
+          data.meta.calendar_picker.stage === "date"
+        ) {
+          renderDatePicker();
+        }
+
         if (data.meta && data.meta.show_booking_button) {
           renderBookingButton(data.meta.booking_url, data.meta.booking_cta_label);
         }
@@ -1397,6 +1924,9 @@
         }
       } catch (err) {
         console.error(err);
+        // V3 defect 1: an abandoned request's network/error completion
+        // must not surface any stale failure wording after Start Over.
+        if (epoch !== chatEpoch) return;
         hideTyping();
         if (normalizedAction) {
           // Genuine fetch/network failure for an action send — distinct
@@ -1407,13 +1937,32 @@
           addMessage("bot", "I’m having trouble connecting right now. Please call the office directly or try again in a moment.");
         }
       } finally {
-        if (normalizedAction) {
+        // V3 defect 1: only the CURRENT epoch's action may clear the
+        // in-flight guard — an older request's finally must never unlock
+        // a newer structured action (Start Over already released the
+        // abandoned epoch's lock so the new conversation never waits).
+        if (normalizedAction && epoch === chatEpoch) {
           structuredActionInFlight = false;
         }
       }
     }
 
     function startOver() {
+      // C2-A.2: invalidate any in-flight preview fetch, reset the
+      // picker's single-submission state, and remove EVERY picker row —
+      // the patient's explicit reset outranks the in-flight submitting
+      // hold that clearActionRows spares.
+      pickerFetchSeq += 1;
+      pickerBounds = null;
+      pickerSubmitted = false;
+      document.querySelectorAll(".date-picker-row").forEach(el => el.remove());
+      // V3 defect 1: abandon every in-flight POST /chat — its completion
+      // (success OR failure) becomes side-effect-free — and release the
+      // abandoned action's lock so the NEW conversation starts working
+      // immediately. The old finally is epoch-gated and can no longer
+      // clear a newer action's lock.
+      chatEpoch += 1;
+      structuredActionInFlight = false;
       conversationId = null;
       localStorage.removeItem(`chat_conversation_id_${clientKey}`);
 
