@@ -96,6 +96,8 @@ from app.services.booking_conversation import (
     cancel_active_booking,
     handle_booking_action,
     handle_booking_message,
+    INTAKE_TIME_PREFERENCE_PROMPT,
+    intake_time_preference_stage_signal,
 )
 
 # CHECKPOINT B: the time-preference bucket vocabulary stays owned by
@@ -4921,7 +4923,7 @@ def handle_time_window_capture(
             day_tok = _extract_day_token(dt)
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
                 conversation.lead_time_window = dt
-                return ("Got it — do you prefer morning or afternoon?", True)
+                return (INTAKE_TIME_PREFERENCE_PROMPT, True)
             return ("Please choose a weekday (Mon–Fri). Do you prefer morning or afternoon?", False)
 
         return ("Do you prefer weekday morning or afternoon?", False)
@@ -5013,7 +5015,7 @@ def handle_time_window_capture(
                 return ("Got it — what time later today works best?", saved)
 
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
-                return ("Got it — do you prefer morning or afternoon?", saved)
+                return (INTAKE_TIME_PREFERENCE_PROMPT, saved)
 
             return (f"Please choose another day/time that works. {weekday_example}", False)
 
@@ -7935,7 +7937,7 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
             if tw_val in {"Weekday morning", "Weekday afternoon"}:
                 return ("Thanks — which weekday works best (Mon–Fri)?", "time_window")
             if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
-                return ("Got it — do you prefer morning or afternoon?", "time_window")
+                return (INTAKE_TIME_PREFERENCE_PROMPT, "time_window")
             name = (conversation.lead_name or "").strip()
             name_part = f" {name}" if name else ""
             return (f"Thanks{name_part}. What day/time window works best?", "time_window")
@@ -7949,7 +7951,7 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
         if tw_val in {"Weekday morning", "Weekday afternoon"}:
             return ("Thanks — which weekday works best (Mon–Fri)?", "time_window")
         if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
-            return ("Got it — do you prefer morning or afternoon?", "time_window")
+            return (INTAKE_TIME_PREFERENCE_PROMPT, "time_window")
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
         return (f"Great—thanks{name_part}. What day/time window works best (e.g., Tue morning)?", "time_window")
@@ -8104,7 +8106,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
             if tw_val in {"Weekday morning", "Weekday afternoon"}:
                 return "Thanks — which weekday works best (Mon–Fri)?"
             if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
-                return "Got it — do you prefer morning or afternoon?"
+                return INTAKE_TIME_PREFERENCE_PROMPT
             return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
 
         return build_short_symptom_handoff_reply(conversation)
@@ -8120,7 +8122,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
         if tw_val in {"Weekday morning", "Weekday afternoon"}:
             return "Thanks — which weekday works best (Mon–Fri)?"
         if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
-            return "Got it — do you prefer morning or afternoon?"
+            return INTAKE_TIME_PREFERENCE_PROMPT
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
 
     if getattr(conversation, "lead_is_new_patient", None) is None:
@@ -8989,22 +8991,33 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
             db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
             db.commit()
+            intake_meta = {
+                "mode": "intake_time_window_capture",
+                "faq_match": False,
+                # Human-readable and client-local. The canonical stored
+                # value can carry an ISO date and must never cross this
+                # boundary. Sole producer of this key; no repository
+                # consumer reads the raw form.
+                "saved_time_window": _render_time_window_for_client(
+                    client, getattr(conversation, "lead_time_window", None)
+                ) or None,
+                "show_service_menu": reply_should_show_service_menu(reply_text),
+                "show_start_over": show_start_over,
+            }
+            # C2-A.3 intake-gap fix: when THIS turn's final reply is the
+            # day-only "morning or afternoon" preference question, attach
+            # the same gated time_preference signal the native booking
+            # paths emit. The service layer is the single owner of the
+            # decision (triple strict-true gate + exact-prompt proof);
+            # this route only merges the returned metadata. Gates-false
+            # tenants and every other intake reply stay byte-identical.
+            picker_signal = intake_time_preference_stage_signal(client, reply_text)
+            if picker_signal is not None:
+                intake_meta["calendar_picker"] = picker_signal
             return ChatResponse(
                 reply=reply_text,
                 conversation_id=str(conversation.id),
-                meta={
-                    "mode": "intake_time_window_capture",
-                    "faq_match": False,
-                    # Human-readable and client-local. The canonical stored
-                    # value can carry an ISO date and must never cross this
-                    # boundary. Sole producer of this key; no repository
-                    # consumer reads the raw form.
-                    "saved_time_window": _render_time_window_for_client(
-                        client, getattr(conversation, "lead_time_window", None)
-                    ) or None,
-                    "show_service_menu": reply_should_show_service_menu(reply_text),
-                    "show_start_over": show_start_over,
-                },
+                meta=intake_meta,
             )
 
 

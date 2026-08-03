@@ -140,6 +140,46 @@ def _picker_stage_signal(settings, stage) -> Optional[dict]:
     return None
 
 
+# C2-A.3 intake-gap fix: the ROUTE-level intake time-window path asks the
+# SAME "morning or afternoon" question BEFORE the native booking state
+# machine takes ownership, and production showed its response carried no
+# calendar_picker signal, so the widget could not render the preference
+# buttons. This constant is byte-identical to the day-only follow-up
+# prompt returned by app/routes/chat.py, which imports THIS constant at
+# every site (single wording owner; the raw literal no longer exists in
+# chat.py - a structural test enforces that). Exact equality against the
+# route-state proof: a weekday rejection, past-time correction,
+# outside-hours correction, emergency reply, completion rewrite, or any
+# other intake prompt produces different text and therefore never
+# carries the signal.
+INTAKE_TIME_PREFERENCE_PROMPT = "Got it — do you prefer morning or afternoon?"
+
+
+def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
+    """
+    Purpose: single owner (Rule 3) of the C2-A.3 stage-signal decision
+             for the route-level intake time-window path. chat.py merges
+             the returned dict into its existing
+             intake_time_window_capture meta; the route never
+             re-implements the gate, the vocabulary, or Boolean parsing.
+    Inputs:  client - the tenant row (calendar settings are loaded here
+             so the route stays thin); reply_text - the FINAL reply text
+             about to be returned for this turn.
+    Returns: {"stage": "time_preference"} only when reply_text is
+             exactly the intake preference prompt AND booking_enabled,
+             calendar_actions_enabled, and calendar_picker_enabled are
+             ALL strict True - the same triple gate as every other
+             C2-A.3 signal, decided by the same owner
+             (_picker_stage_signal). Otherwise None, and the intake meta
+             stays byte-identical to today.
+    Database effects: none. External effects: none.
+    """
+    if reply_text != INTAKE_TIME_PREFERENCE_PROMPT:
+        return None
+    settings = load_calendar_settings(client)
+    return _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
+
+
 # booking_boundary_state() return vocabulary (closed — Rule 4). The route
 # and handle_booking_action BOTH call the helper (locked decision 6) so a
 # state change between the two checks still lands on the correct boundary.

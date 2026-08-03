@@ -257,6 +257,19 @@ def _unexpected_calendar_action(*args, **kwargs):
 
 _module(
     "app.services.booking_conversation",
+    # V5 (intake-signal compatibility — owner-run ImportError): the real
+    # app.routes.chat now imports the shared wording owner
+    # INTAKE_TIME_PREFERENCE_PROMPT at module import time, so this stub
+    # must expose it or collection fails before ANY of the 46 emergency
+    # tests runs. The value mirrors the real service constant.
+    INTAKE_TIME_PREFERENCE_PROMPT=(
+        "Got it — do you prefer morning or afternoon?"
+    ),
+    # V6: chat.py imports BOTH new names; Python resolves the import
+    # list sequentially, so the constant alone still fails on this one.
+    # Inert None keeps this harness's scope: no calendar-picker
+    # metadata is ever emitted here.
+    intake_time_preference_stage_signal=lambda *a, **k: None,
     # Pre-C1-C inert stand-ins (behavior unchanged).
     begin_booking_after_intake=lambda *a, **k: None,
     cancel_active_booking=lambda *a, **k: True,
@@ -891,8 +904,12 @@ class TestPatchStructuralSupplement(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # V7: normalize ONCE so the structural adjacency assertions below
+        # hold on both LF and CRLF source checkouts (the approved
+        # candidate chat.py is LF-only; a Windows autocrlf checkout is
+        # CRLF - the checks are about structure, not physical newlines).
         with open(chat_mod.__file__, "r", encoding="utf-8", newline="") as f:
-            cls.src = f.read()
+            cls.src = f.read().replace("\r\n", "\n").replace("\r", "\n")
 
     def test_gate_and_persistent_stop_reference_counts(self):
         # 3 same-response prompt gates (patch 1, unchanged)
@@ -913,7 +930,7 @@ class TestPatchStructuralSupplement(unittest.TestCase):
 
     def test_emergency_booking_mode_append_is_gated(self):
         self.assertIn(
-            'if not looks_like_life_threatening_emergency(user_text):\r\n'
+            'if not looks_like_life_threatening_emergency(user_text):\n'
             '                reply_text += "\\n\\n" + _next_emergency_prompt(conversation)',
             self.src,
         )
@@ -929,7 +946,7 @@ class TestPatchStructuralSupplement(unittest.TestCase):
         # emergency_followup_intake still assigns the prompt directly
         # ("# Otherwise continue normal emergency intake" branch).
         self.assertIn(
-            "# Otherwise continue normal emergency intake\r\n"
+            "# Otherwise continue normal emergency intake\n"
             "        next_prompt = _next_emergency_prompt(conversation)",
             self.src,
         )
