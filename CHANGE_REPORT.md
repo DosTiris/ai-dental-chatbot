@@ -5894,3 +5894,240 @@ of this validation. C2-A.3 - visual time-stage integration and recovery
   with owner approval. Rollback tag:
   `before-c2a2-main-20260802-225354`. Implementation rollback:
   `git revert 973987b15a75645eecfcb984021b70c474b4e4eb`.
+
+# C2-A.3 Intake Time-Window Stage Signal
+## Code Landed — Production Validated
+
+This section records the completed C2-A.3 implementation, guarded
+verification, deployment, Dos Tiris tenant correction, and controlled
+production validation. Every value below is owner-observed or
+transcript-proven.
+
+## Baseline and landed commit
+
+```text
+Baseline:
+62fa3bcf0266cdbcf6fa40db466dda1f6b1f7001
+
+Implementation commit:
+b46444aaa62ca81a301880130d34d545d95feddd
+
+Commit message:
+Add C2-A.3 intake time-window stage signal
+```
+
+## Exactly four committed paths
+
+```text
+app/routes/chat.py
+Git blob:
+fcb73432dae80c7b162f786640029a622561fcc0
+Diffstat:
++32/-19
+
+app/services/booking_conversation.py
+Git blob:
+88ebd9f2fa86b4e380013eee8a4384708b932a67
+Diffstat:
++40/-0
+
+calendar_tests/test_intake_time_stage.py
+Git blob:
+3de2203b1a2609a328a6e303de464350a07f321b
+Diffstat:
++343/-0
+
+tests/test_life_threatening_interruption.py
+Git blob:
+aef08c6a866918473bceb62b35890694b2b99707
+Diffstat:
++20/-3
+```
+
+## Package and execution artifacts
+
+```text
+Package:
+Mia-C2A3-Intake-Signal-Patch-v7.zip
+
+Package SHA-256:
+bc06b9897ecbae3c96a6a87c2d77ae8084cbb7832d3eda35f012403140932c1b
+
+Guarded script:
+mia_intake_guarded_apply_commit_v4_ascii.ps1
+
+Script SHA-256:
+6d07baf5a2ea59fb14a95ae78100474a7efa2dfcc32cbaca5057aa626624a166
+```
+
+## Verified test matrix (owner-run guarded V4 execution transcript)
+
+```text
+Focused intake:          31 passed
+Time-stage Python:       40 passed
+Date-picker Python:      50 passed
+Input-lock Python:       11 passed
+Time-stage JavaScript:   42/42
+Date-picker JavaScript:  108/108
+Structured actions JS:   78/78
+Full calendar_tests:     1230 passed
+Emergency harness:       Ran 46 tests / OK
+```
+
+Post-test and post-commit verification also passed in the same
+transcript: exactly four authorized paths; all candidate and committed
+blobs exact; locked files unchanged; bytecode inventory unchanged;
+commit parent exactly the pinned baseline; working tree clean; index
+empty; disposable PostgreSQL removed; environment restored; rollback
+material retained. Final transcript verdict:
+ALL GATES PASSED - COMMITTED (NOT PUSHED).
+
+## Push evidence (owner-run guarded push transcript)
+
+```text
+Push:
+62fa3bc..b46444a main -> main
+
+Post-push local HEAD:
+b46444aaa62ca81a301880130d34d545d95feddd
+
+Post-push origin/main:
+b46444aaa62ca81a301880130d34d545d95feddd
+
+Working tree:
+clean
+
+Index:
+empty
+```
+
+## Functional change
+
+The route-level intake response for a day-only captured time-window
+preference (mode `intake_time_window_capture`) now adds:
+
+```json
+{
+  "calendar_picker": {
+    "stage": "time_preference"
+  }
+}
+```
+
+only when all three strict Boolean gates are true:
+
+```text
+booking_enabled
+calendar_actions_enabled
+calendar_picker_enabled
+```
+
+Any other value for any gate - false, missing, string "true", integer
+1, null, array, or object - suppresses the signal while the reply,
+mode, and stored time-window format remain byte-identical to the
+pre-patch behavior.
+
+Single ownership (Rule 3): the prompt wording is owned by the service
+constant `INTAKE_TIME_PREFERENCE_PROMPT` (the raw literal no longer
+exists in `app/routes/chat.py`; all six former literal sites now reference
+the imported constant, enforced by a structural regression test), and the
+response-metadata decision is owned by the service function
+`intake_time_preference_stage_signal` (exact-prompt equality plus the
+established triple strict-true gate). The route only merges the
+returned metadata; it re-implements no gating, vocabulary, or Boolean
+parsing.
+
+## Harness corrections (test-harness compatibility, not production defects)
+
+1. The emergency suite's fake `app.services.booking_conversation`
+   module was updated to expose the new constant and an inert
+   `intake_time_preference_stage_signal` stand-in, restoring the exact
+   14/14 import-surface match with `chat.py`.
+2. Two supplemental structural assertions in the emergency harness were
+   made newline-neutral (source normalized once; expectations use \n)
+   without weakening their adjacency checks.
+
+## Production status
+
+```text
+Production status:
+Deployed and production-validated successfully.
+```
+
+## Completed production validation (owner-observed evidence)
+
+1. Exact deployed commit:
+   b46444aaa62ca81a301880130d34d545d95feddd
+   ("Add C2-A.3 intake time-window stage signal"), service
+   ai-dental-chatbot, repository DosTiris/ai-dental-chatbot, branch
+   main.
+
+2. Render evidence: Build successful; Application startup complete;
+   Service live.
+
+3. Dos Tiris tenant BEFORE-state (settings.calendar):
+
+   ```json
+   {
+     "booking_enabled": true,
+     "calendar_actions_enabled": true,
+     "widget_calendar_picker_enabled": true
+   }
+   ```
+
+   The required code key calendar_picker_enabled was absent.
+
+4. Dos Tiris tenant AFTER-state (settings.calendar, strict JSON
+   Booleans):
+
+   ```json
+   {
+     "booking_enabled": true,
+     "calendar_picker_enabled": true,
+     "calendar_actions_enabled": true
+   }
+   ```
+
+   All unrelated tenant settings were preserved.
+
+5. The incorrect key widget_calendar_picker_enabled was removed.
+
+6. calendar_picker_enabled = true is a strict JSON Boolean, matching
+   the code's triple strict-true gate.
+
+7. Controlled production smoke test (non-completing flow:
+   service/reason -> name -> phone -> skip email -> Tuesday). After
+   "Tuesday", Mia displayed exactly:
+
+   Got it — do you prefer morning or afternoon?
+
+   and the widget displayed the Morning and Afternoon buttons.
+
+8. The production /chat response showed:
+
+   ```json
+   {
+     "meta": {
+       "mode": "intake_time_window_capture",
+       "calendar_picker": {
+         "stage": "time_preference"
+       }
+     }
+   }
+   ```
+
+9. After selecting Morning, the saved time window became
+   "Tomorrow (Aug 4) morning" and Mia asked:
+   "One quick question — Kevin Ttest, are you a new or returning
+   patient?" — the existing flow advanced to the new/returning
+   question unchanged.
+
+10. The smoke test intentionally stopped at the patient-type question
+    without answering it, so the controlled test did not complete the
+    lead.
+
+11. Patient SMS remained disabled throughout.
+
+This closure record claims no further deployment, no additional Supabase
+mutation, no tenant activation beyond the recorded correction, no
+notification operation, and no additional production testing.
