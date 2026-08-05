@@ -159,9 +159,20 @@ function isoAdd(iso, days) {
   return t.toISOString().slice(0, 10);
 }
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+const FIXED_TODAY = "2026-08-04";
+function makeFakeDate(iso) {
+  const RealDate = Date;
+  const [Y, M, D] = iso.split("-").map(Number);
+  return class extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(Y, M - 1, D);
+      else super(...args);
+    }
+    static now() { return new RealDate(Y, M - 1, D).getTime(); }
+  };
 }
+const MIA_FAKE_DATE = makeFakeDate(FIXED_TODAY);
+function todayIso() { return FIXED_TODAY; }
 
 function weekdayOf(iso) {
   const [y, m, d] = iso.split("-").map(Number);
@@ -299,7 +310,7 @@ function buildSandbox(options = {}) {
     },
     URLSearchParams,
     URL,
-    Date,
+    Date: MIA_FAKE_DATE,
     setTimeout,
     clearTimeout,
     fetch: (url, requestOptions) => {
@@ -360,9 +371,16 @@ function pickerRows(elementsById) {
   );
 }
 
+function panelOf(row) {
+  // G1: the row now holds [strip, "See full calendar", month panel]; locate
+  // the .date-picker month panel by class rather than by child position.
+  return (row.children || []).find((c) =>
+    String(c.className).split(/\s+/).includes("date-picker")) || null;
+}
+
 function pickerPanel(elementsById) {
   const rows = pickerRows(elementsById);
-  return rows.length ? rows[rows.length - 1].children[0] : null;
+  return rows.length ? panelOf(rows[rows.length - 1]) : null;
 }
 
 function panelParts(panel) {
@@ -533,7 +551,7 @@ async function main() {
       liveRows.length === 1 &&
       liveRows[0].parentElement === sb.elementsById.messages &&
       liveRows[0].classList.contains("dp-submitting"));
-    const liveParts = panelParts(liveRows[0].children[0]);
+    const liveParts = panelParts(panelOf(liveRows[0]));
     const liveSelected = liveParts.days.filter((b) =>
       b.classList.contains("dp-selected"));
     ok("selected day is visibly selected IN the live DOM with " +
@@ -1367,7 +1385,7 @@ async function main() {
     panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
     await flush();
     const liveRows = pickerRows(sb.elementsById);
-    const liveSelected = panelParts(liveRows[0].children[0]).days.filter(
+    const liveSelected = panelParts(panelOf(liveRows[0])).days.filter(
       (b) => b.classList.contains("dp-selected"));
     ok("V8: selecting a date schedules exactly ONE bounded " +
        "visibility-restoration frame and calls nothing synchronously",
@@ -1383,7 +1401,7 @@ async function main() {
       liveSelected[0].scrollIntoViewCalls[0].block === "nearest" &&
       pickerRows(sb.elementsById).length === 1 &&
       liveSelected[0].attributes["aria-pressed"] === "true" &&
-      panelParts(liveRows[0].children[0]).days.every(
+      panelParts(panelOf(liveRows[0])).days.every(
         (b) => b.disabled === true));
     ok("V8: one frame only — no further restoration is queued afterwards",
       sb.rafQueue.length === 0);
@@ -1402,7 +1420,7 @@ async function main() {
     panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
     await flush();
     const heldSelected = panelParts(
-      pickerRows(sb.elementsById)[0].children[0]).days.filter(
+      panelOf(pickerRows(sb.elementsById)[0])).days.filter(
       (b) => b.classList.contains("dp-selected"));
     run(sb.context, "startOver()");
     ok("V8: Start Over removes the submitting picker immediately",

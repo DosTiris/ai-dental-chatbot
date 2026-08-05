@@ -379,7 +379,8 @@
     }
     .date-picker .dp-day.dp-selected {
       background: var(--mia-primary, #2563eb);
-      color: #ffffff;
+      /* G3: shared derived foreground (see applyOnPrimaryContrast). */
+      color: var(--mia-on-primary, #ffffff);
       border-color: var(--mia-primary, #2563eb);
     }
     .date-picker .dp-status {
@@ -396,6 +397,93 @@
       padding: 6px 12px;
       cursor: pointer;
     }
+
+    /* G1 (approved Prototype A v2.2.1 hierarchy): PRIMARY = compact
+       horizontal "Next 7 days" strip; SECONDARY = the existing month grid.
+       Tokens reuse the same --mia-* variables as the C2-A.2 grid. */
+    .dp-strip-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--mia-muted, #94a3b8);
+      margin: 0 0 4px 2px;
+    }
+    .dp-strip-wrap { position: relative; max-width: 320px; }
+    .dp-strip {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scroll-snap-type: x proximity;
+      padding: 2px 2px 4px;
+    }
+    .dp-strip-fade {
+      position: absolute;
+      right: 0; top: 0; bottom: 6px;
+      width: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      pointer-events: none;
+      color: var(--mia-muted, #94a3b8);
+      background: linear-gradient(to right, transparent,
+                 var(--mia-panel, #111827) 70%);
+    }
+    .dp-strip-fade.dp-hide { display: none; }
+    .dp-chip {
+      flex: 0 0 auto;
+      scroll-snap-align: start;
+      min-width: 62px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1px;
+      border: 1px solid var(--mia-border, #1e293b);
+      border-radius: 12px;
+      background: var(--mia-button-bg, #111827);
+      color: var(--mia-text, #e5e7eb);
+      padding: 8px;
+      font-size: 12px;
+      line-height: 1.15;
+    }
+    .dp-chip .dp-chip-dow {
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--mia-muted, #94a3b8);
+    }
+    .dp-chip .dp-chip-num { font-weight: 600; font-size: 13px; }
+    .dp-chip .dp-chip-state { font-size: 10px; color: var(--mia-muted, #94a3b8); }
+    .dp-chip.dp-open { cursor: pointer; }
+    .dp-chip.dp-open:hover,
+    .dp-chip.dp-open:focus { border-color: var(--mia-primary, #2563eb); }
+    .dp-chip.dp-locked { opacity: 0.5; cursor: default; }
+    .dp-chip.dp-selected {
+      background: var(--mia-primary, #2563eb);
+      /* G3: shared derived foreground; readable on light AND dark primaries. */
+      color: var(--mia-on-primary, #ffffff);
+      border-color: var(--mia-primary, #2563eb);
+    }
+    .dp-chip.dp-selected .dp-chip-dow,
+    .dp-chip.dp-selected .dp-chip-state { color: var(--mia-on-primary, #ffffff); }
+    .dp-strip-status {
+      font-size: 12px;
+      color: var(--mia-muted, #94a3b8);
+      padding: 6px 2px;
+    }
+    .dp-more {
+      margin: 6px 0 2px;
+      background: transparent;
+      color: var(--mia-primary, #2563eb);
+      border: none;
+      padding: 4px 2px;
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .dp-more:disabled { opacity: 0.5; cursor: default; }
 
     /* C2-A.3 visual time stages (tokens mirror the C2-A.2 date picker). */
     .time-pref-row,
@@ -425,7 +513,7 @@
     .time-pref-btn:disabled { cursor: default; opacity: 0.55; }
     .time-pref-btn.tp-selected {
       background: var(--mia-primary, #2563eb);
-      color: #ffffff;
+      color: var(--mia-on-primary, #ffffff);
       border-color: var(--mia-primary, #2563eb);
       opacity: 1;
     }
@@ -452,7 +540,7 @@
     .slot-chip:disabled { cursor: default; opacity: 0.55; }
     .slot-chip.sp-selected {
       background: var(--mia-primary, #2563eb);
-      color: #ffffff;
+      color: var(--mia-on-primary, #ffffff);
       border-color: var(--mia-primary, #2563eb);
       opacity: 1;
     }
@@ -959,9 +1047,113 @@
       if (value) document.documentElement.style.setProperty(name, value);
     }
 
+    function miaParseColor(str) {
+      // Accepts #rgb / #rrggbb / rgb() / rgba(); returns { rgb:[r,g,b], a } with
+      // 0-255 channels and 0-1 alpha, or null for anything else (named colors,
+      // HSL, hex8, malformed). Alpha is REPORTED, never silently dropped.
+      const s = String(str || "").trim();
+      const hex = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(s);
+      if (hex) {
+        let h = hex[1];
+        if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+        return { rgb: [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16),
+                       parseInt(h.slice(4, 6), 16)], a: 1 };
+      }
+      const m = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)\s*(?:[,\/]\s*([\d.]+)\s*)?\)$/.exec(s);
+      if (m) {
+        const ch = [Number(m[1]), Number(m[2]), Number(m[3])];
+        if (ch.some((v) => !isFinite(v) || v < 0 || v > 255)) return null;
+        const a = m[4] === undefined ? 1 : Number(m[4]);
+        if (!isFinite(a) || a < 0 || a > 1) return null;
+        return { rgb: ch.map((v) => Math.round(v)), a: a };
+      }
+      return null;
+    }
+    function miaOpaqueParsed(str) {
+      // Only an OPAQUE, in-gamut color is safe to score/apply as a primary
+      // fill. Returns [r,g,b] for opaque hex/rgb/rgba(a==1); null for
+      // translucent (a<1), out-of-range, named, HSL, or malformed input.
+      const p = miaParseColor(str);
+      return p && p.a === 1 ? p.rgb : null;
+    }
+    function miaCanonicalHex(rgb) {
+      // Canonical #rrggbb from validated integer channels. The value APPLIED to
+      // --mia-primary is EXACTLY the value contrast-scored: no raw parser input,
+      // no bare-hex-without-# (invalid CSS) token, no decimal-vs-applied drift.
+      const h = (v) =>
+        Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+      return "#" + h(rgb[0]) + h(rgb[1]) + h(rgb[2]);
+    }
+    function applyTenantPrimary(raw) {
+      // G3: apply the tenant primary ONLY when it is a safely-parseable OPAQUE
+      // color, and apply it as a CANONICAL #rrggbb built from the same parsed
+      // channels used for contrast. Otherwise reject it and clear any stale
+      // tenant primary so the default opaque --mia-primary (and the >=4.5:1
+      // guarantee) holds. Named, HSL, and translucent values deterministically
+      // fall back to the default.
+      if (!raw) return;
+      const rgb = miaOpaqueParsed(raw);
+      if (rgb) {
+        document.documentElement.style.setProperty(
+          "--mia-primary", miaCanonicalHex(rgb));
+      } else {
+        try { document.documentElement.style.removeProperty("--mia-primary"); }
+        catch (e) {}
+      }
+    }
+    function miaRelLuminance(rgb) {
+      const f = (v) => {
+        v /= 255;
+        return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2]);
+    }
+    function miaContrast(rgbA, rgbB) {
+      // Actual WCAG 2.x contrast ratio between two parsed colors.
+      const la = miaRelLuminance(rgbA), lb = miaRelLuminance(rgbB);
+      const hi = Math.max(la, lb), lo = Math.min(la, lb);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+    function applyOnPrimaryContrast() {
+      // G3: the applied --mia-primary is the CANONICAL opaque color built from
+      // the parsed channels (see applyTenantPrimary); that same canonical color
+      // is contrast-scored here. Any control that paints text ON the primary
+      // fill \u2014 selected date cell, selected strip chip, selected
+      // time-preference pill, selected slot chip \u2014 needs a foreground
+      // that stays readable under BOTH light and dark primaries. Derive ONE
+      // shared --mia-on-primary (a dark foreground #111827 or #000000, or
+      // white, by ACTUAL WCAG contrast) that meets AA 4.5:1 for every parsed
+      // primary; every selected control consumes that single value. No
+      // per-control logic.
+      let rawPrimary = "";
+      try {
+        rawPrimary = getComputedStyle(document.documentElement)
+          .getPropertyValue("--mia-primary").trim();
+      } catch (e) { rawPrimary = ""; }
+      const rgb = miaOpaqueParsed(rawPrimary || "#2563eb");
+      if (!rgb) {
+        // Translucent/uninterpretable: never score a non-opaque color as opaque
+        // and never leave a stale foreground. Reset to the safe default.
+        document.documentElement.style.setProperty("--mia-on-primary", "#ffffff");
+        return;
+      }
+      // Use the ACTUAL WCAG contrast ratios of the applied candidates (not a
+      // pure-black approximation). Keep the softer near-black (#111827) only
+      // when it itself clears AA (4.5:1); otherwise fall back to pure black,
+      // which maximizes dark-side contrast. Because the better of pure
+      // black/white is >= 4.58:1 for ANY color, the applied foreground always
+      // meets AA. One shared value; no per-control logic.
+      const cWhite = miaContrast(rgb, [255, 255, 255]);
+      const cSoft = miaContrast(rgb, [17, 24, 39]);          // #111827
+      const darkHex = cSoft >= 4.5 ? "#111827" : "#000000";
+      const cDark = cSoft >= 4.5 ? cSoft : miaContrast(rgb, [0, 0, 0]);
+      const fg = cDark >= cWhite ? darkHex : "#ffffff";
+      document.documentElement.style.setProperty("--mia-on-primary", fg);
+    }
+
     function applyTheme(theme) {
       if (!theme || typeof theme !== "object") return;
-      setCssVar("--mia-primary", theme.primary);
+      applyTenantPrimary(theme.primary);   // G3: opaque-only gate (see helper)
       setCssVar("--mia-secondary", theme.secondary);
       setCssVar("--mia-accent", theme.accent);
       setCssVar("--mia-chat-bg", theme.chat_background);
@@ -972,6 +1164,7 @@
       setCssVar("--mia-button-text", theme.button_text);
       setCssVar("--mia-border", theme.border);
       setCssVar("--mia-muted", theme.muted_text);
+      applyOnPrimaryContrast();   // G3: re-derive after the tenant primary lands
     }
 
     function addMessage(role, text, options = {}) {
@@ -1161,9 +1354,19 @@
       // V2 defect 2: a picker whose date submission is IN FLIGHT must
       // remain attached and visible until the action resolves; pickDate
       // owns that removal boundary. Every other picker row clears here.
+      let removedNonSubmittingPickerRow = false;
       document.querySelectorAll(".date-picker-row").forEach(el => {
-        if (!el.classList.contains("dp-submitting")) el.remove();
+        if (!el.classList.contains("dp-submitting")) {
+          el.remove();
+          removedNonSubmittingPickerRow = true;
+        }
       });
+      // A removed (non-submitting) picker row ends its strip lifecycle exactly
+      // once, so a pending cross-month tail performs no update on the detached
+      // strip. clearActionRows PRESERVES the submitting (.dp-submitting) row;
+      // that row's pending strip lifecycle has already been invalidated by
+      // pickDate's submission freeze (pickerStripSeq / pickerStripAttempt).
+      if (removedNonSubmittingPickerRow) pickerStripSeq += 1;
       // C2-A.3: the two visual time-stage rows follow the SAME retained
       // in-flight convention — a row whose submission is unresolved stays
       // attached (its own click handler owns the removal boundary); every
@@ -1340,6 +1543,7 @@
       "Thursday","Friday","Saturday"];
     const PICKER_MSG_LOAD_FAILED =
       "I couldn’t load the calendar. You can retry, or just type a day instead.";
+    const PICKER_STRIP_MSG_LOADING = "Loading the next 7 days\u2026";
     // Every preview response must be superseded-safe: only the NEWEST
     // request may render (stale responses are dropped by sequence).
     // V7 (owner audit): EXPLICIT CLAMP BUDGET. A PATIENT-INITIATED
@@ -1356,6 +1560,11 @@
     const PICKER_PATIENT_JUMP_BUDGET = 1;
     const PICKER_NO_JUMP_BUDGET = 0;
     let pickerFetchSeq = 0;
+    let pickerStripSeq = 0;     // strip-instance token (Finding 2): bumped by a
+                               // new picker signal / Start Over / row replace,
+                               // NOT by ordinary full-calendar month navigation
+    let pickerStripAttempt = 0; // per-attempt token (retry race): only the
+                               // NEWEST strip-tail attempt may mutate the strip
     let pickerBounds = null;    // {earliest, latest} ISO strings from server
     let pickerSubmitted = false;
 
@@ -1445,19 +1654,269 @@
       return `${t.getUTCFullYear()}-${mm}-${dd}`;
     }
 
+    // G1 — approved "Next 7 days" strip (derived, single-owner) --------------
+    // The strip is the PRIMARY date experience. It carries NO booking/selection
+    // state: it is derived from the SAME availability-preview payload the month
+    // grid already loads (see the strip hook in fetchPickerMonth), and near a
+    // month boundary it may make ONE optional tail request to the SAME public
+    // endpoint (no second endpoint, no second booking or selection owner). An
+    // open chip submits through the EXISTING pickDate / calendar_choice path.
+    // Duplicate-submission and in-flight guards and Start Over cleanup stay
+    // single-owner; strip-instance validity uses pickerStripSeq so ordinary
+    // full-calendar month navigation never cancels the strip's tail. The month
+    // grid is the SECONDARY "See full calendar" view, revealed by toggling its
+    // hidden attribute (no second calendar implementation).
+
+    // Server day states -> patient-visible words (never color-only). The
+    // preview contract emits open/full/unavailable/past; there is no distinct
+    // "closed" state, so weekend/closed days arrive as "unavailable" and are
+    // labelled with that accurate word.
+    const PICKER_STRIP_STATE_WORD = {
+      open: "Available", full: "Full", unavailable: "Unavailable", past: "Past",
+    };
+
+    function stripShowStatus(strip, fade, text, retry, onRetry, panel) {
+      strip.innerHTML = "";
+      if (fade) fade.classList.add("dp-hide");
+      const status = document.createElement("div");
+      status.className = "dp-strip-status";
+      status.textContent = text;
+      strip.appendChild(status);
+      // Finding 2: keep the strip-control registry in sync with the live status
+      // DOM — a non-interactive status has NO strip controls (old chip/Retry
+      // references are dropped); a rendered Retry is the only strip control and
+      // joins the disable sweep, created disabled and failing closed while a
+      // date submission is unresolved.
+      let stripControls = [];
+      if (retry && typeof onRetry === "function") {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "dp-retry";
+        btn.textContent = "Retry";
+        if (pickerSubmitted || structuredActionInFlight) btn.disabled = true;
+        btn.addEventListener("click", () => {
+          if (pickerSubmitted || structuredActionInFlight || btn.disabled) return;
+          onRetry();
+        });
+        strip.appendChild(btn);
+        stripControls = [btn];
+      }
+      if (panel) {
+        panel.stripControls = stripControls;   // replace, never accumulate
+        panel.persistentControls =
+          stripControls.concat(panel.moreControl ? [panel.moreControl] : []);
+        panel.dpControls =
+          panel.persistentControls.concat(panel.gridControls || []);
+      }
+    }
+
+    function pickerNextDays(count) {
+      // The next `count` consecutive calendar days starting today, crossing
+      // month and year boundaries (local calendar arithmetic).
+      const p2 = (n) => String(n).padStart(2, "0");
+      const now = new Date();
+      const out = [];
+      for (let i = 0; i < count; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
+        out.push(`${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`);
+      }
+      return out;
+    }
+
+    async function renderStripFromMonth(strip, panel, fade, data) {
+      // A TRUE "Next 7 days": always the seven consecutive days from today,
+      // including any that fall in the FOLLOWING month. The current-month grid
+      // payload covers the in-month days; when the run crosses the month
+      // boundary an OPTIONAL tail is fetched from the SAME public
+      // availability-preview endpoint (no second endpoint, no second booking or
+      // selection owner). Strip-instance validity uses pickerStripSeq \u2014 a
+      // token bumped by a NEW authoritative picker signal, by Start Over, and by
+      // row replacement, but NOT by ordinary full-calendar month navigation
+      // \u2014 so navigating the secondary grid never cancels this strip's tail.
+      // A DATE SUBMISSION, however, freezes the strip lifecycle (pickDate
+      // advances pickerStripSeq/pickerStripAttempt), so a late tail cannot
+      // mutate a submitting picker. Per-attempt supersession also ensures only
+      // the NEWEST Retry may mutate the strip: an older attempt (success OR
+      // failure) that resolves late is dropped.
+      const stripSeq = pickerStripSeq;
+      const attempt = ++pickerStripAttempt;
+      const live = () =>
+        stripSeq === pickerStripSeq && attempt === pickerStripAttempt &&
+        !pickerSubmitted && !structuredActionInFlight;
+      const targets = pickerNextDays(7);
+      const byDate = {};
+      data.days.forEach((d) => { byDate[d.local_date] = d; });
+      const missing = targets.filter((iso) => !(iso in byDate));
+      const retry = () => {
+        if (stripSeq !== pickerStripSeq ||
+            pickerSubmitted || structuredActionInFlight) return;
+        // Synchronously swap Retry for a loading state so a rapid second click
+        // cannot fan out; the per-attempt token supersedes any older pending
+        // retry regardless.
+        stripShowStatus(strip, fade, PICKER_STRIP_MSG_LOADING, false, null, panel);
+        renderStripFromMonth(strip, panel, fade, data);
+      };
+      if (missing.length) {
+        const win = { start: missing[0], end: missing[missing.length - 1] };
+        let tail = null, reached = false;
+        try {
+          const url = `${API_BASE}/chat/calendar/availability-preview` +
+            `?client_key=${encodeURIComponent(clientKey)}` +
+            `&start_day=${win.start}&end_day=${win.end}`;
+          const res = await fetch(url);
+          if (!live()) return;                       // strip or attempt superseded
+          if (res.ok) { tail = await res.json().catch(() => null); reached = true; }
+        } catch (e) { if (!live()) return; }
+        if (!live()) return;
+        if (!reached || !tail || !pickerValidPreviewShape(tail, win)) {
+          // Finding 1: REQUIRED cross-month tail data could not be loaded or
+          // validated. Do NOT render a partial strip under the "Next 7 days"
+          // label. Show a visible primary-strip failure with Retry (re-attempts
+          // the SAME same-endpoint tail); typed fallback and the full calendar
+          // remain available. A failed Retry stays visibly failed.
+          stripShowStatus(strip, fade, PICKER_MSG_LOAD_FAILED, true, retry, panel);
+          return;
+        }
+        tail.days.forEach((d) => { byDate[d.local_date] = d; });
+      }
+      if (!live()) return;
+      const chips = targets.map((iso) => byDate[iso]).filter(Boolean);
+      if (chips.length !== 7) {
+        // Never present fewer than seven under the "Next 7 days" label.
+        stripShowStatus(strip, fade, PICKER_MSG_LOAD_FAILED, true, retry, panel);
+        return;
+      }
+      renderStripChips(strip, panel, fade, chips);
+    }
+
+    function renderStripChips(strip, panel, fade, days) {
+      strip.innerHTML = "";
+      const chipControls = [];
+      days.forEach((day) => {
+        const parts = pickerIsoParts(day.local_date);
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "dp-chip";
+        const dow = PICKER_WEEKDAY_NAMES[
+          new Date(Date.UTC(parts.y, parts.mo - 1, parts.d)).getUTCDay()
+        ].slice(0, 3);
+        const mon = PICKER_MONTH_NAMES[parts.mo - 1].slice(0, 3).toUpperCase();
+        const word = PICKER_STRIP_STATE_WORD[day.state] || day.state;
+        const dowEl = document.createElement("span");
+        dowEl.className = "dp-chip-dow"; dowEl.textContent = dow;
+        const numEl = document.createElement("span");
+        numEl.className = "dp-chip-num"; numEl.textContent = `${mon} ${parts.d}`;
+        const stEl = document.createElement("span");
+        stEl.className = "dp-chip-state"; stEl.textContent = word;
+        chip.appendChild(dowEl); chip.appendChild(numEl); chip.appendChild(stEl);
+        if (day.state === "open") {
+          chip.classList.add("dp-open");
+          chip.setAttribute("aria-pressed", "false");
+          chip.setAttribute("aria-label",
+            `Choose ${day.weekday} ${day.local_date} \u2014 available`);
+          // SAME single selection owner as the month grid.
+          chip.addEventListener("click", () =>
+            pickDate(panel, chip, day.local_date, day.weekday, parts));
+        } else {
+          chip.classList.add("dp-locked");
+          chip.disabled = true;
+          chip.setAttribute("aria-disabled", "true");
+          chip.setAttribute("aria-label",
+            `${day.weekday} ${day.local_date} \u2014 ${word}`);
+        }
+        chipControls.push(chip);
+        strip.appendChild(chip);
+      });
+      // G1: replace (never accumulate) strip chips. persistentControls =
+      // the CURRENT strip chips + the persistent "See full calendar" toggle
+      // only. dpControls additionally carries the CURRENTLY-LIVE grid controls,
+      // so an ASYNCHRONOUS cross-month completion (tail resolving after the grid
+      // already rendered) never drops live month navigation / day controls from
+      // the submission-disable sweep. No new submission or selection owner.
+      panel.stripControls = chipControls;   // current strip controls (replace)
+      panel.persistentControls =
+        panel.stripControls.concat(panel.moreControl ? [panel.moreControl] : []);
+      panel.dpControls =
+        panel.persistentControls.concat(panel.gridControls || []);
+      const syncFade = () => {
+        if (!fade) return;
+        const overflow =
+          strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 2;
+        fade.classList.toggle("dp-hide", !overflow);
+      };
+      strip.addEventListener("scroll", syncFade, { passive: true });
+      // Synchronous: reading scrollWidth forces the reflow we need. We do NOT
+      // schedule a frame here, so the ONLY picker requestAnimationFrame stays
+      // pickDate's single bounded visibility restoration (V8 contract).
+      syncFade();
+    }
+
     function renderDatePicker() {
-      // A fresh signal fully rebuilds the picker (reopen = clean state).
+      // G1: PRIMARY = "Next 7 days" strip; SECONDARY = the EXISTING month grid,
+      // hidden until "See full calendar". A fresh signal fully rebuilds the
+      // picker (reopen = clean state). The month grid is fetched on signal (as
+      // before); the strip is derived from that same payload.
       document.querySelectorAll(".date-picker-row").forEach((el) => el.remove());
+      pickerStripSeq += 1;   // new strip instance: drop any prior in-flight tail
       pickerSubmitted = false;
       const row = document.createElement("div");
       row.className = "date-picker-row";
+
+      // Secondary month panel (reused unchanged), created first so the strip
+      // hook and toggle can register on it; appended after the strip; hidden.
       const panel = document.createElement("div");
       panel.className = "date-picker";
+      panel.id = "miaFullCalendar";
       panel.setAttribute("role", "group");
       panel.setAttribute("aria-label", "Choose an appointment day");
+      panel.hidden = true;
+
+      // Primary strip.
+      const stripWrap = document.createElement("div");
+      stripWrap.className = "dp-strip-wrap";
+      const strip = document.createElement("div");
+      strip.className = "dp-strip";
+      strip.setAttribute("role", "group");
+      strip.setAttribute("aria-label",
+        "Next 7 days \u2014 choose an appointment day");
+      const fade = document.createElement("div");
+      fade.className = "dp-strip-fade dp-hide";
+      fade.setAttribute("aria-hidden", "true");
+      fade.textContent = "\u203a";
+      stripWrap.appendChild(strip);
+      stripWrap.appendChild(fade);
+      // The strip derives from THIS panel's month fetch.
+      panel.stripEl = strip;
+      panel.stripFade = fade;
+
+      // Secondary toggle (registered so a submission disables it too).
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "dp-more";
+      more.textContent = "See full calendar";
+      more.setAttribute("aria-expanded", "false");
+      more.setAttribute("aria-controls", "miaFullCalendar");
+      more.addEventListener("click", () => {
+        if (pickerSubmitted) return;              // no reopen after submit
+        panel.hidden = !panel.hidden;             // reveal/hide the SAME grid
+        more.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+      });
+      panel.moreControl = more;   // stable persistent "See full calendar" ref
+      panel.persistentControls = [more];
+      panel.dpControls = [more];
+
+      // Visible primary-hierarchy label (approved Prototype A), in addition to
+      // the strip's aria-label.
+      const stripLabel = document.createElement("div");
+      stripLabel.className = "dp-strip-label";
+      stripLabel.textContent = "Next 7 days";
+      row.appendChild(stripLabel);
+      row.appendChild(stripWrap);
+      row.appendChild(more);
       row.appendChild(panel);
       messagesEl.appendChild(row);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+
       const now = new Date();
       fetchPickerMonth(panel, now.getFullYear(), now.getMonth(),
                        PICKER_PATIENT_JUMP_BUDGET);
@@ -1465,6 +1924,10 @@
 
     function pickerShowStatus(panel, text, retry, year, monthIndex) {
       panel.innerHTML = "";
+      // The status render replaces the live grid DOM, so reset the grid-control
+      // registry to match: no stale detached grid controls; a Retry (if any)
+      // becomes the only live grid control and joins the disable sweep.
+      panel.gridControls = [];
       const status = document.createElement("div");
       status.className = "dp-status";
       status.textContent = text;
@@ -1480,15 +1943,43 @@
         // direction. Loop-safe: a zero-budget out-of-window response
         // fails visibly instead of rendering or re-jumping, and every
         // further attempt requires another click.
-        btn.addEventListener("click", () =>
+        // Finding 1: the full-calendar Retry fails closed and joins the
+        // picker disable sweep — no availability request may start while a
+        // date submission is unresolved.
+        if (pickerSubmitted || structuredActionInFlight) btn.disabled = true;
+        btn.addEventListener("click", () => {
+          if (pickerSubmitted || structuredActionInFlight || btn.disabled) return;
           fetchPickerMonth(panel, year, monthIndex,
-                           PICKER_PATIENT_JUMP_BUDGET)
-        );
+                           PICKER_PATIENT_JUMP_BUDGET);
+        });
         panel.appendChild(btn);
+        panel.gridControls.push(btn);
+      }
+      // Keep the disable-sweep registry in sync with the live status DOM.
+      panel.dpControls =
+        (panel.persistentControls || []).concat(panel.gridControls);
+      // G1: mirror this load/failure/empty state into the primary strip when
+      // the status is for TODAY's month (the strip derives from that fetch).
+      if (panel.stripEl) {
+        const nowStatus = new Date();
+        if (year === nowStatus.getFullYear() &&
+            monthIndex === nowStatus.getMonth()) {
+          // Status-supersession: an authoritative current-month status
+          // mirrored into the strip supersedes any older pending strip-tail
+          // attempt, so a late tail cannot overwrite it with chips or a Retry.
+          pickerStripAttempt += 1;
+          stripShowStatus(panel.stripEl, panel.stripFade, text, retry, () =>
+            fetchPickerMonth(panel, year, monthIndex, PICKER_PATIENT_JUMP_BUDGET),
+            panel);
+        }
       }
     }
 
     async function fetchPickerMonth(panel, year, monthIndex, jumpBudget) {
+      // Refuse to begin a month preview while a structured date action is
+      // unresolved. (Navigation before submission does not touch the strip
+      // tail; a date submission freezes BOTH lifecycles \u2014 see pickDate.)
+      if (pickerSubmitted || structuredActionInFlight) return;
       const seq = ++pickerFetchSeq;
       const win = pickerMonthWindow(year, monthIndex);
       pickerShowStatus(panel, "Loading available days…", false, year, monthIndex);
@@ -1498,18 +1989,21 @@
           `?client_key=${encodeURIComponent(clientKey)}` +
           `&start_day=${win.start}&end_day=${win.end}`;
         const res = await fetch(url);
-        if (seq !== pickerFetchSeq) return; // superseded — newest wins
+        if (seq !== pickerFetchSeq ||
+            pickerSubmitted || structuredActionInFlight) return; // superseded or a date submission began
         if (!res.ok) {
           pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
           return;
         }
         data = await res.json().catch(() => null);
       } catch (err) {
-        if (seq !== pickerFetchSeq) return;
+        if (seq !== pickerFetchSeq ||
+            pickerSubmitted || structuredActionInFlight) return;
         pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
         return;
       }
-      if (seq !== pickerFetchSeq) return;
+      if (seq !== pickerFetchSeq ||
+          pickerSubmitted || structuredActionInFlight) return;
       if (!pickerValidPreviewShape(data, win)) {
         pickerShowStatus(panel, PICKER_MSG_LOAD_FAILED, true, year, monthIndex);
         return;
@@ -1518,6 +2012,16 @@
         earliest: data.earliest_bookable_day,
         latest: data.latest_bookable_day,
       };
+      // G1: derive the PRIMARY strip from this SAME payload, but only for the
+      // patient's current (today's) month \u2014 month navigation and the
+      // internal clamp-jumps re-render the grid without disturbing the strip.
+      if (panel.stripEl) {
+        const nowStrip = new Date();
+        if (year === nowStrip.getFullYear() &&
+            monthIndex === nowStrip.getMonth()) {
+          renderStripFromMonth(panel.stripEl, panel, panel.stripFade, data);
+        }
+      }
       const monthKey = year * 12 + monthIndex;
       const earliestKey = pickerMonthKey(pickerBounds.earliest);
       const latestKey = pickerMonthKey(pickerBounds.latest);
@@ -1627,8 +2131,13 @@
         grid.appendChild(document.createElement("div"));
       }
       // Every interactive control is registered so a submission can
-      // disable the WHOLE picker at once (V2 defect 2).
-      panel.dpControls = [prev, next];
+      // disable the WHOLE picker at once (V2 defect 2). G1: rebuild from the
+      // persistent strip chips + "See full calendar" toggle so grid navigation
+      // never drops them from the disable sweep.
+      // G1: track the grid's OWN controls (nav + day cells) separately so an
+      // asynchronous strip completion can rebuild panel.dpControls without
+      // dropping them, and so month navigation re-registers the fresh grid.
+      panel.gridControls = [prev, next];
       data.days.forEach((day) => {
         const parts = pickerIsoParts(day.local_date);
         const btn = document.createElement("button");
@@ -1657,9 +2166,11 @@
             "aria-label", `${day.weekday} ${day.local_date} — ${day.state}`
           );
         }
-        panel.dpControls.push(btn);
+        panel.gridControls.push(btn);
         grid.appendChild(btn);
       });
+      panel.dpControls =
+        (panel.persistentControls || []).concat(panel.gridControls);
       panel.appendChild(grid);
       const hint = document.createElement("div");
       hint.className = "dp-status";
@@ -1673,6 +2184,15 @@
       // duplicate defense still applies underneath).
       if (pickerSubmitted || structuredActionInFlight) return;
       pickerSubmitted = true;
+      // Freeze BOTH preview lifecycles for this picker: full-calendar month
+      // previews (pickerFetchSeq) AND the primary seven-day strip tail /
+      // retries (pickerStripSeq + pickerStripAttempt). A late response from
+      // either can no longer rebuild enabled controls after this disable sweep.
+      // (Ordinary full-calendar navigation before submission still does NOT
+      // invalidate the strip tail — that path advances only pickerFetchSeq.)
+      pickerFetchSeq += 1;
+      pickerStripSeq += 1;
+      pickerStripAttempt += 1;
       // V2 defect 2: the selected state must stay ATTACHED and VISIBLE
       // for the whole in-flight window. Mark the selection (visually and
       // accessibly), disable every picker control, tag the row as
@@ -2216,6 +2736,7 @@
       // the patient's explicit reset outranks the in-flight submitting
       // hold that clearActionRows spares.
       pickerFetchSeq += 1;
+      pickerStripSeq += 1;   // invalidate any in-flight strip tail (Finding 2)
       pickerBounds = null;
       pickerSubmitted = false;
       document.querySelectorAll(".date-picker-row").forEach(el => el.remove());
@@ -2247,6 +2768,7 @@
       if (e.key === "Enter") sendMessage();
     });
 
+    applyOnPrimaryContrast();   // G3: derive for the default primary up front
     setupModalConsent();
     renderServiceMenuButtons();
     loadClientConfig();
