@@ -255,6 +255,17 @@ def _unexpected_calendar_action(*args, **kwargs):
     )
 
 
+def _fake_intake_date_stage_signal(client, reply_text, entered_time_window_stage):
+    # V4.3.1 (capture-first date-signal compatibility): inert fail-closed
+    # stand-in with the EXACT production call shape
+    # (client, reply_text, entered_time_window_stage). Returns None, so NO
+    # calendar_picker metadata is ever emitted in this emergency-isolation
+    # harness; it performs no mutation and makes no classifier, AI, database,
+    # availability, notification, or active booking-owner call. Calendar
+    # execution is outside this suite's scope.
+    return None
+
+
 _module(
     "app.services.booking_conversation",
     # V5 (intake-signal compatibility — owner-run ImportError): the real
@@ -270,6 +281,11 @@ _module(
     # Inert None keeps this harness's scope: no calendar-picker
     # metadata is ever emitted here.
     intake_time_preference_stage_signal=lambda *a, **k: None,
+    # V4.3.1: the real app.routes.chat now ALSO imports
+    # intake_date_stage_signal at module import time; expose the inert named
+    # stand-in defined above or collection fails before ANY of the 46
+    # emergency tests runs.
+    intake_date_stage_signal=_fake_intake_date_stage_signal,
     # Pre-C1-C inert stand-ins (behavior unchanged).
     begin_booking_after_intake=lambda *a, **k: None,
     cancel_active_booking=lambda *a, **k: True,

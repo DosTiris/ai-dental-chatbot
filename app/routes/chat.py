@@ -97,6 +97,7 @@ from app.services.booking_conversation import (
     handle_booking_action,
     handle_booking_message,
     INTAKE_TIME_PREFERENCE_PROMPT,
+    intake_date_stage_signal,
     intake_time_preference_stage_signal,
 )
 
@@ -4959,7 +4960,18 @@ def handle_time_window_capture(
         day_tok = _extract_day_token(current_tw)
         dtl = (detected_tw or "").lower().strip()
 
-        if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}:
+        # Part-of-day / exact-time detail merge for a stored day-only value.
+        # Mon-Fri always accept their detail; Saturday AND Sunday accept it
+        # ONLY when the office is open that day (the SAME is_day_open owner
+        # as the date-selection boundary). A CLOSED weekend day-only value
+        # — including a legacy or previously stored one — therefore stays
+        # fail-closed here and falls through to the generic rejection below,
+        # exactly like the date-selection path. Mon-Fri behavior is
+        # unchanged (the previous set accepted Saturday unconditionally,
+        # which let a CLOSED Saturday complete; that is corrected here).
+        if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"} or (
+            day_tok in {"Sat", "Sun"} and is_day_open(client, day_tok.lower())
+        ):
             # morning / afternoon / evening (including natural mixed phrases)
             if any(x in dtl for x in ["morning", "afternoon", "evening"]):
                 if "morning" in dtl:
@@ -4992,7 +5004,17 @@ def handle_time_window_capture(
     if detected_tw:
         # Day-only weekend values are rejected here whether they arrive as
         # "Sat" or as "Sat 2026-08-01".
-        if time_window_day_only_weekday_token(detected_tw) in {"Sat", "Sun"} and not is_saturday_open(client):
+        # Day-only weekend handling BEFORE the specificity save, so a
+        # REJECTED day never mutates the stored window (audit: no mutation
+        # before a saved=False rejection). A weekend day-only value is
+        # rejected here ONLY when the office is closed that day; an OPEN
+        # Saturday or Sunday is a VALID day-only value, saved on the normal
+        # path below and answered with the existing time-preference prompt
+        # (see the day_tok follow-up). is_day_open is the single per-tenant
+        # office-hours owner (day_key "sat"/"sun"), so this is not a
+        # Saturday/Sunday policy assumption.
+        _weekend_tok = time_window_day_only_weekday_token(detected_tw)
+        if _weekend_tok in {"Sat", "Sun"} and not is_day_open(client, _weekend_tok.lower()):
             return ("Please choose a weekday (Mon–Fri). Which day works best?", False)
 
         new_score = _time_window_specificity_score(detected_tw)
@@ -5015,6 +5037,15 @@ def handle_time_window_capture(
                 return ("Got it — what time later today works best?", saved)
 
             if day_tok in {"Mon", "Tue", "Wed", "Thu", "Fri"}:
+                return (INTAKE_TIME_PREFERENCE_PROMPT, saved)
+
+            # An OPEN weekend day (Saturday or Sunday, per THIS tenant's
+            # office hours) is a valid booking day and gets the SAME
+            # existing time-preference follow-up as a weekday (audit: an
+            # open weekend card must advance, not bounce). Closed weekend
+            # day-only values never reach here — they are rejected above
+            # BEFORE the save. is_day_open is the single office-hours owner.
+            if day_tok in {"Sat", "Sun"} and is_day_open(client, day_tok.lower()):
                 return (INTAKE_TIME_PREFERENCE_PROMPT, saved)
 
             return (f"Please choose another day/time that works. {weekday_example}", False)
@@ -7875,6 +7906,42 @@ def looks_like_name_only(user_text: str) -> Optional[str]:
     return normalized
 
 
+def capture_first_time_window_pending(conversation: Conversation, client: Optional[Client] = None) -> bool:
+    """
+    Purpose: PURE, side-effect-free predicate (Rule 3, co-owned with
+             receptionist_bypass_reply) that is True iff the STANDARD
+             capture-first intake is currently at the time_window question:
+             reason, name and phone captured, email decided (provided or
+             skipped), the short-symptom flow NOT in use, and the time
+             window not yet complete. This is the exact deterministic
+             condition under which receptionist_bypass_reply returns stage
+             "time_window" on the standard path, so the route can prove a
+             genuine transition INTO time_window WITHOUT invoking the active
+             bypass owner (whose one-shot reason_detail consumer must not be
+             run by a pre-turn probe).
+    Inputs:  conversation, client - persisted rows only. No user_text.
+    Returns: bool.
+    Side effects: NONE - no classifier, reason mapper, AI call,
+             notification, database write, mutation, or call to
+             receptionist_bypass_reply.
+    """
+    if not conversation_has_specific_lead_reason(conversation):
+        return False
+    if not (conversation.lead_name or "").strip():
+        return False
+    if not (conversation.lead_phone or "").strip():
+        return False
+    # Short-symptom leads use their own shorter time_window branch/prompt.
+    if conversation_uses_short_symptom_flow(conversation):
+        return False
+    has_email = bool((conversation.lead_email or "").strip())
+    email_opt_out = bool(getattr(conversation, "lead_email_opt_out", False))
+    if not has_email and not email_opt_out:
+        return False
+    tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
+    return not time_window_is_complete(tw_val)
+
+
 def receptionist_bypass_reply(conversation: Conversation, client: Optional[Client] = None) -> Tuple[Optional[str], Optional[str]]:
     has_reason = conversation_has_specific_lead_reason(conversation)
     has_name = bool((conversation.lead_name or "").strip())
@@ -7947,7 +8014,13 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
     if not has_email and not email_opt_out:
         return ("Do you also have an email for confirmation? (Optional—Type ‘skip’ to continue.)", "email")
 
-    if not tw_known:
+    # Standard capture-first time_window stage. Reuse the single pending
+    # predicate so the field-order rule lives in exactly ONE place; the
+    # route uses the same predicate to prove a genuine transition into this
+    # stage. Equivalent to the previous "not tw_known" here (reason, name,
+    # phone, email-decided and not-short-symptom are all already true at
+    # this point), but now single-owned.
+    if capture_first_time_window_pending(conversation, client):
         if tw_val in {"Weekday morning", "Weekday afternoon"}:
             return ("Thanks — which weekday works best (Mon–Fri)?", "time_window")
         if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
@@ -8909,6 +8982,21 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # keep falling through to their existing later owners exactly as
     # before); the owner re-derives and stores the value itself, so there
     # is still exactly one capture implementation.
+    # C2-A.3 signal boundary (pre-turn capture): record whether the STANDARD
+    # capture-first time_window stage is pending BEFORE this turn's intake
+    # mutations, using the PURE, side-effect-free predicate
+    # capture_first_time_window_pending. This must NOT call the active
+    # bypass owner receptionist_bypass_reply: that owner runs the one-shot
+    # reason_detail consumer, and a pre-turn probe would consume it before
+    # the real route pass (owner-local hybrid-consumer regression). The
+    # predicate inspects only persisted fields (no user_text, no classifier,
+    # no mapper, no AI, no DB write, no mutation, no notification) and is the
+    # SAME predicate receptionist_bypass_reply uses for its standard
+    # time_window branch, so the field-order rule is defined once. Computed
+    # unconditionally so a later in_intake_mode escalation cannot leave it
+    # unset; it is only USED inside the bypass time_window branch.
+    pre_time_window_pending = capture_first_time_window_pending(conversation, client)
+
     if (
         not booking_dialog_active(conversation)
         and in_intake_mode
@@ -11030,6 +11118,31 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             )
             tz = getattr(client, "timezone", None)
             meta["hours_hint"] = f"{hours_text} (Hours shown in {tz})" if tz else hours_text
+
+            # C2-A.3 capture-first date-signal (analogous to the intake
+            # time_preference merge): when THIS bypass turn's reply is the
+            # standard capture-first day/time-window prompt, attach the
+            # same gated date signal the native WAITING_FOR_DATE meta
+            # emits. The service layer is the single owner of the decision
+            # (triple strict-true gate + prompt proof); this route only
+            # merges the returned metadata. Gates-false tenants and every
+            # other bypass reply stay byte-identical (no calendar_picker).
+            # C2-A.3 signal boundary: emit the date signal ONLY when THIS
+            # turn actually ENTERED the time_window stage. We are inside the
+            # POST-turn time_window branch (bypass_stage == "time_window"),
+            # so entering means the STANDARD time_window stage was NOT already
+            # pending before this turn. pre_time_window_pending is the pure
+            # predicate captured earlier; an invalid/unusable date that merely
+            # re-asks the identical prompt keeps it True -> no signal. The
+            # service helper owns the gate + prompt proof; the route supplies
+            # only this closed transition fact (no user_text parsing, no
+            # field-order rules duplicated here).
+            entered_time_window_stage = pre_time_window_pending is False
+            date_signal = intake_date_stage_signal(
+                client, bypass_text, entered_time_window_stage
+            )
+            if date_signal is not None:
+                meta["calendar_picker"] = date_signal
 
         return ChatResponse(
             reply=bypass_text,

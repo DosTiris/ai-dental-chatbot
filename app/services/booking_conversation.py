@@ -117,6 +117,19 @@ DATE_SELECT_CHOICE_PREFIX = "pick-date:"
 # no already-deployed widget changes behavior.
 PICKER_STAGE_TIME_PREFERENCE = "time_preference"
 PICKER_STAGE_SLOT_SELECTION = "slot_selection"
+# The date stage value, matching the vocabulary _date_stage_meta emits for
+# the native WAITING_FOR_DATE meta. Named here so the route-level
+# capture-first intake date-signal owner (intake_date_stage_signal) reuses
+# the SAME closed vocabulary and the SAME triple gate as every other
+# C2-A.3 signal.
+PICKER_STAGE_DATE = "date"
+# Closed capture-first submission mode (Rule 4). The native
+# WAITING_FOR_DATE picker consumes a pick-date calendar_choice action;
+# the capture-first intake picker is emitted at a route state that is
+# NOT WAITING_FOR_DATE, so its date cards must submit an ORDINARY intake
+# message (no ChatAction). This marker tells the widget which submission
+# transport to use; the widget validates it fail-closed.
+INTAKE_SUBMIT_MODE_MESSAGE = "message"
 
 
 def _picker_stage_signal(settings, stage) -> Optional[dict]:
@@ -178,6 +191,75 @@ def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
         return None
     settings = load_calendar_settings(client)
     return _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
+
+
+# The distinctive, name-INDEPENDENT tail of the S3 capture-first
+# day/time-window prompt returned by receptionist_bypass_reply() in
+# app/routes/chat.py. Only that standard prompt ends with this exact
+# phrase: the short-symptom variant omits the "(e.g., Tue morning)"
+# example, and the weekday and morning/afternoon prompts differ entirely.
+# Matching on this tail identifies the capture-first day question
+# regardless of the interpolated patient name WITHOUT re-implementing the
+# S3 branch logic (Calendar policy stays in its owner) and WITHOUT
+# refactoring that S3 owner (Rule 12: no refactor + feature in one patch).
+# Documented duplication (Rule 3 note): the same phrase is present in the
+# raw S3 f-string; a pinning test asserts the two stay byte-identical, and
+# unifying them is recorded as deferred drift.
+INTAKE_DATE_WINDOW_PROMPT_TAIL = "What day/time window works best (e.g., Tue morning)?"
+
+
+def intake_date_stage_signal(client, reply_text, entered_time_window_stage) -> Optional[dict]:
+    """
+    Purpose: single owner (Rule 3) of the C2-A.3 stage-signal decision for
+             the ROUTE-level capture-first (mode "bypass") day/time-window
+             prompt. chat.py merges the returned dict into its EXISTING
+             bypass meta; the route never re-implements the gate, the
+             vocabulary, or Boolean parsing. Analogous to
+             intake_time_preference_stage_signal.
+    Inputs:  client - tenant row (calendar settings loaded here so the
+             route stays thin); reply_text - the FINAL bypass reply text
+             about to be returned for this turn; entered_time_window_stage
+             - a CLOSED FACT from the route: literal True only when THIS
+             turn actually TRANSITIONED INTO the capture-first time_window
+             stage (pre-turn bypass stage != time_window, post-turn ==
+             time_window). The route establishes both stages with the
+             existing bypass owner (receptionist_bypass_reply); this helper
+             NEVER parses user_text and NEVER re-derives field order. It
+             distinguishes ENTERING the stage (signal required) from an
+             invalid/unusable date that merely RE-ASKS the identical prompt
+             at the same stage (signal prohibited) - the two are
+             byte-identical by reply text alone.
+    Returns: {"stage": "date", "submit": "message"} only when
+             entered_time_window_stage is literal True AND reply_text is the
+             standard capture-first day/time-window prompt (identified by
+             its name-independent tail) AND booking_enabled,
+             calendar_actions_enabled, and calendar_picker_enabled are ALL
+             strict True - the same triple gate as every other C2-A.3
+             signal, decided by the same owner (_picker_stage_signal).
+             The submit marker tells the widget to submit the picked date
+             as an ORDINARY intake message (the native _date_stage_meta
+             omits it and keeps calendar_choice). Otherwise None, and the
+             bypass meta stays byte-identical to today (mode, hours_hint,
+             show_start_over, reply wording, and state progression
+             unchanged).
+    Database effects: none. External effects: none.
+    """
+    # Emit ONLY on a genuine transition INTO time_window (closed fact from
+    # the route). An invalid date that re-asks the same prompt keeps the
+    # stage unchanged and must stay signal-free.
+    if entered_time_window_stage is not True:
+        return None
+    if not (reply_text or "").endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL):
+        return None
+    settings = load_calendar_settings(client)
+    if _picker_stage_signal(settings, PICKER_STAGE_DATE) is None:
+        return None
+    # Capture-first picker: the widget submits the picked date as an
+    # ORDINARY intake message (this route state is not WAITING_FOR_DATE
+    # and cannot consume a native pick-date calendar_choice). The submit
+    # marker selects that closed transport; the native date meta
+    # (_date_stage_meta) deliberately omits it and keeps calendar_choice.
+    return {"stage": PICKER_STAGE_DATE, "submit": INTAKE_SUBMIT_MODE_MESSAGE}
 
 
 # booking_boundary_state() return vocabulary (closed — Rule 4). The route

@@ -1639,6 +1639,190 @@ async function main() {
       parts.retries.length === 0);
   }
 
+  // ------------------------------------------------------------------------
+  // Capture-first ordinary-message submission mode
+  // (meta.calendar_picker.submit === "message"): the date card submits the
+  // picked date as an ordinary intake message with NO action object. The
+  // native picker (no marker, or any non-"message" value) keeps the pick-date
+  // calendar_choice action exactly as before.
+  // ------------------------------------------------------------------------
+  const CF_MONTHS = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+
+  async function openCaptureFirst(sb, openDays, submit) {
+    sb.setPreviewResponder((url) =>
+      successfulJson(previewPayloadFor(url, { openDays })));
+    let turn = 0;
+    sb.setChatResponder(() => {
+      turn += 1;
+      if (turn === 1) {
+        const picker = (submit === undefined)
+          ? { stage: "date" }
+          : { stage: "date", submit: submit };
+        return successfulJson({
+          reply: "Great\u2014thanks Kevin. What day/time window works best (e.g., Tue morning)?",
+          conversation_id: "conv-1",
+          meta: { mode: "bypass", show_start_over: true, calendar_picker: picker },
+        });
+      }
+      return successfulJson({
+        reply: "Got it \u2014 do you prefer morning or afternoon?",
+        conversation_id: "conv-1",
+        meta: { mode: "intake_time_window_capture",
+                calendar_picker: { stage: "time_preference" } },
+      });
+    });
+    run(sb.context, 'inputEl.value = "book";');
+    await run(sb.context, "sendMessage()");
+    await flush(); await flush();
+  }
+
+  function cfExpectedMessage(openIso) {
+    const [y, mo, d] = openIso.split("-").map(Number);
+    return `${weekdayOf(openIso)}, ${CF_MONTHS[mo - 1]} ${d}, ${y}`;
+  }
+
+  { // message mode: ordinary message, no action object, full month-name date
+    const openIso = isoAdd(todayIso(), 2);
+    const sb = buildSandbox({});
+    await openCaptureFirst(sb, [openIso], "message");
+    panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+    await flush(); await flush();
+    const posts = chatPosts(sb.fetchCalls);
+    const body = parsedBody(posts[posts.length - 1]);
+    ok("capture-first date click posts exactly once with NO action object",
+      posts.length === 2 && !("action" in body));
+    ok("capture-first message is the full month-name date (never a raw ISO)",
+      body.message === cfExpectedMessage(openIso) &&
+      !/\d{4}-\d{2}-\d{2}/.test(String(body.message)));
+  }
+
+  { // fail-closed: any non-"message" marker keeps the native calendar_choice
+    const openIso = isoAdd(todayIso(), 2);
+    for (const bad of ["action", "true", "MESSAGE", ""]) {
+      const sb = buildSandbox({});
+      await openCaptureFirst(sb, [openIso], bad);
+      panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+      await flush(); await flush();
+      const body = parsedBody(chatPosts(sb.fetchCalls).slice(-1)[0]);
+      ok(`submit marker ${JSON.stringify(bad)} falls closed to calendar_choice`,
+        !!body.action && body.action.type === "calendar_choice" &&
+        body.action.choice_id === "pick-date:" + openIso);
+    }
+  }
+
+  { // native picker (no submit marker) is unchanged: pick-date calendar_choice
+    const openIso = isoAdd(todayIso(), 2);
+    const sb = buildSandbox({});
+    await openCaptureFirst(sb, [openIso], undefined);
+    panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+    await flush(); await flush();
+    const body = parsedBody(chatPosts(sb.fetchCalls).slice(-1)[0]);
+    ok("native date picker (no marker) keeps the pick-date calendar_choice",
+      !!body.action && body.action.type === "calendar_choice" &&
+      body.action.choice_id === "pick-date:" + openIso);
+  }
+
+  { // message-mode lifecycle: card retained + disabled in flight; no duplicate
+    const openIso = isoAdd(todayIso(), 2);
+    const sb = buildSandbox({});
+    await openCaptureFirst(sb, [openIso], "message");
+    let release = null;
+    sb.setChatResponder(() => new Promise((resolve) => {
+      release = () => resolve(successfulJson({
+        reply: "Got it \u2014 do you prefer morning or afternoon?",
+        conversation_id: "conv-1",
+        meta: { mode: "intake_time_window_capture",
+                calendar_picker: { stage: "time_preference" } } }));
+    }));
+    panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+    await flush();
+    const liveRows = pickerRows(sb.elementsById);
+    const liveParts = panelParts(panelOf(liveRows[0]));
+    const selected = liveParts.days.filter((b) =>
+      b.classList.contains("dp-selected"));
+    ok("message-mode: submitting card retained, selected, all controls disabled",
+      liveRows.length === 1 &&
+      liveRows[0].classList.contains("dp-submitting") &&
+      selected.length === 1 &&
+      liveParts.days.every((b) => b.disabled === true) &&
+      liveParts.navs.every((b) => b.disabled === true));
+    const before = chatPosts(sb.fetchCalls).length;
+    selected[0].click();  // duplicate via the LIVE attached button
+    await flush();
+    ok("message-mode: duplicate click while in flight adds no second POST",
+      chatPosts(sb.fetchCalls).length === before);
+    release();
+    await flush(); await flush();
+    ok("message-mode: the card clears only at the resolved response boundary",
+      pickerRows(sb.elementsById).length === 0);
+  }
+
+  function messagesText(sb) {
+    const out = [];
+    collect(sb.elementsById.messages, out);
+    return out.map((e) => String(e.textContent || "")).join(" | ");
+  }
+
+  { // fail-closed for NON-STRING markers: null, boolean, array, object
+    const openIso = isoAdd(todayIso(), 2);
+    const cases = [
+      ["null", null], ["boolean true", true], ["boolean false", false],
+      ["array", []], ["object", {}],
+    ];
+    for (const [label, marker] of cases) {
+      const sb = buildSandbox({});
+      await openCaptureFirst(sb, [openIso], marker);
+      panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+      await flush(); await flush();
+      const body = parsedBody(chatPosts(sb.fetchCalls).slice(-1)[0]);
+      ok(`submit marker ${label} falls closed to calendar_choice`,
+        !!body.action && body.action.type === "calendar_choice" &&
+        body.action.choice_id === "pick-date:" + openIso);
+    }
+  }
+
+  { // Start Over while the ordinary-message POST is unresolved
+    const openIso = isoAdd(todayIso(), 2);
+    const sb = buildSandbox({});
+    await openCaptureFirst(sb, [openIso], "message");
+    let release = null;
+    sb.setChatResponder(() => new Promise((resolve) => {
+      release = () => resolve(successfulJson({
+        reply: "STALE_LATE_REPLY",
+        conversation_id: "conv-1",
+        meta: { calendar_picker: { stage: "date", submit: "message" } } }));
+    }));
+    panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+    await flush();
+    ok("message-mode: card present while the POST is unresolved",
+      pickerRows(sb.elementsById).length === 1);
+    run(sb.context, "startOver()");
+    ok("Start Over removes the in-flight capture-first picker",
+      pickerRows(sb.elementsById).length === 0);
+    const textBefore = messagesText(sb);
+    release();
+    await flush(); await flush();
+    ok("late response after Start Over restores neither the picker nor the reply",
+      pickerRows(sb.elementsById).length === 0 &&
+      !messagesText(sb).includes("STALE_LATE_REPLY") &&
+      messagesText(sb) === textBefore);
+  }
+
+  { // ordinary-message network failure: visible + recoverable
+    const openIso = isoAdd(todayIso(), 2);
+    const sb = buildSandbox({});
+    await openCaptureFirst(sb, [openIso], "message");
+    sb.setChatResponder(() => Promise.reject(new Error("offline")));
+    panelParts(pickerPanel(sb.elementsById)).openDays[0].click();
+    await flush(); await flush();
+    ok("message-mode network failure surfaces a visible connection error",
+      messagesText(sb).toLowerCase().includes("trouble connecting"));
+    ok("message-mode network failure clears the card and leaves input usable",
+      pickerRows(sb.elementsById).length === 0 &&
+      run(sb.context, "!!inputEl.disabled") === false);
+  }
+
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed === 0 ? 0 : 1);
 }

@@ -1535,6 +1535,15 @@
     // preference buttons (typed-parity transport; no ChatAction).
     const PICKER_STAGE_TIME_PREFERENCE = "time_preference";
     const PICKER_STAGE_SLOT_SELECTION = "slot_selection";
+    // Capture-first submission mode (closed allowlist). The backend marks
+    // the capture-first intake date picker with
+    // meta.calendar_picker.submit === "message": its route state is NOT
+    // WAITING_FOR_DATE, so its cards submit an ordinary intake message (no
+    // ChatAction). Any other value — including the native WAITING_FOR_DATE
+    // signal that omits the marker — falls closed to the existing
+    // pick-date calendar_choice action path.
+    const PICKER_SUBMIT_MESSAGE = "message";
+    const PICKER_SUBMIT_ACTION = "action";
     const TIME_PREFERENCE_BUTTONS = ["Morning", "Afternoon"];
     const PICKER_DAY_STATES = ["open", "full", "unavailable", "past"];
     const PICKER_MONTH_NAMES = ["January","February","March","April","May",
@@ -1851,7 +1860,7 @@
       syncFade();
     }
 
-    function renderDatePicker() {
+    function renderDatePicker(submitMode) {
       // G1: PRIMARY = "Next 7 days" strip; SECONDARY = the EXISTING month grid,
       // hidden until "See full calendar". A fresh signal fully rebuilds the
       // picker (reopen = clean state). The month grid is fetched on signal (as
@@ -1867,6 +1876,13 @@
       const panel = document.createElement("div");
       panel.className = "date-picker";
       panel.id = "miaFullCalendar";
+      // Fail-closed: an unknown/absent mode behaves as the native action
+      // picker; ONLY the exact "message" marker enables ordinary-message
+      // submission. Both date-card owners (strip + grid) read this.
+      panel.submitMode =
+        submitMode === PICKER_SUBMIT_MESSAGE
+          ? PICKER_SUBMIT_MESSAGE
+          : PICKER_SUBMIT_ACTION;
       panel.setAttribute("role", "group");
       panel.setAttribute("aria-label", "Choose an appointment day");
       panel.hidden = true;
@@ -2207,15 +2223,34 @@
       });
       const row = panel.parentElement;
       if (row) row.classList.add("dp-submitting");
+      // The month-grid display label (no year). Native (action) mode keeps
+      // it as a display echo; capture-first (message) mode sends a full,
+      // unambiguous month-name date the existing intake parser stores
+      // canonically — never a raw ISO string and never a second parser.
       const label = `${weekday}, ${PICKER_MONTH_NAMES[parts.mo - 1]} ${parts.d}`;
-      // Display echo only — the transcript label is server-issued.
-      inputEl.value = label;
-      Promise.resolve(sendMessage({
-        type: CALENDAR_CHOICE_ACTION_TYPE,
-        choice_id: DATE_SELECT_CHOICE_PREFIX + iso,
-      })).finally(() => {
-        if (row) row.remove();
-      });
+      if (panel.submitMode === PICKER_SUBMIT_MESSAGE) {
+        // Capture-first: submit the picked date as an ORDINARY intake
+        // message (no ChatAction) — this route state is not
+        // WAITING_FOR_DATE and cannot consume a native pick-date action.
+        // Exactly one POST; the request body carries no action field; the
+        // reply is the existing morning/afternoon time_preference question.
+        inputEl.value =
+          `${weekday}, ${PICKER_MONTH_NAMES[parts.mo - 1]} ${parts.d}, ${parts.y}`;
+        Promise.resolve(sendMessage()).finally(() => {
+          if (row) row.remove();
+        });
+      } else {
+        // Native WAITING_FOR_DATE: the server-revalidated pick-date
+        // structured action, unchanged. Display echo only — the
+        // transcript label is server-issued.
+        inputEl.value = label;
+        Promise.resolve(sendMessage({
+          type: CALENDAR_CHOICE_ACTION_TYPE,
+          choice_id: DATE_SELECT_CHOICE_PREFIX + iso,
+        })).finally(() => {
+          if (row) row.remove();
+        });
+      }
       // V8 (owner audit): sendMessage's synchronous phase has just
       // appended the patient echo and the typing indicator and scrolled
       // #messages to the bottom, which can push the selected date cell
@@ -2682,7 +2717,15 @@
           typeof data.meta.calendar_picker === "object" &&
           data.meta.calendar_picker.stage === "date"
         ) {
-          renderDatePicker();
+          // Closed allowlist: ONLY the exact string "message" selects the
+          // capture-first ordinary-message path; every other value
+          // (including a missing marker on the native WAITING_FOR_DATE
+          // signal) falls closed to the existing calendar_choice path.
+          const dateSubmitMode =
+            data.meta.calendar_picker.submit === PICKER_SUBMIT_MESSAGE
+              ? PICKER_SUBMIT_MESSAGE
+              : PICKER_SUBMIT_ACTION;
+          renderDatePicker(dateSubmitMode);
         }
 
         // C2-A.3: the time-preference stage renders the two
