@@ -83,13 +83,17 @@ def _pre_date_question_conversation(db, client):
     patient type unset - exactly one 'skip email' turn before the capture-first
     day/time-window question. (make_conversation defaults email opt-out True and
     a complete time window; we clear both so the next required field is the
-    time window.)"""
+    time window.)
+
+    Package A asks New/Returning first (right after the reason), so patient type
+    is already captured by the time these date-stage tests run; preseed it so the
+    single 'skip email' turn still lands on the capture-first day/time window."""
     return make_conversation(
         db,
         client,
         lead_time_window=None,
         lead_email_opt_out=False,
-        lead_is_new_patient=None,
+        lead_is_new_patient=True,
     )
 
 
@@ -119,8 +123,13 @@ def test_exact_capture_first_sequence_carries_date_signal(db, fakes):
     # reason (fresh conversation; the widget sends no conversation_id)
     r1 = send(db, client, None, "I'd like to book a cleaning")
     conversation = _conversation_row(db, r1)
-    assert "name" in r1.reply.lower()
+    # Package A: New/Returning is asked first, right after the reason.
+    assert "new or returning" in r1.reply.lower()
     assert "calendar_picker" not in (r1.meta or {})
+
+    # patient type -> name prompt
+    r_pt = send(db, client, conversation, "new patient")
+    assert "name" in r_pt.reply.lower()
 
     # name -> phone prompt
     r2 = send(db, client, conversation, "Kevin Alvarado")
@@ -141,8 +150,8 @@ def test_exact_capture_first_sequence_carries_date_signal(db, fakes):
     # Everything else about the bypass turn is preserved.
     assert r4.meta.get("hours_hint")
     assert "show_start_over" in r4.meta
-    # Patient type has NOT been collected at this boundary.
-    assert conversation.lead_is_new_patient is None
+    # Package A: patient type is collected FIRST, so it is known by this boundary.
+    assert conversation.lead_is_new_patient is not None
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +168,8 @@ def test_preseeded_date_question_carries_signal(db, fakes):
     assert resp.meta.get("mode") == "bypass"
     assert resp.meta.get("calendar_picker") == DATE_SIGNAL
     assert resp.meta.get("hours_hint")
-    assert conversation.lead_is_new_patient is None
+    # Package A: patient type is collected first and is known by this boundary.
+    assert conversation.lead_is_new_patient is not None
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +224,16 @@ def test_malformed_flag_suppresses_signal(db, fakes, flag, malformed):
 def test_other_bypass_stages_do_not_carry_date_signal(db, fakes):
     client = _gated_client(db)
 
-    # reason -> name prompt
+    # reason -> New/Returning prompt (Package A order)
     r1 = send(db, client, None, "I'd like to book a cleaning")
     conversation = _conversation_row(db, r1)
     assert not r1.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
     assert "calendar_picker" not in (r1.meta or {})
+
+    # patient type -> name prompt
+    r_pt = send(db, client, conversation, "new patient")
+    assert not r_pt.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert "calendar_picker" not in (r_pt.meta or {})
 
     # name -> phone prompt
     r2 = send(db, client, conversation, "Kevin Alvarado")
@@ -291,18 +306,26 @@ def test_helper_emits_only_for_date_prompt_when_gated(db, fakes):
     date_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
 
     # entered_time_window_stage=True is the genuine-transition fact from the route.
-    assert intake_date_stage_signal(client, date_prompt, True) == DATE_SIGNAL
+    assert intake_date_stage_signal(client, date_prompt, True, "standard") == DATE_SIGNAL
     # Every non-date reply -> None, even fully gated and entered.
-    assert intake_date_stage_signal(client, INTAKE_TIME_PREFERENCE_PROMPT, True) is None
+    assert intake_date_stage_signal(client, INTAKE_TIME_PREFERENCE_PROMPT, True, "standard") is None
+    # This bare non-example prompt now matches the SHORT-SYMPTOM tail, so it
+    # emits ONLY under the short_symptom kind; under standard it stays None.
     assert intake_date_stage_signal(
-        client, "Thanks Kevin. What day/time window works best?", True) is None
-    assert intake_date_stage_signal(client, "", True) is None
-    assert intake_date_stage_signal(client, None, True) is None
+        client, "Thanks Kevin. What day/time window works best?", True, "standard") is None
+    assert intake_date_stage_signal(
+        client, "Thanks Kevin. What day/time window works best?", True,
+        "short_symptom") == DATE_SIGNAL
+    assert intake_date_stage_signal(client, "", True, "standard") is None
+    assert intake_date_stage_signal(client, None, True, "standard") is None
     # Transition gate: the exact date prompt, fully gated, but NOT a genuine
     # entry into time_window (invalid date re-asks the same prompt) -> None.
-    assert intake_date_stage_signal(client, date_prompt, False) is None
+    assert intake_date_stage_signal(client, date_prompt, False, "standard") is None
     for not_true in (None, 1, "true", [], {}):
-        assert intake_date_stage_signal(client, date_prompt, not_true) is None
+        assert intake_date_stage_signal(client, date_prompt, not_true, "standard") is None
+    # Closed-vocabulary kind (Rule 4): unknown kinds never emit.
+    for bad_kind in (None, "", "STANDARD", "date", "urgent"):
+        assert intake_date_stage_signal(client, date_prompt, True, bad_kind) is None
 
 
 @pytest.mark.parametrize("flags", [
@@ -315,7 +338,7 @@ def test_helper_suppresses_when_any_gate_not_strict_true(db, fakes, flags):
     client = _gated_client(db, **flags)
     date_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
     # entered=True isolates the FEATURE-GATE suppression under test.
-    assert intake_date_stage_signal(client, date_prompt, True) is None
+    assert intake_date_stage_signal(client, date_prompt, True, "standard") is None
 
 
 def test_date_stage_vocabulary_reused(db, fakes):

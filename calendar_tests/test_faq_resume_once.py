@@ -93,7 +93,7 @@ def _fresh_generic_lead(db, client):
         lead_phone="",
         lead_time_window=None,
         lead_email_opt_out=False,
-        lead_is_new_patient=None,
+        lead_is_new_patient=True,
     )
 
 
@@ -181,6 +181,7 @@ def test_faq_resumes_first_name_once(db, fakes):
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     assert question == FIRST_NAME_QUESTION
@@ -196,6 +197,7 @@ def test_insurance_faq_resumes_phone_once(db, fakes):
     conversation = make_conversation(
         db, client, lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     assert question == PHONE_QUESTION
@@ -211,6 +213,7 @@ def test_faq_resumes_email_once(db, fakes):
     client = make_client(db)
     conversation = make_conversation(
         db, client, lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     assert "email" in question.lower()
@@ -224,7 +227,7 @@ def test_faq_resumes_email_once(db, fakes):
 
 def test_office_phone_faq_resumes_time_window_once(db, fakes):
     client = make_client(db)
-    conversation = make_conversation(db, client, lead_time_window=None)
+    conversation = make_conversation(db, client, lead_time_window=None, lead_is_new_patient=True)
     question = _pending_question(db, client, conversation)
     assert "day/time" in question or "weekday" in question.lower()
 
@@ -334,6 +337,7 @@ def test_valid_name_reply_after_faq_resume_advances(db, fakes):
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     _pending_question(db, client, conversation)
     send(db, client, conversation, FAQ_HOURS)  # combined answer + question
@@ -396,6 +400,7 @@ def test_faq_during_priority_intake_preserves_completeness(db, fakes):
     conversation = make_conversation(
         db, client, lead_is_priority=True, lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     assert question == PHONE_QUESTION
@@ -424,6 +429,7 @@ def test_two_consecutive_faqs_do_not_stack_questions(db, fakes):
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     assert question == FIRST_NAME_QUESTION
@@ -497,7 +503,7 @@ def test_booking_link_sent_suppresses_resume_at_every_faq_owner(
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
-        booking_link_sent=True,
+        booking_link_sent=True, lead_is_new_patient=True,
     )
     before = _snapshot_lead_fields(conversation)
     question = _pending_question(db, client, conversation)
@@ -524,6 +530,7 @@ def test_only_latest_assistant_message_controls_resume(db, fakes):
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     before = _snapshot_lead_fields(conversation)
 
@@ -576,6 +583,7 @@ def test_irrelevant_text_after_faq_resume_does_not_advance(db, fakes):
     conversation = make_conversation(
         db, client, lead_name="", lead_phone="",
         lead_time_window=None, lead_email_opt_out=False,
+        lead_is_new_patient=True,
     )
     question = _pending_question(db, client, conversation)
     first = send(db, client, conversation, FAQ_HOURS)

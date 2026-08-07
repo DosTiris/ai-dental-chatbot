@@ -463,7 +463,7 @@ def test_hybrid_sequential_real_flow(db, fakes):
 
 def test_priority_hybrid_missing_name_asks_name(db, fakes):
     client = make_client(db, booking_mode="hybrid", booking_url="https://book.example.com")
-    conversation = make_conversation(db, client, lead_is_priority=True)
+    conversation = make_conversation(db, client, lead_is_priority=True, lead_is_new_patient=True)
 
     resp = send(db, client, conversation, "I want to book an appointment")
 
@@ -475,7 +475,7 @@ def test_priority_hybrid_missing_name_asks_name(db, fakes):
 
 def test_priority_hybrid_with_name_asks_phone(db, fakes):
     client = make_client(db, booking_mode="hybrid", booking_url="https://book.example.com")
-    conversation = make_conversation(db, client, lead_is_priority=True, lead_name="Kevin")
+    conversation = make_conversation(db, client, lead_is_priority=True, lead_name="Kevin", lead_is_new_patient=True)
 
     resp = send(db, client, conversation, "I want to book an appointment")
 
@@ -485,7 +485,7 @@ def test_priority_hybrid_with_name_asks_phone(db, fakes):
 
 def test_priority_hybrid_still_requires_email_or_skip(db, fakes):
     client = make_client(db, booking_mode="hybrid", booking_url="https://book.example.com")
-    conversation = captured_conversation(db, client, lead_is_priority=True)
+    conversation = captured_conversation(db, client, lead_is_priority=True, lead_is_new_patient=True)
 
     resp = send(db, client, conversation, "I want to book an appointment")
 
@@ -497,7 +497,7 @@ def test_priority_hybrid_still_requires_email_or_skip(db, fakes):
 def test_priority_hybrid_still_requires_time_window(db, fakes):
     client = make_client(db, booking_mode="hybrid", booking_url="https://book.example.com")
     conversation = captured_conversation(
-        db, client, lead_is_priority=True, lead_email_opt_out=True)
+        db, client, lead_is_priority=True, lead_email_opt_out=True, lead_is_new_patient=True)
 
     resp = send(db, client, conversation, "I want to book an appointment")
 
@@ -1027,8 +1027,8 @@ def test_bypass_consumer_dental_non_enum_branch(db, fakes, force_bypass_reason_d
     assert conversation.lead_reason == "appointment request"
     assert conversation.lead_reason_source_text == text
     # Advanced through the real re-entered intake owner: the next required
-    # field (the name) is asked, not the reason again.
-    assert "first name" in resp.reply.lower()
+    # field (Package A: New/Returning) is asked, not the reason again.
+    assert "new or returning" in resp.reply.lower()
     assert resp.meta.get("mode") not in {
         "unclear_other_reason_detail", "non_dental_other_reason_detail"}
     # No second classifier exists.

@@ -133,7 +133,9 @@ MAPPED_ENUM_VALID_FIXTURES = [
 
 def _assert_captured_flow_common(conversation, resp):
     assert resp.meta.get("mode") == "other_reason_detail_captured"
-    assert "What’s your first name?" in resp.reply
+    # Package A: once the Other detail is a valid, authoritative dental reason,
+    # New/Returning is the next question (before name).
+    assert "new or returning patient" in resp.reply
     assert resp.reply.count("?") == 1  # at most one required question
     _assert_no_reason_question(resp.reply)
     assert resp.meta.get("mode") != "booking"
@@ -296,6 +298,8 @@ def test_valid_capture_then_intake_continues_normally(db, fakes):
     conversation = _fresh_generic_lead(db, client)
     _enter_other_step(db, client, conversation)
     send(db, client, conversation, "sore spot since my last visit")
+    # Package A: New/Returning is asked first once the Other detail is valid.
+    send(db, client, conversation, "new patient")
     resp2 = send(db, client, conversation, "Kevin")
     _assert_no_reason_question(resp2.reply)
     assert conversation.lead_name.strip() != ""
@@ -355,7 +359,7 @@ def test_unclear_negated_wording_rejected_then_valid_retry_accepted(db,
     resp2 = send(db, client, conversation, "I need a root canal")
     assert resp2.meta.get("mode") == "other_reason_detail_captured"
     assert conversation.lead_reason_source_text == "I need a root canal"
-    assert "What’s your first name?" in resp2.reply
+    assert "new or returning patient" in resp2.reply
 
 
 def test_unsafe_text_uses_existing_unsafe_owner_and_stays_retryable(db,
@@ -398,7 +402,7 @@ def test_recognized_services_still_route_via_enrichment(db, fakes,
         "unsafe_other_reason_detail",
     )
     assert conversation.lead_reason_source_text == expected_source
-    assert "What’s your first name?" in resp.reply
+    assert "new or returning patient" in resp.reply
     assert resp.reply.count("?") == 1
 
 
@@ -421,7 +425,7 @@ def test_cleaning_routes_via_reason_replacement(db, fakes):
     assert conversation.lead_reason == "cleaning/checkup"
     assert conversation.lead_reason_source_text == GENERIC_SEED_SOURCE
     assert chat_module.conversation_has_specific_lead_reason(conversation)
-    assert "What’s your first name?" in resp.reply
+    assert "new or returning patient" in resp.reply
     assert resp.reply.count("?") == 1
     _assert_no_reason_question(resp.reply)
     assert (conversation.booking_state or "none") == BookingState.NONE

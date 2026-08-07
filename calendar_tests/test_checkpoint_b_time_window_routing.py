@@ -461,10 +461,14 @@ def test_ordinary_dental_emergency_intake_is_unchanged(db, fakes):
 
     resp = send(db, client, conversation, "I have severe tooth pain and swelling")
 
-    assert "first name" in resp.reply.lower(), resp.reply
+    # Package A: the first symptom turn carries the urgent-care safety guidance
+    # AND asks New/Returning first (safety is not delayed to a later turn).
+    assert "seek urgent care right away" in resp.reply
+    assert "new or returning" in resp.reply.lower(), resp.reply
     assert not bool(getattr(conversation, "final_closed", False))
     assert (conversation.booking_state or "none") == BookingState.NONE
 
+    send(db, client, conversation, "new")            # answer patient type
     follow_up = send(db, client, conversation, "kyle")
 
     assert "phone" in follow_up.reply.lower(), follow_up.reply

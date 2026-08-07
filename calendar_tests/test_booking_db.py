@@ -379,42 +379,116 @@ def test_emergency_conversation_cannot_book(db, client_row, conversation_row):
     assert conversation_row.booking_state == BookingState.NONE  # state wiped
 
 
-def test_slot_taken_between_display_and_selection(db, client_row, conversation_row):
+# ---------------------------------------------------------------------------
+# HOLD-CONFLICT race (Rule 9, dialog level) -- deterministic pinned-clock form.
+#
+# ROOT CAUSE OF THE PREVIOUS FLAKE (owner-local 2026-08-06 failure): the
+# fixture used wall-clock-relative offsets (+48h / +49h). Run between 11 PM
+# and midnight America/New_York, those two instants straddle the client-local
+# midnight boundary, so the two offered slots land on DIFFERENT local dates.
+# After patient A snipes slot A, the re-offer for the STORED preferred date
+# (slot A's local date) finds nothing -- slot A is held and slot B belongs to
+# the next local day -- so _reoffer_after_conflict's _offer_slots call takes
+# the _suggest_other_days path ("I don't see matching openings on ...")
+# WITHOUT the "just taken" apology (the apology is prefixed only when the
+# re-offer actually carries slots), and the test failed before exercising the
+# race it exists to prove. Weekday/office-hours play NO role for this
+# fixture: client_row configures no office_hours, and slot eligibility is
+# slot-row-based plus notice(60m)/horizon(30d)/preference/service only.
+#
+# CORRECTION (test-only): reuse the file's existing deterministic owners --
+# _fixed_clock (pins booking_conversation.client_now, the dialog's single
+# clock read) and _slot_row (a slot at an EXACT aware-UTC instant) -- and
+# publish BOTH offered slots on the SAME client-local calendar day: future,
+# beyond minimum notice, inside the horizon, AVAILABLE, and thus actually
+# offerable, which is what the race requires (after slot A is sniped, slot B
+# must remain a valid same-day alternative). The pinned scenarios prove the
+# representative boundaries the fixture must be immune to.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scenario", ["weekday_noon", "weekend_noon",
+                                      "late_night_rollover"])
+def test_slot_taken_between_display_and_selection(db, client_row,
+                                                  conversation_row,
+                                                  monkeypatch, scenario):
     """Patient B picks a slot that patient A held after it was displayed to B:
-    Mia apologizes and re-offers instead of failing (Rule 9 race, dialog level)."""
+    Mia apologizes and re-offers instead of failing (Rule 9 race, dialog
+    level). Pinned-clock scenarios: weekday noon, weekend noon, and the
+    23:30-local day-rollover window that broke the wall-clock fixture."""
     from app.calendar_models import BookingState
     from app.services import booking_conversation
     from app.services.appointment_hold_service import place_hold
 
-    slot_a = _make_slot(db, client_row, 48)
-    slot_b = _make_slot(db, client_row, 49)
+    # Pinned aware-UTC "now" per scenario (NY = UTC-4 in August 2026), with
+    # slot A at 10:00 NY two local days later and slot B one hour after --
+    # one shared NY calendar date by construction (asserted below).
+    scenarios = {
+        # Wed 2026-08-19 12:00 NY -> slots Fri 2026-08-21 10:00/11:00 NY.
+        "weekday_noon": (datetime(2026, 8, 19, 16, 0, tzinfo=UTC),
+                         datetime(2026, 8, 21, 14, 0, tzinfo=UTC)),
+        # Sat 2026-08-22 12:00 NY -> slots Sun 2026-08-23 10:00/11:00 NY
+        # (a weekend RUN and weekend-day slots both stay offerable).
+        "weekend_noon": (datetime(2026, 8, 22, 16, 0, tzinfo=UTC),
+                         datetime(2026, 8, 23, 14, 0, tzinfo=UTC)),
+        # Tue 2026-08-18 23:30 NY -- the exact rollover window in which the
+        # old +48h/+49h fixture straddled midnight -> slots Thu 2026-08-20.
+        "late_night_rollover": (datetime(2026, 8, 19, 3, 30, tzinfo=UTC),
+                                datetime(2026, 8, 20, 14, 0, tzinfo=UTC)),
+    }
+    pinned, slot_a_start = scenarios[scenario]
+    _fixed_clock(monkeypatch, pinned)
+
+    slot_a = _slot_row(db, client_row, slot_a_start)
+    slot_b = _slot_row(db, client_row, slot_a_start + timedelta(hours=1))
+    ny = ZoneInfo("America/New_York")
+    assert (ensure_utc(slot_a.start_datetime).astimezone(ny).date()
+            == ensure_utc(slot_b.start_datetime).astimezone(ny).date()),         "fixture invariant: both offered slots share one client-local date"
     other = make_conversation(db, client_row)
 
     conversation_row.booking_state = BookingState.WAITING_FOR_SLOT_SELECTION
-    conversation_row.booking_preferred_date = slot_a.start_datetime.astimezone(
-        ZoneInfo("America/New_York")).date().isoformat()
+    conversation_row.booking_preferred_date = ensure_utc(
+        slot_a.start_datetime).astimezone(ny).date().isoformat()
     conversation_row.booking_time_preference = "any"
     # Patch 2C: an offer is honored only while its explicit metadata says it
-    # is live — offered IDs with a NULL booking_offer_expires_at are treated
+    # is live -- offered IDs with a NULL booking_offer_expires_at are treated
     # as expired (safety contract, tested separately below). This test targets
     # the HOLD-CONFLICT race, not expiration, so the setup must represent a
-    # valid, unexpired offer.
-    conversation_row.booking_offer_expires_at = _now() + timedelta(minutes=30)
+    # valid, unexpired offer -- relative to the SAME pinned clock the dialog
+    # reads.
+    conversation_row.booking_offer_expires_at = pinned + timedelta(minutes=30)
     conversation_row.booking_effective_time_preference = "any"
     conversation_row.booking_offered_slot_ids = [str(slot_a.id), str(slot_b.id)]
     db.commit()
 
-    # Patient A snipes the first slot after it was displayed to our patient.
+    # Contract 1 + 2: patient B holds BOTH slot ids in the live offered set,
+    # and the offer expiration is valid at the pinned now.
+    db.refresh(conversation_row)
+    assert conversation_row.booking_offered_slot_ids == [str(slot_a.id),
+                                                         str(slot_b.id)]
+    assert ensure_utc(conversation_row.booking_offer_expires_at) > pinned
+
+    # Contract 3: patient A snipes the first slot after it was displayed to
+    # our patient, under the SAME pinned clock the dialog will use.
     assert place_hold(db, client_row.id, slot_a.id, other.id,
                        settings=_settings(client_row), time_preference="any",
-                       service_key=None, now_utc=_now()).success
+                       service_key=None, now_utc=pinned).success
 
+    # Contract 4-7: patient B chooses the first offered slot; the server
+    # detects the hold conflict, answers with the approved "just taken"
+    # wording, and re-offers valid alternatives (slot B) instead of failing.
     reply = booking_conversation.handle_booking_message(
         db, client_row, conversation_row, "the first one")
     assert reply.handled
     assert "just taken" in reply.text.lower()
-    # Fresh offer excludes the sniped slot.
-    assert str(slot_a.id) not in (reply.meta.get("offered_slots") or [])
+    offered_after = reply.meta.get("offered_slots") or []
+    assert str(slot_a.id) not in offered_after     # sniped slot excluded
+    assert str(slot_b.id) in offered_after         # same-day alternative kept
+
+    # Contract 8: conflict recovery leaves a live selection wait with a
+    # fresh, unexpired offer (the authoritative recovery contract).
+    db.refresh(conversation_row)
+    assert conversation_row.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert ensure_utc(conversation_row.booking_offer_expires_at) > pinned
 
 
 # ---------------------------------------------------------------------------

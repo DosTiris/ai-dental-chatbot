@@ -122,7 +122,12 @@ def test_exact_production_sequence_day_only_carries_signal(db, fakes):
     # reason (fresh conversation; the widget sends no conversation_id)
     r1 = send(db, client, None, "I'd like to book a cleaning")
     conversation = _conversation_row(db, r1)
-    assert "name" in r1.reply.lower()
+    # Package A: New/Returning is asked first, right after the reason.
+    assert "new or returning" in r1.reply.lower()
+
+    # patient type -> name
+    r_pt = send(db, client, conversation, "new patient")
+    assert "name" in r_pt.reply.lower()
 
     # name
     r2 = send(db, client, conversation, "Casey Patient")
@@ -142,14 +147,15 @@ def test_exact_production_sequence_day_only_carries_signal(db, fakes):
     assert r5.reply == INTAKE_TIME_PREFERENCE_PROMPT
     assert r5.meta.get("mode") == "intake_time_window_capture"
     assert r5.meta.get("calendar_picker") == TIME_SIGNAL
-    # Patient type has NOT been collected yet (owner sequencing contract).
-    assert conversation.lead_is_new_patient is None
+    # Package A: patient type was collected FIRST (right after the reason).
+    assert conversation.lead_is_new_patient is not None
 
-    # Typed preference still advances the existing flow unchanged: the
-    # new/returning-patient question follows only AFTER the preference.
+    # Typed preference completes the time window; since patient type is already
+    # collected, this is the LAST field and the flow advances into the existing
+    # Calendar path rather than re-asking New/Returning here.
     r6 = send(db, client, conversation, "morning")
-    assert "new" in r6.reply.lower() and "returning" in r6.reply.lower()
-    assert "calendar_picker" not in (r6.meta or {})
+    assert "new or returning" not in r6.reply.lower()
+    assert (conversation.lead_time_window or "").endswith("morning")
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +278,8 @@ def test_unrelated_intake_prompt_does_not_advertise_stage(db, fakes):
     client = _gated_client(db)
     r1 = send(db, client, None, "I'd like to book a cleaning")
     conversation = _conversation_row(db, r1)
+    # Package A: New/Returning is asked first; answer it, then the name turn.
+    send(db, client, conversation, "new patient")
 
     r2 = send(db, client, conversation, "Casey Patient")
 

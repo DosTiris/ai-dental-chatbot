@@ -75,8 +75,11 @@ def _gated_client(db, office_hours):
 
 
 def _pre_date_question(db, client):
+    # Package A asks New/Returning first, so patient type is already captured by
+    # the time the date/time-window stage is reached; preseed it so 'skip email'
+    # still lands on the capture-first day/time-window question.
     return make_conversation(db, client, lead_time_window=None,
-                             lead_email_opt_out=False, lead_is_new_patient=None)
+                             lead_email_opt_out=False, lead_is_new_patient=True)
 
 
 def _today(client):
@@ -151,6 +154,14 @@ def _assert_no_side_effects(db, client, conversation, fakes, before):
     assert (conversation.booking_state or BookingState.NONE) == BookingState.NONE
 
 
+def _assert_no_booking_side_effect(db, client, conversation, fakes, before):
+    # Package A: completing the time window (the last field) routes into Calendar,
+    # so booking_state legitimately advances; assert only that NO appointment was
+    # booked and NO office/patient notification was sent on this turn.
+    assert _appointment(db, client, conversation) is None
+    assert _counters(fakes) == before
+
+
 def _day_turn(db, client, conversation, d, fakes, before):
     """Turn 1: the exact date ordinary message stores the canonical day-only
     value and asks the existing morning/afternoon question."""
@@ -164,12 +175,21 @@ def _day_turn(db, client, conversation, d, fakes, before):
 
 def _assert_completes(resp, conversation, expected_window, fakes, before,
                       db, client):
-    """A detail turn that must COMPLETE the window and advance — never the
-    generic rejection, and no booking side effect."""
+    """A detail turn that COMPLETES the window. Package A captures patient type
+    FIRST, so the time window is the LAST intake field: completing it routes into
+    the existing Calendar slot offering (booking_state -> slot selection,
+    server-owned slot actions) - never a trailing New/Returning question and
+    never a generic 'our team will reach out' handoff. Slot selection is still
+    required, so no appointment is booked and no notification is sent yet."""
     assert conversation.lead_time_window == expected_window
     assert GENERIC_REJECT not in resp.reply.lower()
-    assert "new or returning" in resp.reply.lower()   # existing next intake step
-    _assert_no_side_effects(db, client, conversation, fakes, before)
+    assert resp.meta.get("calendar_actions"), "completed intake must offer Calendar slots"
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert "our team will reach out" not in resp.reply.lower()
+    assert "new or returning" not in resp.reply.lower()
+    # No booking side effect yet: slot selection still required.
+    assert _appointment(db, client, conversation) is None
+    assert _counters(fakes) == before
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +224,7 @@ def test_A_weekday_complete_sequence(db, fakes):
     before = _counters(fakes)
 
     d = _next_weekday(client)
+    _seed_slot_on(db, client, d)
     _day_turn(db, client, conversation, d, fakes, before)
     r2 = send(db, client, conversation, "Morning")
     _assert_completes(r2, conversation, f"{_canonical(d)} morning",
@@ -267,7 +288,9 @@ def test_D_open_sunday_exact_time(db, fakes):
     r2 = send(db, client, conversation, "2pm")
     assert GENERIC_REJECT not in r2.reply.lower()
     assert conversation.lead_time_window == f"{_canonical(sun)} {detail}"
-    _assert_no_side_effects(db, client, conversation, fakes, before)
+    # The detail is accepted and completes intake, which routes into Calendar
+    # (no appointment/notification side effect on this turn).
+    _assert_no_booking_side_effect(db, client, conversation, fakes, before)
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +347,9 @@ def test_F_same_day_open_sunday(db, fakes, monkeypatch):
     r2 = send(db, client, conversation, "Afternoon")
     assert GENERIC_REJECT not in r2.reply.lower()
     assert conversation.lead_time_window == f"{_canonical(today)} afternoon"
-    _assert_no_side_effects(db, client, conversation, fakes, before)
+    # The detail is accepted and completes intake, which routes into Calendar
+    # (no appointment/notification side effect on this turn).
+    _assert_no_booking_side_effect(db, client, conversation, fakes, before)
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +404,7 @@ def _at_time_window(db, client):
     # unset: the conversation sits EXACTLY at the capture-first time_window
     # question (pre-turn stage == time_window).
     return make_conversation(db, client, lead_time_window=None,
-                             lead_email_opt_out=True, lead_is_new_patient=None)
+                             lead_email_opt_out=True, lead_is_new_patient=True)
 
 
 def test_valid_email_entry_emits_signal(db, fakes):

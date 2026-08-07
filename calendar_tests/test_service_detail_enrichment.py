@@ -69,7 +69,7 @@ def _assert_enriched_and_advanced(conversation, resp, expected_detail,
     assert chat_module.get_other_reason_detail(conversation) == expected_detail
     assert conversation.lead_reason_source_text == expected_source
     assert conversation.lead_reason_source_text != "I need an appointment"
-    assert "What’s your first name?" in resp.reply
+    assert "new or returning patient" in resp.reply  # Package A: patient type first
     assert resp.reply.count("?") == 1  # at most one required question
     _assert_no_reason_question(resp.reply)
 
@@ -116,6 +116,8 @@ def test_root_canal_does_not_loop_on_second_turn(db, fakes):
     client = make_client(db)
     conversation = _fresh_generic_lead(db, client)
     send(db, client, conversation, "I need a root canal")
+    # Package A: New/Returning is asked first once the reason is authoritative.
+    send(db, client, conversation, "new patient")
     resp2 = send(db, client, conversation, "Kevin")
     _assert_no_reason_question(resp2.reply)
     assert conversation.lead_name.strip() != ""
@@ -223,7 +225,7 @@ def test_cleaning_checkup_service_unchanged(db, fakes):
     resp = send(db, client, conversation, "I need a cleaning")
     # Distinct legacy bucket: captured by the pre-existing primary branch.
     assert conversation.lead_reason == "cleaning/checkup"
-    assert "first name" in resp.reply.lower()
+    assert "new or returning" in resp.reply.lower()  # Package A: patient type first
     assert resp.reply.count("?") == 1
 
 
@@ -248,7 +250,7 @@ def test_native_booking_does_not_begin_before_intake_complete(db, fakes):
     # Enrichment advances intake — it must not jump into the Calendar.
     assert resp.meta.get("mode") != "booking"
     assert (conversation.booking_state or "none") == BookingState.NONE
-    assert "What’s your first name?" in resp.reply
+    assert "new or returning patient" in resp.reply  # Package A: patient type first
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +279,8 @@ def test_other_flow_preserves_meaningful_detail_with_scheduling_token(db, fakes)
     # Exact source persisted; the meaningful detail is the derived detail.
     assert conversation.lead_reason_source_text == detail_text
     assert chat_module.get_other_reason_detail(conversation) == detail_text
-    # Intake advances to first name; the service menu is NOT repeated.
-    assert "What’s your first name?" in resp2.reply
+    # Package A: intake advances to New/Returning first; menu is NOT repeated.
+    assert "new or returning patient" in resp2.reply
     assert resp2.reply.count("?") == 1
     _assert_no_reason_question(resp2.reply)
     assert (conversation.booking_state or "none") == BookingState.NONE

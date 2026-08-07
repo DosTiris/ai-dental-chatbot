@@ -14,7 +14,7 @@
 # 10) OpenAI fallback for general questions
 
 from fastapi import APIRouter, HTTPException, Request, Depends, Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 from sqlalchemy import text, or_
 from openai import OpenAI
 from datetime import datetime, timedelta, timezone
@@ -97,6 +97,7 @@ from app.services.booking_conversation import (
     handle_booking_action,
     handle_booking_message,
     INTAKE_TIME_PREFERENCE_PROMPT,
+    INTAKE_TIME_PREFERENCE_TODAY_PROMPT,
     intake_date_stage_signal,
     intake_time_preference_stage_signal,
 )
@@ -3206,17 +3207,6 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     if not day_key:
         return None
 
-    req_minutes = _extract_exact_time_minutes_from_tw(time_window)
-    if req_minutes is None:
-        return None
-
-    hours = get_office_hours_struct(client)
-    row = hours.get(day_key, {}) or {}
-
-    is_open = bool(row.get("open", False))
-    start_minutes = _parse_hhmm_to_minutes(row.get("start"))
-    end_minutes = _parse_hhmm_to_minutes(row.get("end"))
-
     # Client-local now is read ONCE, and whether the request is really
     # today is delegated to the single explicit-date-aware owner. Comparing
     # weekday keys alone treated a Monday three weeks out as today whenever
@@ -3225,12 +3215,51 @@ def build_time_window_issue_reply(client: Client, time_window: Optional[str]) ->
     now_local = get_client_now(client)
     requested_is_today = time_window_is_client_today(time_window, now_local)
 
-    if not is_open:
+    # CLOSED-DAY server revalidation (all seven weekdays, one owner). Every
+    # patient date submission passes through this validator BEFORE any persist
+    # -- handle_time_window_capture and the pending-time-correction guard both
+    # call it -- so a day whose weekday is marked closed in the tenant's
+    # canonical office hours is rejected here, day-only or timed, via the single
+    # is_day_open office-hours owner. This runs BEFORE the exact-time bail
+    # below: previously a day-only value (req_minutes is None) returned None
+    # here and advanced, so a CLOSED Mon-Fri date reached the time-preference
+    # stage while only Sat/Sun were gated. There is no hard-coded Mon-Fri
+    # assumption and no second weekday parser -- _get_day_key_from_time_window
+    # resolves the day and is_day_open decides openness -- so an OPEN weekend
+    # day is accepted and a CLOSED weekday is rejected by exactly the same rule.
+    #
+    # BOTH pre-existing no-hours contracts are preserved for an office with NO
+    # configured office_hours struct (get_office_hours_struct returns {}):
+    #   * DAY-ONLY value  -> no closure rejection here (the day-only fallback:
+    #     an unconfigured office advertises no closures), exactly as before;
+    #   * EXACT day/time  -> is_day_open is False for every day of an empty
+    #     struct, so the request is rejected as closed -- byte-identical to the
+    #     pre-patch behavior, where the empty row produced is_open=False.
+    # The closure rule therefore engages when the day is not open AND either an
+    # exact time is present (pre-patch semantics, all tenants) or the tenant
+    # HAS configured hours (the day-only correction this patch adds).
+    office_hours_struct = get_office_hours_struct(client)
+    req_minutes = _extract_exact_time_minutes_from_tw(time_window)
+
+    if (
+        (req_minutes is not None or office_hours_struct)
+        and not is_day_open(client, day_key)
+    ):
         if requested_is_today:
             return "The office is closed today. What day/time works better for you?"
 
         day_name = DAY_LABELS_FULL.get(day_key, day_key.title())
         return f"The office is closed on {day_name}. What day/time works better for you?"
+
+    # Beyond this point an exact time is required to detect an outside-hours or
+    # already-passed-today issue; a day-only value on an OPEN day has no further
+    # issue here and proceeds to the normal capture path.
+    if req_minutes is None:
+        return None
+
+    row = office_hours_struct.get(day_key, {}) or {}
+    start_minutes = _parse_hhmm_to_minutes(row.get("start"))
+    end_minutes = _parse_hhmm_to_minutes(row.get("end"))
 
     if start_minutes is not None and end_minutes is not None:
         if req_minutes < start_minutes or req_minutes >= end_minutes:
@@ -4866,7 +4895,9 @@ def handle_time_window_capture(
                 saved,
             )
 
-        return ("Got it — do you prefer today morning or afternoon?", saved)
+        # Centralized constant (Finding 2) so the time-preference signal
+        # recognizes this same-day prompt as a closed prompt kind.
+        return (INTAKE_TIME_PREFERENCE_TODAY_PROMPT, saved)
 
     # If we just nudged for weekday morning/afternoon, interpret answer here
     if "weekday morning or afternoon" in last_t:
@@ -5596,19 +5627,62 @@ def looks_like_dental_symptom_request(user_text: str) -> bool:
     return any(term in t for term in symptom_terms)
 
 
-def build_symptom_appointment_start_reply(user_text: str) -> str:
-    t = _norm_text(user_text)
+# Package A v1.1.2 (ChatGPT audit round 2): TWO sentinels with distinct
+# meanings, each with ONE owner shared between the emitted wording
+# (build_symptom_appointment_start_reply below) and its history detector,
+# so wording and detection can never drift apart (Rule 3).
+#
+# SYMPTOM_TEAM_ACK is the courtesy acknowledgement sentence. It appears in
+# BOTH builder branches, so its presence in history proves ONLY that an
+# acknowledgement was delivered - it must never be treated as proof that the
+# urgent-care safety guidance was delivered (that conflation was the v1.1.1
+# release blocker: a mild-symptom acknowledgement could suppress the severe
+# guidance on later escalation).
+SYMPTOM_TEAM_ACK = "I can help send this to the team."
 
-    if any(term in t for term in ["swelling", "swollen", "bleeding", "infection", "abscess", "broken tooth", "cracked tooth", "chipped tooth"]):
+# SYMPTOM_URGENT_CARE_GUIDANCE is the EXACT existing urgent-care safety
+# sentence (byte-identical to the audited wording; emitted ONLY by the severe
+# branch). Its presence in assistant history is the authoritative
+# "safety delivered" marker: urgent-care wording previously emitted =>
+# safety delivered; a generic acknowledgement alone never marks it.
+SYMPTOM_URGENT_CARE_GUIDANCE = (
+    "If you have severe swelling, uncontrolled bleeding, trouble breathing/swallowing, or major trauma, please seek urgent care right away."
+)
+
+# Single owner of the severe-symptom vocabulary: the builder chooses its
+# branch with this predicate and receptionist_bypass_reply uses the SAME
+# predicate to decide which delivered-marker governs, so the two can never
+# disagree about what counts as severe.
+SEVERE_SYMPTOM_TERMS = (
+    "swelling", "swollen", "bleeding", "infection", "abscess",
+    "broken tooth", "cracked tooth", "chipped tooth",
+)
+
+
+def symptom_text_is_severe(user_text: str) -> bool:
+    # True when the normalized text names a severe dental symptom (the terms
+    # above). Owns the severe/generic split for the wording owner AND for the
+    # safety_pending decision in receptionist_bypass_reply.
+    t = _norm_text(user_text)
+    return any(term in t for term in SEVERE_SYMPTOM_TERMS)
+
+
+def build_symptom_appointment_start_reply(user_text: str, trailing: str = "What’s your first name?") -> str:
+    # Single owner of the symptom acknowledgement + urgent-care safety wording.
+    # `trailing` is the next intake question appended after the safety portion so
+    # the SAME safety text can front the patient-type question (Package A order:
+    # New/Returning is asked first) without maintaining a second copy of the
+    # safety wording. Default keeps the original name-first behavior.
+    if symptom_text_is_severe(user_text):
         return (
-            "I’m sorry you’re dealing with that. I can help send this to the team.\n\n"
-            "If you have severe swelling, uncontrolled bleeding, trouble breathing/swallowing, or major trauma, please seek urgent care right away.\n\n"
-            "What’s your first name?"
+            "I’m sorry you’re dealing with that. " + SYMPTOM_TEAM_ACK + "\n\n"
+            + SYMPTOM_URGENT_CARE_GUIDANCE + "\n\n"
+            + trailing
         )
 
     return (
-    "I’m sorry you’re dealing with that dental concern. I can help send this to the team.\n\n"
-    "What’s your first name?"
+    "I’m sorry you’re dealing with that dental concern. " + SYMPTOM_TEAM_ACK + "\n\n"
+    + trailing
 )
 
 
@@ -6696,6 +6770,92 @@ def last_assistant_asked_for_name(db: Session, conversation_id: uuid.UUID) -> bo
     ]
     return any(p in t for p in name_prompts)
 
+
+def last_assistant_asked_patient_type(db: Session, conversation_id: uuid.UUID) -> bool:
+    """True when the most recent assistant message asked the New/Returning
+    (patient type) intake question. Package A asks this question FIRST, right
+    after the reason, and for a symptom opener it is fronted by the urgent-care
+    safety wording - which mentions dental terms (swelling, etc.) that would
+    otherwise trip the service-offer clarification owner. This lets that owner
+    stand down so the New/Returning answer reaches the patient-type capture,
+    mirroring the existing last_assistant_asked_for_name() guard."""
+    last_msg = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id, Message.role == "assistant")
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+    if not last_msg:
+        return False
+    t = _norm_text(last_msg.content or "")
+    if not t:
+        return False
+    return "new or returning patient" in t or "are you a new patient" in t
+
+
+def _assistant_history_contains(conversation, sentinel_text) -> bool:
+    """
+    Purpose: Report whether ANY stored assistant message of THIS conversation
+             contains the normalized sentinel_text. Single owner of the
+             history scan used by the two delivered-markers below.
+    Inputs:  the Conversation ORM instance handled by the current request and
+             the exact sentinel wording (a module constant, never a rewrite).
+    Returns: True when a prior assistant message contains the sentinel;
+             False otherwise, and False whenever no live SQLAlchemy session
+             is attached (object_session(...) is None) - the fail-safe
+             direction: "not delivered" can at worst repeat wording, never
+             omit first-contact guidance.
+    Database effects: read-only Message query on the session that loaded the
+             conversation (sqlalchemy.orm.object_session) - the same
+             conversation-history source the existing S10
+             last_assistant_asked_* guards read; no new session is opened
+             and nothing is written.
+    Possible failures: none raised here; a detached instance simply reads as
+             not-delivered.
+    """
+    db = object_session(conversation)
+    if db is None:
+        return False
+    needle = _norm_text(sentinel_text)
+    prior = (
+        db.query(Message)
+        .filter(
+            Message.conversation_id == conversation.id,
+            Message.role == "assistant",
+        )
+        .all()
+    )
+    for msg in prior:
+        if needle in _norm_text(msg.content or ""):
+            return True
+    return False
+
+
+def symptom_safety_already_delivered(conversation) -> bool:
+    """
+    True when the urgent-care SAFETY guidance has already been delivered in
+    this conversation - detected via SYMPTOM_URGENT_CARE_GUIDANCE, the exact
+    wording the severe branch of build_symptom_appointment_start_reply emits.
+
+    Package A v1.1.2 (ChatGPT audit round 2): the v1.1/v1.1.1 detector keyed
+    on SYMPTOM_TEAM_ACK, which BOTH builder branches emit, so a mild-symptom
+    acknowledgement wrongly read as "safety delivered" and could suppress the
+    urgent-care guidance on later escalation to a severe symptom. The rule is
+    now: urgent-care wording previously emitted => safety delivered; a
+    generic acknowledgement alone NEVER marks it.
+    """
+    return _assistant_history_contains(conversation, SYMPTOM_URGENT_CARE_GUIDANCE)
+
+
+def symptom_ack_already_delivered(conversation) -> bool:
+    """
+    True when the courtesy symptom acknowledgement (SYMPTOM_TEAM_ACK, emitted
+    by BOTH builder branches) has already been delivered. Governs ONLY the
+    once-per-conversation fronting of the GENERIC (non-severe) reply so mild
+    flows do not repeat the acknowledgement; it plays no part in deciding
+    whether urgent-care safety was delivered.
+    """
+    return _assistant_history_contains(conversation, SYMPTOM_TEAM_ACK)
 
 def last_assistant_asked_intake_question(db: Session, conversation_id: uuid.UUID) -> bool:
     """
@@ -7942,12 +8102,66 @@ def capture_first_time_window_pending(conversation: Conversation, client: Option
     return not time_window_is_complete(tw_val)
 
 
+def capture_first_short_symptom_time_window_pending(conversation: Conversation, client: Optional[Client] = None) -> bool:
+    """
+    Purpose: PURE, side-effect-free predicate (Rule 3, co-owned with the
+             short-symptom branch of receptionist_bypass_reply) that is True
+             iff the SHORT-SYMPTOM intake is at its day/time-window
+             question: reason, name and phone captured, the short-symptom
+             flow IS in use, and the time window not yet complete. Mirror of
+             capture_first_time_window_pending for the short-symptom branch,
+             which (unlike the standard path) skips the email step. Lets the
+             route prove a genuine transition INTO the short-symptom date
+             stage WITHOUT invoking the active bypass owner.
+    Inputs:  conversation, client - persisted rows only. No user_text.
+    Returns: bool.
+    Side effects: NONE - no classifier, reason mapper, AI call,
+             notification, database write, mutation, or call to
+             receptionist_bypass_reply.
+    """
+    if not conversation_has_specific_lead_reason(conversation):
+        return False
+    if not (conversation.lead_name or "").strip():
+        return False
+    if not (conversation.lead_phone or "").strip():
+        return False
+    if not conversation_uses_short_symptom_flow(conversation):
+        return False
+    tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
+    return not time_window_is_complete(tw_val)
+
+
 def receptionist_bypass_reply(conversation: Conversation, client: Optional[Client] = None) -> Tuple[Optional[str], Optional[str]]:
     has_reason = conversation_has_specific_lead_reason(conversation)
     has_name = bool((conversation.lead_name or "").strip())
     has_phone = bool((conversation.lead_phone or "").strip())
     has_email = bool((conversation.lead_email or "").strip())
     np_known = getattr(conversation, "lead_is_new_patient", None) is not None
+    # Package A v1.1 (audit finding #1): ONE extraction of the symptom-flavored
+    # reason text and ONE emission decision, shared by the patient-type branch
+    # and the name branch below (Rule 3). v1.1.2 (audit round 2): the decision
+    # is governed by TWO distinct delivered-markers, each keyed to the exact
+    # wording its branch emits. A SEVERE reason is pending until the
+    # urgent-care guidance itself (SYMPTOM_URGENT_CARE_GUIDANCE) has been
+    # delivered - a prior GENERIC acknowledgement never suppresses it, so
+    # FIRST CONTACT WITH THE SEVERE SYMPTOM always carries the guidance,
+    # including mild-to-severe escalation, and the guidance appears EXACTLY
+    # ONCE once delivered. A NON-SEVERE reason is pending until the courtesy
+    # acknowledgement (SYMPTOM_TEAM_ACK) has been delivered, keeping mild
+    # flows at one acknowledgement as audited. Patient type unknown or
+    # already authoritative makes no difference to either guarantee.
+    symptom_source_text = (
+        getattr(conversation, "lead_reason_source_text", None)
+        or getattr(conversation, "lead_reason_detail", None)
+        or getattr(conversation, "lead_reason", None)
+        or ""
+    )
+    symptom_opener = looks_like_dental_symptom_request(symptom_source_text)
+    symptom_severe = symptom_text_is_severe(symptom_source_text)
+    safety_pending = symptom_opener and (
+        (symptom_severe and not symptom_safety_already_delivered(conversation))
+        or ((not symptom_severe) and not symptom_ack_already_delivered(conversation))
+    )
     tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
     tw_known = time_window_is_complete(tw_val)
 
@@ -7971,6 +8185,26 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
             "reason",
         )
 
+    # Package A intake identity: once the appointment reason is authoritative,
+    # New/Returning is the FIRST ordinary intake question - before name / phone /
+    # email / scheduling and before the priority-flavored demographics below.
+    # Idempotent: skipped when lead_is_new_patient is already known (preseeded or
+    # captured). For a recognized dental-symptom opener the EXISTING urgent-care
+    # safety wording is shown on this first turn, fronting the patient-type
+    # question (single safety-text owner, reused via `trailing`), so safety is
+    # never delayed to a later turn. Emergency / life-threatening owners run
+    # upstream and are unaffected.
+    if not np_known:
+        pt_name = (conversation.lead_name or "").strip()
+        pt_prefix = f"{pt_name}, " if pt_name else ""
+        patient_type_question = f"One quick question — {pt_prefix}are you a new or returning patient?"
+        if safety_pending:
+            return (
+                build_symptom_appointment_start_reply(symptom_source_text, trailing=patient_type_question),
+                "new_patient",
+            )
+        return (patient_type_question, "new_patient")
+
     # Priority non-emergency flow: keep the urgent-flavored name/phone
     # prompts, but do not bypass the remaining required capture-first fields
     # (email or skip, complete time window, new/returning). ASAP marks the
@@ -7985,14 +8219,15 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
             return (build_priority_handoff_reply(conversation), "complete")
         # Fall through to the standard remaining-field questions below.
     if not has_name:
-        symptom_source_text = (
-            getattr(conversation, "lead_reason_source_text", None)
-            or getattr(conversation, "lead_reason_detail", None)
-            or getattr(conversation, "lead_reason", None)
-            or ""
-        )
-
-        if looks_like_dental_symptom_request(symptom_source_text):
+        # Package A v1.1 (audit finding #1): FIRST CONTACT with a severe-symptom
+        # reason must carry the urgent-care guidance even when the patient type
+        # was already authoritative (preseeded True/False, or resumed intake
+        # with the name still missing) and therefore NO patient-type turn ever
+        # showed it. safety_pending (computed once above) is the single
+        # delivered-once decision: after the guidance has been stored on the
+        # patient-type turn - or on this turn - it reads False, so the wording
+        # appears EXACTLY ONCE and the plain name question is used instead.
+        if safety_pending:
             return (build_symptom_appointment_start_reply(symptom_source_text), "name")
 
         return ("No problem — I can help you schedule an appointment. What’s your first name?", "name")
@@ -8000,7 +8235,12 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
         return (f"Thanks {conversation.lead_name}! What’s the best phone number to reach you?", "phone")
 
     if short_symptom_flow:
-        if not tw_known:
+        # Reuse the single short-symptom pending predicate so the field
+        # order lives in one place; the route uses the same predicate to
+        # prove a genuine transition into this stage. Equivalent to the
+        # previous "not tw_known" here (reason/name/phone and
+        # short_symptom_flow are already true at this point).
+        if capture_first_short_symptom_time_window_pending(conversation, client):
             if tw_val in {"Weekday morning", "Weekday afternoon"}:
                 return ("Thanks — which weekday works best (Mon–Fri)?", "time_window")
             if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
@@ -8028,12 +8268,8 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
         return (f"Great—thanks{name_part}. What day/time window works best (e.g., Tue morning)?", "time_window")
-    if not np_known:
-        name = (conversation.lead_name or "").strip()
-        prefix = f"{name}, " if name else ""
-
-        return (f"One quick question — {prefix}are you a new or returning patient?", "new_patient")
-
+    # New/Returning is asked first now (right after the reason, above); it is
+    # always known here, so the tail only reports completion.
     return (f"Thanks! We’ve got your request—our team will contact you shortly to confirm the appointment time.")
 
 def priority_intake_is_complete(conversation: Conversation) -> bool:
@@ -8167,6 +8403,13 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     if not conversation_has_specific_lead_reason(conversation):
         return build_service_menu_prompt(client)
 
+    # Package A intake identity: New/Returning is asked first, right after the
+    # authoritative reason and before name/phone/email/scheduling. Idempotent:
+    # skipped once lead_is_new_patient is known. Kept in lockstep with
+    # receptionist_bypass_reply so the two prompt owners never disagree on order.
+    if getattr(conversation, "lead_is_new_patient", None) is None:
+        return f"One quick question — {name_prefix}are you a new or returning patient?"
+
     if not (conversation.lead_name or "").strip():
         return "What’s your first name?"
     if not (conversation.lead_phone or "").strip():
@@ -8198,8 +8441,7 @@ def _next_intake_prompt(client: Client, conversation) -> str:
             return INTAKE_TIME_PREFERENCE_PROMPT
         return f"What day/time works best for you? {build_time_window_examples(client, prefer_weekdays=False)}"
 
-    if getattr(conversation, "lead_is_new_patient", None) is None:
-        return f"One quick question — {name_prefix}are you a new or returning patient?"
+    # New/Returning is asked first now (above); the tail only reports completion.
     return "Thanks — our team will reach out to confirm your appointment."
 
 def _emergency_meta(label="Call the office now") -> dict:
@@ -8212,6 +8454,66 @@ def _emergency_meta(label="Call the office now") -> dict:
         "booking_cta_label": label,
         
     }
+def _complete_and_route_normal_lead(db, client, conversation, user_text, office_phone, show_start_over):
+    """Single owner (Rule 3) of the completed-normal-intake -> Calendar/handoff
+    routing transition. Marks the lead completed WITHOUT notifying, hands it to
+    the routing owner, and returns the routed Calendar/handoff response; when
+    routing declines (Calendar disabled / not handled) it sends the generic
+    completed-lead office notification exactly once and returns the generic
+    completion reply. Callers invoke this ONLY on the turn normal intake
+    transitions incomplete -> complete and only when lead_status is not already
+    "completed", so a completed lead routes at most once regardless of which
+    intake field happened to be last. Internal helper: it is intentionally
+    UNDECORATED (no FastAPI route); only chat() owns the POST /chat route."""
+    # Notification-dedupe patch: mark completed WITHOUT notifying;
+    # the routing owner decides timing (routine native Calendar
+    # sends no generic lead alert; priority and external notify
+    # inside the routing owner; capture-only falls through to the
+    # caller send below).
+    mark_lead_completed_silently(db, conversation)
+
+    routed = route_completed_lead(db, client, conversation, user_text, office_phone)
+    if routed is not None:
+        return _routed_completion_response(db, conversation, routed, show_start_over)
+
+    # Routing declined ownership (Calendar disabled / not handled):
+    # the generic completed-lead notification is the caller's job,
+    # exactly as before the dedupe patch (per-channel idempotent).
+    lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
+        db,
+        client,
+        conversation,
+        "NORMAL PATIENT TYPE COMPLETION NOTIFY TRIGGERED",
+    )
+
+    reply_text = build_normal_lead_complete_reply(conversation)
+
+    # S5: wording reflects THIS turn's real per-channel results —
+    # the values already returned above; no second notification call.
+    reply_text = apply_notification_outcome_to_completion_reply(
+        reply_text,
+        lead_email_sent,
+        lead_sms_sent,
+    )
+
+    db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
+    db.commit()
+
+    return ChatResponse(
+        reply=reply_text,
+        conversation_id=str(conversation.id),
+        meta={
+            "faq_match": False,
+            "mode": "lead_complete_after_patient_type",
+            "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
+            "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
+            "lead_email_error": lead_email_error,
+            "lead_sms_error": lead_sms_error,
+            "show_start_over": show_start_over,
+        },
+    )
+
+
 # =========================================================
 # The /chat endpoint
 # =========================================================
@@ -8252,6 +8554,20 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             )
         except Exception:
             conversation = None
+
+    # Completion-routing decoupling: capture whether normal intake was ALREADY
+    # complete at the START of this turn, before any field captured this turn.
+    # The intake -> completed-lead / Calendar-booking routing gate below fires
+    # ONLY on the turn intake TRANSITIONS incomplete -> complete, so routing no
+    # longer depends on which specific final field (patient type, time window,
+    # email skip, ...) happened to complete it. A conversation already complete
+    # before this turn is never re-routed here; exactly-once is additionally
+    # guarded by lead_status == "completed" at the gate. A brand-new
+    # conversation (still None here) is correctly treated as not-yet-complete.
+    intake_complete_before_turn = (
+        conversation is not None
+        and normal_lead_capture_is_complete(conversation)
+    )
 
     # C1-C structured-action execution lane (replaces the C1-B transport-
     # only rejection at this SAME pre-persistence location). An action must
@@ -8558,6 +8874,7 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         and service_offer_name
         and not accepted_schedule
         and not last_assistant_asked_for_name(db, conversation.id)
+        and not last_assistant_asked_patient_type(db, conversation.id)
     ):
         offered_service_for_clarification = last_assistant_offered_library_service(db, conversation.id)
 
@@ -8583,6 +8900,31 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         service_reason_now = "other"
         question_mode = False   # force it back into intake
     is_scheduling_now = True if accepted_schedule else is_scheduling_intent(user_text)
+
+    # NIGHT-GUARD APPOINTMENT COLLISION FIX (Rule 3 -- computed ONCE; the
+    # authoritative service matcher owns the reason-capture stage). This turn is
+    # a recognized service selection that OWNS the reason slot when the matcher
+    # resolved a real appointment service (service_reason_now, not "other") AND
+    # the reason slot is still open -- i.e. conversation_has_specific_lead_reason
+    # is False, meaning the stored reason is missing OR only the replaceable
+    # generic "appointment request" fallback. That reuses the existing reason-
+    # ownership owner (conversation_has_specific_lead_reason), so both the fresh
+    # path and the "Book Appointment" -> "Night Guard / Teeth Grinding" path
+    # (where lead_reason is already the generic fallback) are protected without
+    # any Night Guard label exception. When true, the two time-window capture
+    # owners below defer to service-reason capture, so an incidental token --
+    # "night" inside "night guard" canonicalizing to "evening" -- never becomes
+    # lead_time_window and the appointment reason is never dropped. A bare time
+    # preference ("evening", "I prefer evening") matches no service; an already
+    # specific/Other reason makes this False, so ordinary intake ordering,
+    # date-stage time capture, and every other service are unchanged. A genuine
+    # service-plus-time message keeps its reason here and the time preference is
+    # handled through the existing authoritative order.
+    service_selection_owns_this_turn = (
+        bool(service_reason_now)
+        and service_reason_now != "other"
+        and not conversation_has_specific_lead_reason(conversation)
+    )
 
     has_any_lead_data = bool(
         (conversation.lead_reason or "").strip()
@@ -8996,12 +9338,20 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     # unconditionally so a later in_intake_mode escalation cannot leave it
     # unset; it is only USED inside the bypass time_window branch.
     pre_time_window_pending = capture_first_time_window_pending(conversation, client)
+    # Finding 1: capture the SHORT-SYMPTOM date-stage pending fact too,
+    # before this turn's mutations, via the pure predicate (no active-owner
+    # call). Exactly one of the two predicates can be True (standard vs
+    # short-symptom are mutually exclusive by short_symptom_flow).
+    pre_short_symptom_time_window_pending = capture_first_short_symptom_time_window_pending(conversation, client)
 
     if (
         not booking_dialog_active(conversation)
         and in_intake_mode
         and not time_window_is_complete(getattr(conversation, "lead_time_window", None))
         and canonicalize_time_window_for_storage(client, user_text)
+        # Night-guard collision fix: a service selection that still owns the
+        # reason slot is not a bare time-window answer (predicate defined once).
+        and not service_selection_owns_this_turn
     ):
         guard_last_msg = (
             db.query(Message)
@@ -9046,6 +9396,26 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                     db.add(conversation)
                     db.commit()
                     db.refresh(conversation)
+
+                # Completion-routing decoupling (standard flow): if THIS
+                # time-window turn made NORMAL intake complete (patient type
+                # captured earlier, so the time window was the last field),
+                # route into the SAME completed-lead / Calendar owner the
+                # patient-type-last turn uses, instead of returning the plain
+                # capture reply. Field-agnostic: routing no longer depends on
+                # patient type being last. Short-symptom completion keeps its
+                # own dedicated priority block below (excluded here). Exactly-
+                # once is guarded by the incomplete -> complete transition and
+                # lead_status.
+                if (
+                    not conversation_uses_short_symptom_flow(conversation)
+                    and not intake_complete_before_turn
+                    and normal_lead_capture_is_complete(conversation)
+                    and (conversation.lead_status or "").strip().lower() != "completed"
+                ):
+                    return _complete_and_route_normal_lead(
+                        db, client, conversation, user_text, office_phone, show_start_over
+                    )
 
                 if (
                     conversation_uses_short_symptom_flow(conversation)
@@ -10415,7 +10785,12 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
     outside_hours_reply = None
     bypass_stage = None
 
-    if not asked_for_question:
+    # Night-guard collision fix: when this turn's message is a service selection
+    # that owns the reason slot (predicate defined once above), do NOT also
+    # capture a time window from it here -- that is how "night" in "night guard"
+    # leaked into lead_time_window. The time preference is handled later through
+    # the existing intake order.
+    if not asked_for_question and not service_selection_owns_this_turn:
         tw_reply, tw_updated = handle_time_window_capture(client, conversation, user_text, last_text)
         if tw_updated:
             updated = True
@@ -10478,55 +10853,16 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         
     if (
         normal_lead_capture_is_complete(conversation)
-        and detect_new_patient_flag(user_text) is not None
+        and not intake_complete_before_turn
         and (conversation.lead_status or "").strip().lower() != "completed"
     ):
-        # Notification-dedupe patch: mark completed WITHOUT notifying;
-        # the routing owner decides timing (routine native Calendar
-        # sends no generic lead alert; priority and external notify
-        # inside the routing owner; capture-only falls through to the
-        # caller send below).
-        mark_lead_completed_silently(db, conversation)
-
-        routed = route_completed_lead(db, client, conversation, user_text, office_phone)
-        if routed is not None:
-            return _routed_completion_response(db, conversation, routed, show_start_over)
-
-        # Routing declined ownership (Calendar disabled / not handled):
-        # the generic completed-lead notification is the caller's job,
-        # exactly as before the dedupe patch (per-channel idempotent).
-        lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
-            db,
-            client,
-            conversation,
-            "NORMAL PATIENT TYPE COMPLETION NOTIFY TRIGGERED",
-        )
-
-        reply_text = build_normal_lead_complete_reply(conversation)
-
-        # S5: wording reflects THIS turn's real per-channel results —
-        # the values already returned above; no second notification call.
-        reply_text = apply_notification_outcome_to_completion_reply(
-            reply_text,
-            lead_email_sent,
-            lead_sms_sent,
-        )
-
-        db.add(Message(conversation_id=conversation.id, role="assistant", content=reply_text))
-        db.commit()
-
-        return ChatResponse(
-            reply=reply_text,
-            conversation_id=str(conversation.id),
-            meta={
-                "faq_match": False,
-                "mode": "lead_complete_after_patient_type",
-                "lead_email_sent": bool(getattr(conversation, "lead_email_sent", False)),
-                "lead_sms_sent": bool(getattr(conversation, "lead_sms_sent", False)),
-                "lead_email_error": lead_email_error,
-                "lead_sms_error": lead_sms_error,
-                "show_start_over": show_start_over,
-            },
+        # Completion-routing decoupling: normal intake TRANSITIONED
+        # incomplete -> complete this turn (guarded above by
+        # not intake_complete_before_turn) and is not already completed, so
+        # hand off to the single completion-routing owner. Field-agnostic:
+        # this fires for whichever intake field happened to be last.
+        return _complete_and_route_normal_lead(
+            db, client, conversation, user_text, office_phone, show_start_over
         )   
 
     if tw_reply or outside_hours_reply:
@@ -11137,9 +11473,22 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
             # service helper owns the gate + prompt proof; the route supplies
             # only this closed transition fact (no user_text parsing, no
             # field-order rules duplicated here).
-            entered_time_window_stage = pre_time_window_pending is False
+            # Closed kind + entered fact from the pure stage predicates
+            # (no user_text parsing, no field-order duplication). "standard"
+            # for the normal capture-first flow, "short_symptom" for the
+            # short-symptom/urgent flow; the two are mutually exclusive.
+            # Entering means the matching predicate was False pre-turn.
+            if capture_first_time_window_pending(conversation, client):
+                _date_stage_kind = "standard"
+                _entered_date_stage = pre_time_window_pending is False
+            elif capture_first_short_symptom_time_window_pending(conversation, client):
+                _date_stage_kind = "short_symptom"
+                _entered_date_stage = pre_short_symptom_time_window_pending is False
+            else:
+                _date_stage_kind = None
+                _entered_date_stage = False
             date_signal = intake_date_stage_signal(
-                client, bypass_text, entered_time_window_stage
+                client, bypass_text, _entered_date_stage, _date_stage_kind
             )
             if date_signal is not None:
                 meta["calendar_picker"] = date_signal

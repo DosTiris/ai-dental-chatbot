@@ -420,9 +420,12 @@ def test_closed_explicit_saturday_with_detail_is_rejected(office):
 
 def test_closed_explicit_saturday_day_only_is_rejected_by_the_capture_owner(
         office, monkeypatch):
-    """Day-only weekend values are caught by handle_time_window_capture,
-    which used exact-string membership and stopped matching once a value
-    could carry a date."""
+    """Day-only weekend values are caught by handle_time_window_capture.
+    The closed-day server revalidation now routes this rejection through the
+    single office-hours owner (is_day_open, via build_time_window_issue_reply):
+    the office fixture configures Saturday closed, so the truthful closed-day
+    correction is returned instead of the older weekend-only "choose a weekday"
+    wording, and nothing is persisted."""
     monkeypatch.setattr(chat_module, "is_saturday_open", lambda c: False)
     monkeypatch.setattr(chat_module, "is_sunday_closed", lambda c: True)
     monkeypatch.setattr(chat_module, "build_time_window_examples",
@@ -435,7 +438,8 @@ def test_closed_explicit_saturday_day_only_is_rejected_by_the_capture_owner(
     )
 
     assert saved is False
-    assert "weekday" in (reply or "").lower()
+    reply_l = (reply or "").lower()
+    assert "closed" in reply_l and "saturday" in reply_l
     assert (conversation.lead_time_window or "") == ""
 
 

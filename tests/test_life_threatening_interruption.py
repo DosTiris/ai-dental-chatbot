@@ -86,7 +86,14 @@ if "fastapi" not in sys.modules:
 
 if "sqlalchemy" not in sys.modules:
     _module("sqlalchemy", text=lambda s: s, or_=lambda *a, **k: None)
-    _module("sqlalchemy.orm", Session=object)
+    # V7 (Package A v1.1 compatibility - owner-run collection ImportError):
+    # the real app.routes.chat now also imports object_session for the
+    # symptom-safety delivered-once guard. The inert None return keeps this
+    # harness's semantics: "no live ORM session" reads as not-delivered,
+    # the guard's documented fail-safe direction, and no emergency scenario
+    # in this suite reaches that guard anyway (emergency owners answer
+    # upstream of receptionist_bypass_reply).
+    _module("sqlalchemy.orm", Session=object, object_session=lambda obj: None)
 
 if "openai" not in sys.modules:
     class _FakeOpenAI:
@@ -255,10 +262,10 @@ def _unexpected_calendar_action(*args, **kwargs):
     )
 
 
-def _fake_intake_date_stage_signal(client, reply_text, entered_time_window_stage):
-    # V4.3.1 (capture-first date-signal compatibility): inert fail-closed
-    # stand-in with the EXACT production call shape
-    # (client, reply_text, entered_time_window_stage). Returns None, so NO
+def _fake_intake_date_stage_signal(client, reply_text, entered_date_stage, date_stage_kind):
+    # V4.4.1 (universal date-signal compatibility): inert fail-closed stand-in
+    # with the EXACT current production call shape
+    # (client, reply_text, entered_date_stage, date_stage_kind). Returns None, so NO
     # calendar_picker metadata is ever emitted in this emergency-isolation
     # harness; it performs no mutation and makes no classifier, AI, database,
     # availability, notification, or active booking-owner call. Calendar
@@ -275,6 +282,12 @@ _module(
     # tests runs. The value mirrors the real service constant.
     INTAKE_TIME_PREFERENCE_PROMPT=(
         "Got it — do you prefer morning or afternoon?"
+    ),
+    # V4.4.1: chat.py now ALSO imports the same-day/today wording owner
+    # INTAKE_TIME_PREFERENCE_TODAY_PROMPT at module import time; expose the
+    # inert constant or collection fails before ANY of the 46 emergency tests.
+    INTAKE_TIME_PREFERENCE_TODAY_PROMPT=(
+        "Got it — do you prefer today morning or afternoon?"
     ),
     # V6: chat.py imports BOTH new names; Python resolves the import
     # list sequentially, so the constant alone still fails on this one.
@@ -1002,6 +1015,10 @@ class TestFullBrowserSequencePersistentStop(unittest.TestCase):
         # 1) begin cleaning/checkup intake
         _, _, n1, _ = run_chat("I'd like to schedule a cleaning", db=db)
         n1.assert_not_called()
+
+        # Package A: New/Returning is asked first, right after the reason;
+        # answer it before the name so the name turn advances as before.
+        run_chat("new patient", db=db)
 
         # 2) capture name Kevin; reach phone stage
         resp2, _, n2, _ = run_chat("Kevin", db=db)

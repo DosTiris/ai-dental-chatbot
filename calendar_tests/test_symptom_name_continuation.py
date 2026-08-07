@@ -43,6 +43,9 @@ from calendar_tests.test_chat_integration import (  # noqa: F401
 # The exact staging opener and the exact staging name reply.
 SYMPTOM_OPENER = "I have severe tooth pain and swelling"
 NAME_REPLY = "Kyle"
+# Package A asks New/Returning first (right after the symptom reason), before
+# the name; answer it so the flow advances to the name turn.
+PATIENT_TYPE_REPLY = "new"
 
 # The safety sentence carried by build_symptom_appointment_start_reply() for
 # swelling / bleeding / infection symptoms. Repeating it was the visible
@@ -110,14 +113,17 @@ def test_exact_staging_transcript_symptom_then_name_then_phone(db, fakes):
 
     first = send(db, client, conversation, SYMPTOM_OPENER)
 
-    assert "first name" in first.reply.lower()
+    # Package A: the FIRST symptom turn carries the urgent-care safety guidance
+    # AND asks New/Returning (safety is not delayed to a later turn).
     assert SAFETY_SENTENCE in first.reply
+    assert "new or returning" in first.reply.lower()
 
-    second = send(db, client, conversation, NAME_REPLY)
+    send(db, client, conversation, PATIENT_TYPE_REPLY)      # answer patient type
+    named = send(db, client, conversation, NAME_REPLY)      # now the name turn
 
     # The name-capture owner produced this turn, not the clarification owner.
-    assert second.meta.get("mode") == "bypass"
-    assert "best phone number" in second.reply
+    assert named.meta.get("mode") == "bypass"
+    assert "best phone number" in named.reply
 
 
 def test_lead_name_persisted_immediately_after_name_turn(db, fakes):
@@ -129,6 +135,7 @@ def test_lead_name_persisted_immediately_after_name_turn(db, fakes):
     send(db, client, conversation, SYMPTOM_OPENER)
     assert (conversation.lead_name or "") == ""
 
+    send(db, client, conversation, PATIENT_TYPE_REPLY)     # patient type first
     send(db, client, conversation, NAME_REPLY)
 
     assert conversation.lead_name == "Kyle"
@@ -143,6 +150,7 @@ def test_phone_prompt_includes_captured_name(db, fakes):
     conversation = empty_lead_conversation(db, client)
 
     send(db, client, conversation, SYMPTOM_OPENER)
+    send(db, client, conversation, PATIENT_TYPE_REPLY)     # patient type first
     second = send(db, client, conversation, NAME_REPLY)
 
     assert "Kyle" in second.reply
@@ -160,6 +168,7 @@ def test_symptom_safety_introduction_appears_exactly_once(db, fakes):
     conversation = empty_lead_conversation(db, client)
 
     send(db, client, conversation, SYMPTOM_OPENER)
+    send(db, client, conversation, PATIENT_TYPE_REPLY)     # patient type first
     send(db, client, conversation, NAME_REPLY)
     send(db, client, conversation, "516-555-0143")
 
@@ -211,6 +220,7 @@ def test_no_spurious_just_to_confirm_turn(db, fakes):
     conversation = empty_lead_conversation(db, client)
 
     send(db, client, conversation, SYMPTOM_OPENER)
+    send(db, client, conversation, PATIENT_TYPE_REPLY)     # patient type first
     send(db, client, conversation, NAME_REPLY)
 
     for content in assistant_messages(db, conversation):

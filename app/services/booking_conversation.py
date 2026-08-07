@@ -166,6 +166,10 @@ def _picker_stage_signal(settings, stage) -> Optional[dict]:
 # other intake prompt produces different text and therefore never
 # carries the signal.
 INTAKE_TIME_PREFERENCE_PROMPT = "Got it — do you prefer morning or afternoon?"
+# Same-day/today variant (Finding 2). The same-day intake owner returns
+# this exact wording; centralizing it here keeps a single source of truth
+# so the time-preference signal recognizes it as a closed prompt kind.
+INTAKE_TIME_PREFERENCE_TODAY_PROMPT = "Got it — do you prefer today morning or afternoon?"
 
 
 def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
@@ -187,7 +191,11 @@ def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
              stays byte-identical to today.
     Database effects: none. External effects: none.
     """
-    if reply_text != INTAKE_TIME_PREFERENCE_PROMPT:
+    # Recognize BOTH the generic and the same-day/today time-preference
+    # prompt constants (Finding 2). Exact-constant match only — never a
+    # "morning or afternoon" substring — so the stage is proven by the
+    # owner's emitted prompt, not by word inference.
+    if reply_text not in (INTAKE_TIME_PREFERENCE_PROMPT, INTAKE_TIME_PREFERENCE_TODAY_PROMPT):
         return None
     settings = load_calendar_settings(client)
     return _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
@@ -206,15 +214,21 @@ def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
 # raw S3 f-string; a pinning test asserts the two stay byte-identical, and
 # unifying them is recorded as deferred drift.
 INTAKE_DATE_WINDOW_PROMPT_TAIL = "What day/time window works best (e.g., Tue morning)?"
+# Short-symptom variant (Finding 1): the short-symptom branch omits the
+# "(e.g., Tue morning)" example, so its date-selection prompt ends here.
+# Distinct suffix from the standard tail (which ends with the example),
+# so the two kinds never cross-match.
+INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL = "What day/time window works best?"
 
 
-def intake_date_stage_signal(client, reply_text, entered_time_window_stage) -> Optional[dict]:
+def intake_date_stage_signal(client, reply_text, entered_date_stage, date_stage_kind) -> Optional[dict]:
     """
-    Purpose: single owner (Rule 3) of the C2-A.3 stage-signal decision for
-             the ROUTE-level capture-first (mode "bypass") day/time-window
-             prompt. chat.py merges the returned dict into its EXISTING
-             bypass meta; the route never re-implements the gate, the
-             vocabulary, or Boolean parsing. Analogous to
+    Purpose: single owner (Rule 3) of the C2-A.3 date-stage-signal decision
+             for EVERY route-level capture-first (mode "bypass")
+             day/time-window prompt — the STANDARD path and the
+             SHORT-SYMPTOM path. chat.py merges the returned dict into its
+             EXISTING bypass meta; the route never re-implements the gate,
+             the vocabulary, or Boolean parsing. Analogous to
              intake_time_preference_stage_signal.
     Inputs:  client - tenant row (calendar settings loaded here so the
              route stays thin); reply_text - the FINAL bypass reply text
@@ -247,9 +261,22 @@ def intake_date_stage_signal(client, reply_text, entered_time_window_stage) -> O
     # Emit ONLY on a genuine transition INTO time_window (closed fact from
     # the route). An invalid date that re-asks the same prompt keeps the
     # stage unchanged and must stay signal-free.
-    if entered_time_window_stage is not True:
+    # entered_date_stage: closed fact from the route — True only when THIS
+    # turn transitioned INTO a date-selection stage (the matching pure
+    # predicate was False pre-turn, True post-turn). date_stage_kind: closed
+    # enum (Rule 4) naming which authoritative stage was entered; each kind
+    # maps to exactly one existing prompt tail. An invalid date that merely
+    # re-asks the same prompt keeps entered_date_stage False -> no signal.
+    if entered_date_stage is not True:
         return None
-    if not (reply_text or "").endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL):
+    if date_stage_kind == "standard":
+        tail = INTAKE_DATE_WINDOW_PROMPT_TAIL
+    elif date_stage_kind == "short_symptom":
+        tail = INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL
+    else:
+        # Unknown/closed-vocabulary kind: no signal (never guess).
+        return None
+    if not (reply_text or "").endswith(tail):
         return None
     settings = load_calendar_settings(client)
     if _picker_stage_signal(settings, PICKER_STAGE_DATE) is None:

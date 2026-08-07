@@ -175,6 +175,7 @@ def test_flow_asap_after_name_and_phone_asks_email_or_skip_not_completion(
     # statement-only wording carries the single email-or-skip question.
     _freeze(monkeypatch, AFTER_NOON)
     conv = _lead(db, flow_client, name="Kevin", phone="516-555-0100",
+                 new_patient=True,  # Package A: patient type captured before email
                  last_assistant=DAY_QUESTION)
     resp = _chat(db, flow_client, conv, "asap")
     assert resp.reply == f"{AFTER_NOON_STATEMENT}\n\n{EMAIL_PROMPT}"
@@ -191,6 +192,7 @@ def test_flow_asap_before_noon_statement_plus_email_question(
         db, flow_client, monkeypatch):
     _freeze(monkeypatch, BEFORE_NOON)
     conv = _lead(db, flow_client, name="Kevin", phone="516-555-0100",
+                 new_patient=True,  # Package A: patient type captured before email
                  last_assistant=DAY_QUESTION)
     resp = _chat(db, flow_client, conv, "asap")
     assert resp.reply == f"{BEFORE_NOON_STATEMENT}\n\n{EMAIL_PROMPT}"
@@ -244,6 +246,7 @@ def test_flow_ordinary_closed_sunday_request_uses_existing_owner(
     # owner and its exact response.
     _freeze(monkeypatch, BEFORE_NOON)
     conv = _lead(db, flow_client, name="Kevin", phone="516-555-0100",
+                 new_patient=True,  # Package A: patient type captured before email
                  last_assistant=DAY_QUESTION)
     resp = _chat(db, flow_client, conv, "sunday morning")
     assert resp.reply == (
