@@ -1123,7 +1123,7 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
     if chosen_id is None:
         menu = _slot_menu(offered, settings.timezone_name) if offered else ""
         text = (f"Just to be sure I pick the right one — {menu}. "
-                "You can reply 1, 2, or 3." if menu else
+                "You can reply with a number or a time." if menu else
                 "Let me pull up fresh times. What day works best?")
         if not menu:  # Offered slots vanished (staff edits); restart cleanly.
             conversation.booking_state = BookingState.WAITING_FOR_DATE

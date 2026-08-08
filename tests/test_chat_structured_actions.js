@@ -540,6 +540,90 @@ async function main() {
     );
   }
 
+  // ------------------------------------------------------------------
+  // SLOT-COUNT-6: six server-owned slot actions in the dedicated panel.
+  // ------------------------------------------------------------------
+
+  function slotPanelChips(elementsById) {
+    const chips = [];
+    elementsById.messages.children
+      .filter((child) =>
+        String(child.className).indexOf("slot-panel-row") === 0)
+      .forEach((row) => row.children.forEach((panel) => {
+        (panel.children || []).forEach((child) => {
+          if (String(child.className).indexOf("slot-chip") === 0) {
+            chips.push(child);
+          }
+        });
+      }));
+    return chips;
+  }
+
+  // A synthetic SIX-action slot_selection response renders all six chips
+  // in order through renderSlotPanel (never the generic quick-reply row),
+  // and the row-level single-submission lock holds at six: the first
+  // click submits exactly that choice and disables every chip.
+  {
+    const sixLabels =
+      ["9:00 AM", "10:00 AM", "11:00 AM",
+       "12:00 PM", "1:00 PM", "2:00 PM"];
+    const sb = buildSandbox({
+      chatResponder: () => successfulJson({
+        reply: "Here is what is open.",
+        conversation_id: "conv-existing",
+        meta: {
+          calendar_picker: { stage: "slot_selection" },
+          calendar_actions: sixLabels.map((label, index) => ({
+            label: label,
+            message: label,
+            action: {
+              type: "calendar_choice",
+              choice_id: "slot-" + (index + 1),
+            },
+          })),
+        },
+      }),
+    });
+    run(sb.context, 'conversationId = "conv-existing"');
+    run(sb.context, 'document.getElementById("input").value = "that day"');
+    await run(sb.context, "sendMessage()");
+    const chips = slotPanelChips(sb.elementsById);
+    ok(
+      "six server-owned slot actions render in the slot panel in order",
+      chips.length === 6 &&
+      chips.map((chip) => chip.textContent).join("|") ===
+        sixLabels.join("|") &&
+      quickReplyButtons(sb.elementsById).length === 0
+    );
+    // The chip click path schedules a visibility restore via
+    // requestAnimationFrame; the minimal DOM shim has none, so this
+    // sandbox (and only this sandbox) gets a synchronous stand-in.
+    run(sb.context,
+      "this.requestAnimationFrame = (cb) => { cb(); return 0; };");
+    const postsBefore = chatPosts(sb.fetchCalls).length;
+    chips[4].click();
+    await run(sb.context, "Promise.resolve()");
+    const afterFirst = chatPosts(sb.fetchCalls);
+    const submitted = afterFirst.length === postsBefore + 1
+      ? parsedBody(afterFirst[afterFirst.length - 1])
+      : null;
+    ok(
+      "clicking the fifth of six submits exactly that choice",
+      submitted !== null &&
+      submitted.message === "1:00 PM" &&
+      submitted.action &&
+      submitted.action.type === "calendar_choice" &&
+      submitted.action.choice_id === "slot-5"
+    );
+    chips[2].click();
+    await run(sb.context, "Promise.resolve()");
+    ok(
+      "the six-chip panel locks after one submission",
+      chatPosts(sb.fetchCalls).length === postsBefore + 1 &&
+      chips.every((chip) => chip.disabled === true)
+    );
+  }
+
   // Calendar actions take priority over the existing service-menu flag.
   {
     const sb = buildSandbox({

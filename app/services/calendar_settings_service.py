@@ -39,7 +39,7 @@ DEFAULT_BOOKING_ENABLED = False          # Calendar is OPT-IN per office. A new
 DEFAULT_HOLD_MINUTES = 5                 # How long a selected slot stays reserved
                                          # while the patient confirms.
 DEFAULT_MINIMUM_NOTICE_MINUTES = 60      # "No booking 10 minutes from now."
-DEFAULT_MAX_OFFERED_SLOTS = 3            # Mia shows at most this many options.
+DEFAULT_MAX_OFFERED_SLOTS = 6            # Mia shows at most this many options.
 DEFAULT_MAX_BOOKING_DAYS = 30            # How far ahead patients may book.
 DEFAULT_REQUIRE_STAFF_CONFIRMATION = True  # Early-rollout safety: appointments
                                            # save as "pending" and patient wording
