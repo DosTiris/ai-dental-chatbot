@@ -216,19 +216,28 @@ def test_exact_time_stores_the_date_plus_the_time(db, fakes):
 # ===========================================================================
 
 @requires_db
-def test_day_only_stores_and_asks_for_the_time_detail(db, fakes):
+def test_day_only_completes_short_symptom_into_slot_offer(db, fakes):
+    # PACKAGE B (was: ...stores_and_asks_for_the_time_detail): for a
+    # booking-enabled tenant a day-only window now COMPLETES short-symptom
+    # intake — the exact-slot offer replaces the morning/afternoon detail
+    # question. The stored value stays the canonical day-only form, which is
+    # still NOT complete by the unchanged Basic rule (the sufficiency owner,
+    # not the strict predicate, is what completes it here).
     client = booking_client(db)
     conversation = make_short_symptom_conversation(db, client)
     target = weekday_target(14)
+    seed_slot_on(db, client, target)
 
     resp = send(db, client, conversation, month_phrase(target))
 
     assert conversation.lead_time_window == canonical(target)
     assert not chat_module.time_window_is_complete(conversation.lead_time_window)
-    assert "morning or afternoon" in resp.reply.lower(), resp.reply
-    assert (conversation.lead_status or "").lower() != "completed"
-    assert (conversation.booking_state or "none") == BookingState.NONE
-    assert len(fakes.lead_sms) == 0 and len(fakes.lead_email) == 0
+    assert "morning or afternoon" not in resp.reply.lower(), resp.reply
+    assert (conversation.lead_status or "").lower() == "completed"
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    # Short-symptom completion still sends its immediate office alert
+    # exactly once, before the Calendar handoff (unchanged owner).
+    assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
     assert not ISO_IN_TEXT.search(resp.reply)
 
 
@@ -236,11 +245,16 @@ def test_day_only_stores_and_asks_for_the_time_detail(db, fakes):
 def test_day_only_then_morning_merges_with_the_stored_date(db, fakes):
     """The behavior the second capture implementation destroyed: a later
     bare 'morning' must MERGE with the stored explicit date, never replace
-    it (and the merged value must keep the ISO date, not just 'Tue')."""
-    client = booking_client(db)
+    it (and the merged value must keep the ISO date, not just 'Tue').
+
+    PACKAGE B: for a booking-enabled tenant the day-only turn now completes
+    intake by itself, so the two-turn day-then-detail shape only still
+    exists for Basic (booking_enabled=False) tenants — the merge contract
+    is therefore pinned on exactly that tenant, byte-identical behavior."""
+    client = make_client(db, calendar_enabled=False,
+                         office_hours=OPEN_ALL_WEEK_HOURS)
     conversation = make_short_symptom_conversation(db, client)
     target = weekday_target(14)
-    seed_slot_on(db, client, target)
 
     send(db, client, conversation, month_phrase(target))
     assert conversation.lead_time_window == canonical(target)
@@ -251,9 +265,8 @@ def test_day_only_then_morning_merges_with_the_stored_date(db, fakes):
         f"day-only value was replaced, not merged: {conversation.lead_time_window!r}"
     )
     assert (conversation.lead_status or "").lower() == "completed"
-    assert conversation.booking_preferred_date == target.isoformat()
-    assert conversation.booking_time_preference == "morning"
-    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION, resp.reply
+    # Basic tenant: completion is the generic notified handoff — no engine.
+    assert (conversation.booking_state or BookingState.NONE) == BookingState.NONE
     assert len(fakes.lead_sms) == 1 and len(fakes.lead_email) == 1
 
 

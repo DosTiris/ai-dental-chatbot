@@ -201,6 +201,31 @@ def intake_time_preference_stage_signal(client, reply_text) -> Optional[dict]:
     return _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
 
 
+def calendar_intake_day_only_sufficient(client) -> bool:
+    """
+    Purpose: PACKAGE B — single owner (Rule 3) of the Calendar-tier
+             decision behind chat.py's intake time-window SUFFICIENCY: for
+             a Calendar tenant the exact-time slot offer replaces the
+             part-of-day question, so a window naming a specific day is
+             enough to complete intake and hand the conversation to the
+             booking engine. chat.py owns the window-shape vocabulary
+             (time_window_has_specific_day); this service owns the tier
+             gate, exactly as intake_time_preference_stage_signal owns its
+             gate — the route never re-implements capability parsing.
+    Inputs:  client — the tenant row; calendar settings are loaded here so
+             the route stays thin.
+    Returns: True only when CalendarSettings.booking_enabled is STRICT
+             True (the authoritative Calendar capability owner — never
+             booking_mode, never the visual-surface flags). Any other
+             value, including missing/garbage settings, returns False and
+             Basic intake behavior applies unchanged.
+    Database effects: none. External effects: none.
+    Possible failures: none — load_calendar_settings already fails closed
+             to booking_enabled=False on malformed settings.
+    """
+    return load_calendar_settings(client).booking_enabled is True
+
+
 # The distinctive, name-INDEPENDENT tail of the S3 capture-first
 # day/time-window prompt returned by receptionist_bypass_reply() in
 # app/routes/chat.py. Only that standard prompt ends with this exact
@@ -689,8 +714,10 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc,
                   seed_date=None, seed_date_text=None,
                   seed_time_preference=None,
                   seeds_are_authoritative=False) -> BookingReply:
-    """NONE -> WAITING_FOR_DATE, or straight to WAITING_FOR_TIME_PREFERENCE
-    when the opening message already named a day ('anything thursday?').
+    """NONE -> WAITING_FOR_DATE, or straight to the exact-slot offer via
+    _after_date_stored when the opening message already named a day
+    ('anything thursday?') — PACKAGE B removed the intermediate
+    morning/afternoon stage from every date continuation.
 
     CHECKPOINT B (rev2): seeds derived from a canonical time window replace
     the raw-text parse. Date resolution order:
@@ -735,29 +762,15 @@ def _handle_start(db, client, conversation, settings, user_text, now_utc,
         if reply is not None:
             return reply
 
-        # The capture owner already recorded the part of day (or exact-time
-        # bucket) — honor it now instead of asking the patient again.
-        if seed_time_preference is not None:
-            conversation.booking_time_preference = seed_time_preference
-            return _offer_slots(db, client, conversation, settings, now_utc)
-
-        conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
-        db.add(conversation)
-        db.commit()
-        # C2-A.3: this reply leaves the conversation at the time-preference
-        # question, so it carries the visual time-stage signal when — and
-        # only when — the triple gate is strict true (single gate owner:
-        # _picker_stage_signal). Text and transitions are unchanged.
-        meta = {"mode": "booking", "state": conversation.booking_state}
-        picker_signal = _picker_stage_signal(
-            settings, PICKER_STAGE_TIME_PREFERENCE
-        )
-        if picker_signal is not None:
-            meta["calendar_picker"] = picker_signal
-        return BookingReply(
-            True,
-            f"Great — {_fmt_day(parsed_date)}. Do you prefer morning or afternoon?",
-            meta,
+        # PACKAGE B: whether the capture owner recorded a part of day (or
+        # exact-time bucket) or not, the date's ONE continuation is
+        # _after_date_stored (Rule 3) — it stores a known preference and
+        # offers exact slots; with no known preference it offers the whole
+        # day (PREF_ANY inside _offer_slots). The former inline
+        # morning/afternoon question is removed with the stage itself.
+        return _after_date_stored(
+            db, client, conversation, settings, parsed_date, now_utc,
+            seed_time_preference,
         )
 
     # No resolvable date. A seeded preference ("Weekday morning", or a
@@ -810,29 +823,27 @@ def _handle_date(db, client, conversation, settings, user_text, now_utc) -> Book
 def _after_date_stored(db, client, conversation, settings, parsed_date,
                        now_utc, preference) -> BookingReply:
     """The ONE continuation after _validate_and_store_date succeeds
-    (Rule 3): honor an already-known time preference by offering slots, or
-    ask the single remaining morning/afternoon question. Extracted verbatim
-    from _handle_date for C2-A.2 so the visual picker's date resolver runs
-    EXACTLY the typed path's transition — the approved plan forbids a
-    second date-storage or continuation implementation."""
+    (Rule 3): store a volunteered time preference when the same message
+    carried one ('friday morning'), then offer exact slots. Extracted
+    verbatim from _handle_date for C2-A.2 so the visual picker's date
+    resolver runs EXACTLY the typed path's transition — the approved plan
+    forbids a second date-storage or continuation implementation.
+
+    PACKAGE B: the morning/afternoon question is REMOVED from this
+    continuation. Every caller is reachable only through the strict
+    booking_enabled entry gates (handle_booking_message,
+    begin_booking_after_intake, resolve_calendar_action), so this is
+    Calendar-only code by construction and needs no tier check of its own.
+    With no known preference the stored value stays None and _offer_slots
+    filters with its existing PREF_ANY default — the whole selected day,
+    capped by the UNCHANGED max_offered_slots contract — and records the
+    effective preference exactly as before (Patch 2C). No state named
+    WAITING_FOR_TIME_PREFERENCE is entered here anymore;
+    _handle_time_preference remains solely for conversations persisted at
+    that state before Package B."""
     if preference is not None:
         conversation.booking_time_preference = preference
-        return _offer_slots(db, client, conversation, settings, now_utc)
-
-    conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
-    db.add(conversation)
-    db.commit()
-    # C2-A.3: time-preference stage reply — visual-stage signal attached
-    # only under the strict triple gate (single owner: _picker_stage_signal).
-    meta = {"mode": "booking", "state": conversation.booking_state}
-    picker_signal = _picker_stage_signal(settings, PICKER_STAGE_TIME_PREFERENCE)
-    if picker_signal is not None:
-        meta["calendar_picker"] = picker_signal
-    return BookingReply(
-        True,
-        f"Got it — {_fmt_day(parsed_date)}. Do you prefer morning or afternoon?",
-        meta,
-    )
+    return _offer_slots(db, client, conversation, settings, now_utc)
 
 
 def _validate_and_store_date(db, conversation, settings, parsed_date, today_local) -> Optional[BookingReply]:
@@ -868,8 +879,34 @@ def _validate_and_store_date(db, conversation, settings, parsed_date, today_loca
 
 
 def _handle_time_preference(db, client, conversation, settings, user_text, now_utc) -> BookingReply:
-    """WAITING_FOR_TIME_PREFERENCE: classify morning/afternoon/evening/any.
-    A brand-new day in the message is honored (patient changed direction)."""
+    """LEGACY-STATE RESOLVER (Package B v1.0.1). WAITING_FOR_TIME_PREFERENCE
+    is reachable only by conversations PERSISTED at the removed
+    morning/afternoon stage before Package B deployed — no current flow
+    enters it. The Calendar contract applies to that cohort too: the
+    question is never asked again. Resolution order:
+      1. A brand-new day in the message is honored (patient changed
+         direction) through the SAME validated date owner as every other
+         path; invalid days get that owner's existing corrections.
+      2. An answered preference ("morning", "afternoon", "any time") is
+         honored exactly as before — the patient may have SEEN the old
+         question immediately pre-deploy, and the answer still counts —
+         proceeding to the exact-slot offer (a new same-message day from
+         step 1 rides along).
+      3. A new day WITHOUT a preference runs the ONE date continuation
+         (_after_date_stored): straight to the exact-slot offer with the
+         PREF_ANY default — the old "Okay — <day>. Morning or afternoon?"
+         re-ask is removed with the stage.
+      4. Anything else: the persisted date is already authoritative, so the
+         reply IS the exact-slot offer (PREF_ANY default inside
+         _offer_slots) — never a re-ask.
+      5. Corrupt/missing persisted date with nothing usable in the message:
+         fail safely to the existing day question (WAITING_FOR_DATE with
+         _date_stage_meta), mirroring the vanished-offer clean restart —
+         never morning/afternoon.
+    Database effects: date/preference storage and state transitions via the
+    existing owners; the corrupt-date fallback commits WAITING_FOR_DATE.
+    Possible failures: none beyond the delegated owners' documented ones.
+    """
     today_local = client_now(settings).date()
     new_date = parse_preferred_date(user_text, today_local)
     if new_date is not None:
@@ -878,41 +915,26 @@ def _handle_time_preference(db, client, conversation, settings, user_text, now_u
             return reply
 
     preference = parse_time_preference(user_text)
-    if preference is None and new_date is None:
-        # C2-A.3: the re-ask also leaves the conversation at the
-        # time-preference question, so it carries the same gated signal.
-        # The wording (including \u201cany time\u201d) is unchanged; the
-        # buttons coexist with typed alternatives, never replace them.
-        meta = {"mode": "booking",
-                "state": BookingState.WAITING_FOR_TIME_PREFERENCE}
-        picker_signal = _picker_stage_signal(
-            settings, PICKER_STAGE_TIME_PREFERENCE
-        )
-        if picker_signal is not None:
-            meta["calendar_picker"] = picker_signal
-        return BookingReply(
-            True,
-            "Do you prefer morning or afternoon? You can also say "
-            "\u201cany time\u201d.",
-            meta,
+    if preference is None and new_date is not None:
+        # Package B v1.0.1 (case E): a new day alone proceeds through the
+        # single date continuation to the direct exact-slot offer.
+        return _after_date_stored(
+            db, client, conversation, settings, new_date, now_utc, None
         )
     if preference is None:
-        # They gave a new day but no preference; keep asking the one question.
-        conversation.booking_state = BookingState.WAITING_FOR_TIME_PREFERENCE
-        db.add(conversation)
-        db.commit()
-        # C2-A.3: time-preference stage reply — same gated signal.
-        meta = {"mode": "booking", "state": conversation.booking_state}
-        picker_signal = _picker_stage_signal(
-            settings, PICKER_STAGE_TIME_PREFERENCE
-        )
-        if picker_signal is not None:
-            meta["calendar_picker"] = picker_signal
-        return BookingReply(
-            True,
-            f"Okay — {_fmt_day(new_date)}. Morning or afternoon?",
-            meta,
-        )
+        # Package B v1.0.1 (cases D/G): no re-ask, ever. A readable
+        # persisted day is authoritative and gets its offer; a
+        # missing/corrupt one fails safely back to the day question.
+        if _get_pref_date(conversation) is None:
+            conversation.booking_state = BookingState.WAITING_FOR_DATE
+            db.add(conversation)
+            db.commit()
+            return BookingReply(
+                True,
+                "Let me pull up fresh times. What day works best?",
+                _date_stage_meta(settings),
+            )
+        return _offer_slots(db, client, conversation, settings, now_utc)
 
     conversation.booking_time_preference = preference
     return _offer_slots(db, client, conversation, settings, now_utc)
@@ -1994,19 +2016,27 @@ def _truthful_current_state_reply(db, client, conversation, settings,
             {"mode": "booking", "state": state},
         )
     if state == BookingState.WAITING_FOR_TIME_PREFERENCE:
-        # C2-A.3: the race-loser restate genuinely leaves the conversation
-        # at the time-preference question, so it carries the gated signal —
-        # mirroring how the WAITING_FOR_DATE restate below carries
-        # _date_stage_meta (V2 defect 1 pattern).
-        meta = {"mode": "booking", "state": state}
-        picker_signal = _picker_stage_signal(
-            settings, PICKER_STAGE_TIME_PREFERENCE
-        )
-        if picker_signal is not None:
-            meta["calendar_picker"] = picker_signal
+        # PACKAGE B v1.0.1: this state is LEGACY-ONLY (persisted before the
+        # morning/afternoon stage was removed), so the restate never
+        # advertises that question and never carries the removed
+        # time-preference signal. Mutation stays forbidden here (the
+        # surviving request owns the state — the contract above), so the
+        # reply cannot BE the slot offer (offering records offer state).
+        # Instead it truthfully states what the resolver does with ANY next
+        # message: with a readable persisted day, the exact-slot offer for
+        # that day; without one, the day question — both answerable exactly
+        # as asked (the dead-hold precedent above).
+        day = _get_pref_date(conversation)
+        if day is not None:
+            return BookingReply(
+                True,
+                f"You’re set for {_fmt_day(day)} — reply with anything and "
+                "I’ll show the exact open times.",
+                {"mode": "booking", "state": state},
+            )
         return BookingReply(
-            True, "Do you prefer morning or afternoon?",
-            meta,
+            True, "What day would work best for your appointment?",
+            {"mode": "booking", "state": state},
         )
     if state == BookingState.WAITING_FOR_SLOT_SELECTION:
         if not _offer_is_expired(conversation, now_utc):

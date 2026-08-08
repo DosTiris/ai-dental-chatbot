@@ -184,8 +184,9 @@ def test_full_flow_completes_into_calendar_slots(db, fakes, monkeypatch):
     send(db, c, conv, "Jordan Rivera")
     send(db, c, conv, "516-555-0100")
     send(db, c, conv, "skip email")
-    send(db, c, conv, _date_message(target))
-    r = send(db, c, conv, "morning"); db.refresh(conv)
+    # PACKAGE B: the date turn completes intake and offers slots directly —
+    # the morning/afternoon turn is removed from the Calendar flow.
+    r = send(db, c, conv, _date_message(target)); db.refresh(conv)
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert (r.meta or {}).get("calendar_actions")
     assert "our team will reach out" not in _last(r)

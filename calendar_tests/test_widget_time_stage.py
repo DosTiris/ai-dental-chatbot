@@ -5,7 +5,8 @@
 # Scope of this module (the frozen-contract backend proofs):
 #   * the meta signal `calendar_picker: {"stage": "time_preference"}`
 #     appears on EVERY reply that leaves the conversation at
-#     WAITING_FOR_TIME_PREFERENCE (all five emission sites T1-T5), and
+#     WAITING_FOR_TIME_PREFERENCE (v1.0.1: the stage is REMOVED for every
+#     Calendar path, including the legacy persisted state T3-T5 cover), and
 #     ONLY when booking_enabled, calendar_actions_enabled, AND
 #     calendar_picker_enabled are all strict true;
 #   * the meta signal `calendar_picker: {"stage": "slot_selection"}`
@@ -165,25 +166,36 @@ def _slot_state(db, conversation, slot, *, expired=False):
 
 
 # ---------------------------------------------------------------------------
-# Emission sites T1-T5: every reply that leaves the conversation at
-# WAITING_FOR_TIME_PREFERENCE carries the gated signal.
+# T1-T5 (PACKAGE B v1.0.1): NO reply ever leaves a Calendar conversation at
+# WAITING_FOR_TIME_PREFERENCE anymore. T1/T2 pin the fresh date paths; T3-T5
+# pin the LEGACY persisted state: answers are honored, the stored date is
+# authoritative otherwise, and the restate never advertises the removed
+# question. TIME_SIGNAL survives below only inside never-again assertions.
 # ---------------------------------------------------------------------------
 
-def test_t1_handle_start_post_date_carries_signal(db):
+def test_t1_handle_start_post_date_goes_straight_to_slot_offer(db):
+    # PACKAGE B (was: ...carries_signal at the time stage): an opening
+    # message that names a day proceeds DIRECTLY to the exact-slot offer —
+    # the time-preference stage is never entered on any date continuation.
     client = _client(db)
     conversation = _conversation(db, client)
+    slot = _slot(db, client)
+    day = _office_day(slot)
     reply = bc._handle_start(
         db, client, conversation, _settings(client),
-        "I need an appointment tomorrow", _now_utc(),
+        f"I need an appointment {day.strftime('%B')} {day.day}", _now_utc(),
     )
     assert reply.handled is True
-    assert reply.text.startswith("Great —")
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.meta["calendar_picker"] == TIME_SIGNAL
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert reply.meta["state"] == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert reply.meta["calendar_picker"] == SLOT_SIGNAL
+    assert reply.meta.get("calendar_actions")
+    assert "morning or afternoon" not in reply.text.lower()
 
 
-def test_t2_accepted_picker_date_carries_signal(db):
+def test_t2_accepted_picker_date_goes_straight_to_slot_offer(db):
+    # PACKAGE B: the accepted picker date runs EXACTLY the typed path's
+    # continuation (_after_date_stored) — straight to the slot offer.
     client = _client(db)
     conversation = _conversation(db, client)
     slot = _slot(db, client)
@@ -193,45 +205,89 @@ def test_t2_accepted_picker_date_carries_signal(db):
         db, client, conversation, f"pick-date:{day.isoformat()}"
     )
     assert outcome.status == bc.ACTION_EXECUTED
-    assert outcome.reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert outcome.reply.meta["calendar_picker"] == TIME_SIGNAL
+    assert outcome.reply.meta["state"] == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert outcome.reply.meta["calendar_picker"] == SLOT_SIGNAL
+    assert outcome.reply.meta.get("calendar_actions")
+    assert "morning or afternoon" not in (outcome.reply.text or "").lower()
 
 
-def test_t3_no_parse_re_ask_carries_signal(db):
+def test_t3_legacy_no_parse_goes_straight_to_slot_offer(db):
+    # PACKAGE B v1.0.1 (was: ...re_ask_carries_signal): the legacy persisted
+    # state treats the stored date as AUTHORITATIVE — an unparseable resumed
+    # message gets the exact-slot offer with PREF_ANY, never the removed
+    # morning/afternoon re-ask, never its signal.
     client = _client(db)
     conversation = _conversation(db, client)
+    _slot(db, client)                       # aligned with day=+3 below
     _time_pref_state(db, conversation, day=date.today() + timedelta(days=3))
     reply = bc._handle_time_preference(
         db, client, conversation, _settings(client), "hello there", _now_utc()
     )
-    assert "morning or afternoon" in reply.text.lower()
-    assert "any time" in reply.text.lower()  # Wording unchanged.
-    assert reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.meta["calendar_picker"] == TIME_SIGNAL
+    assert "morning or afternoon" not in reply.text.lower()
+    assert reply.meta["state"] == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert reply.meta["calendar_picker"] == SLOT_SIGNAL
+    assert reply.meta["calendar_picker"] != TIME_SIGNAL
+    assert reply.meta.get("calendar_actions")
+    assert conversation.booking_time_preference is None
+    assert conversation.booking_effective_time_preference == "any"
 
 
-def test_t4_new_date_without_preference_carries_signal(db):
+def test_t4_legacy_new_date_without_preference_goes_to_slot_offer(db):
+    # PACKAGE B v1.0.1 (was: ...carries_signal): a new day alone at the
+    # legacy state runs the ONE date continuation straight to the exact-slot
+    # offer for the NEW day — the "Okay — <day>. Morning or afternoon?"
+    # re-ask is removed with the stage.
     client = _client(db)
     conversation = _conversation(db, client)
+    _slot(db, client, days_ahead=1)
     _time_pref_state(db, conversation, day=date.today() + timedelta(days=3))
     reply = bc._handle_time_preference(
         db, client, conversation, _settings(client), "tomorrow", _now_utc()
     )
-    assert reply.text.startswith("Okay —")
-    assert reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.meta["calendar_picker"] == TIME_SIGNAL
+    tomorrow = date.today() + timedelta(days=1)
+    assert conversation.booking_preferred_date == tomorrow.isoformat()
+    assert not reply.text.startswith("Okay —")
+    assert "morning or afternoon" not in reply.text.lower()
+    assert reply.meta["state"] == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert reply.meta["calendar_picker"] == SLOT_SIGNAL
 
 
-def test_t5_truthful_restate_carries_signal(db):
+def test_t5_truthful_restate_never_advertises_time_preference(db):
+    # PACKAGE B v1.0.1 (was: ...carries_signal): the race-loser restate for
+    # the legacy state never advertises the removed question, carries no
+    # time-preference signal, and — per its read-only contract — mutates
+    # NOTHING. With a readable stored day it truthfully points at the offer
+    # the resolver returns on any next message.
     client = _client(db)
     conversation = _conversation(db, client)
-    _time_pref_state(db, conversation)
+    day = date.today() + timedelta(days=3)
+    _time_pref_state(db, conversation, day=day)
+    offered_before = conversation.booking_offered_slot_ids
     reply = bc._truthful_current_state_reply(
         db, client, conversation, _settings(client), _now_utc()
     )
-    assert reply.text == "Do you prefer morning or afternoon?"
+    assert "morning or afternoon" not in reply.text.lower()
+    assert "calendar_picker" not in reply.meta
     assert reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.meta["calendar_picker"] == TIME_SIGNAL
+    db.refresh(conversation)
+    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert conversation.booking_offered_slot_ids == offered_before
+
+
+def test_t5b_truthful_restate_without_date_asks_day(db):
+    # PACKAGE B v1.0.1: the legacy state WITHOUT a readable stored day
+    # restates the answerable day question (dead-hold precedent) — never
+    # morning/afternoon — still mutation-free.
+    client = _client(db)
+    conversation = _conversation(db, client)
+    _time_pref_state(db, conversation)          # no day seeded
+    reply = bc._truthful_current_state_reply(
+        db, client, conversation, _settings(client), _now_utc()
+    )
+    assert reply.text == "What day would work best for your appointment?"
+    assert "calendar_picker" not in reply.meta
+    db.refresh(conversation)
+    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
 
 
 # ---------------------------------------------------------------------------
@@ -241,18 +297,18 @@ def test_t5_truthful_restate_carries_signal(db):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("booking,actions,picker", GATE_COMBOS)
-def test_time_preference_signal_gated(db, booking, actions, picker):
+def test_time_preference_signal_never_emitted_any_gate_combo(db, booking, actions, picker):
+    # PACKAGE B v1.0.1 (was: ...signal_gated): the removed stage's signal is
+    # never emitted for ANY gate combination, and no combination re-asks
+    # morning/afternoon — the stage no longer exists at this owner.
     client = _client(db, booking=booking, actions=actions, picker=picker)
     conversation = _conversation(db, client)
     _time_pref_state(db, conversation, day=date.today() + timedelta(days=3))
     reply = bc._handle_time_preference(
         db, client, conversation, _settings(client), "hello there", _now_utc()
     )
-    # Byte-identical pre-C2-A.3 meta: exactly mode + state, nothing else.
-    assert reply.meta == {
-        "mode": "booking",
-        "state": BookingState.WAITING_FOR_TIME_PREFERENCE,
-    }
+    assert "morning or afternoon" not in reply.text.lower()
+    assert (reply.meta or {}).get("calendar_picker") != TIME_SIGNAL
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +457,12 @@ def test_confirmation_re_ask_has_no_signal(db):
 # picker signal exists anywhere (the 409 envelope stays state-free).
 # ---------------------------------------------------------------------------
 
-def test_stale_date_replay_mutates_nothing_no_signal(db):
+def test_stale_date_replay_mutates_nothing_carries_current_stage(db):
+    # PACKAGE B (was: ...no_signal): after the accepted date the conversation
+    # sits at SLOT SELECTION, so a stale date replay's restate legitimately
+    # carries the CURRENT stage's server-owned slot actions — mirroring the
+    # race-loser restate pattern. The stale replay still mutates NOTHING:
+    # stored date and state are untouched, and no second offer is recorded.
     client = _client(db)
     conversation = _conversation(db, client)
     slot = _slot(db, client)
@@ -411,12 +472,14 @@ def test_stale_date_replay_mutates_nothing_no_signal(db):
     first = bc.handle_booking_action(db, client, conversation, choice)
     assert first.status == bc.ACTION_EXECUTED
     stored = conversation.booking_preferred_date
+    offered = list(conversation.booking_offered_slot_ids or [])
     replay = bc.handle_booking_action(db, client, conversation, choice)
     assert replay.status == bc.ACTION_STALE_CHOICE
-    assert replay.calendar_actions is None
+    assert replay.calendar_actions            # restate of the CURRENT stage
     db.refresh(conversation)
     assert conversation.booking_preferred_date == stored
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert list(conversation.booking_offered_slot_ids or []) == offered
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
 
 
 def test_stale_slot_choice_replacements_carry_no_signal(db):

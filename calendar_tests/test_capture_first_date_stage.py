@@ -37,6 +37,7 @@ from calendar_tests.test_chat_integration import (  # noqa: F401
     fakes,
     make_client,
     make_conversation,
+    make_slot,
     send,
 )
 
@@ -249,20 +250,25 @@ def test_other_bypass_stages_do_not_carry_date_signal(db, fakes):
 #    appears exactly as before (unchanged path, mode intake_time_window_capture)
 # ---------------------------------------------------------------------------
 
-def test_typed_day_after_date_question_still_carries_time_preference(db, fakes):
+def test_typed_day_after_date_question_goes_to_slot_offer(db, fakes):
+    # PACKAGE B (was: ...still_carries_time_preference): typing a day after
+    # the date question COMPLETES intake for this booking-enabled tenant and
+    # returns the engine exact-slot offer with the slot_selection signal —
+    # the intake morning/afternoon stage (and its signal) is removed.
     client = _gated_client(db)
     conversation = _pre_date_question_conversation(db, client)
 
     r_date = send(db, client, conversation, "skip email")
     assert r_date.meta.get("calendar_picker") == DATE_SIGNAL
 
-    # Typing a day advances the existing flow unchanged: the morning/afternoon
-    # question carries the time_preference signal via its own owner.
-    day_text = _upcoming_weekday_text(db, client)
-    r_pref = send(db, client, conversation, day_text)
-    assert r_pref.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert r_pref.meta.get("mode") == "intake_time_window_capture"
-    assert r_pref.meta.get("calendar_picker") == TIME_SIGNAL
+    today = chat_module.get_client_now(client).date()
+    target = next(today + timedelta(days=a) for a in (2, 3, 4, 5, 6)
+                  if (today + timedelta(days=a)).weekday() < 5)
+    make_slot(db, client, days_ahead=(target - today).days, hour=10)
+    r_pref = send(db, client, conversation, target.strftime("%A"))
+    assert r_pref.reply != INTAKE_TIME_PREFERENCE_PROMPT
+    assert r_pref.meta.get("calendar_picker") == {"stage": "slot_selection"}
+    assert r_pref.meta.get("calendar_actions")
 
 
 # ---------------------------------------------------------------------------

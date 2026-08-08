@@ -55,13 +55,17 @@ def _send(db, c, conv, txt):
 
 
 def _drive_to_before_final_field(db, c, conv, target, *, preseed_new_patient):
-    """Reason -> (patient type) -> name -> phone -> email -> date, leaving exactly
-    the time window (morning/afternoon) as the final missing field. Package A
-    order asks New/Returning first, right after the reason. When
-    preseed_new_patient is True, patient type is populated up front (no
-    patient-type turn); otherwise it is answered on its turn, right after the
-    reason. Either way the completing field left for the caller is the time
-    window."""
+    """Reason -> (patient type) -> name -> phone -> email, leaving exactly the
+    DATE as the final missing field. Package A order asks New/Returning first,
+    right after the reason. When preseed_new_patient is True, patient type is
+    populated up front (no patient-type turn); otherwise it is answered on its
+    turn, right after the reason.
+
+    PACKAGE B: for a Calendar tenant a specific day now COMPLETES intake by
+    itself (the exact-slot offer replaces the morning/afternoon question), so
+    the completing final field these flows exercise is the DATE message —
+    still a message that never parses as a patient-type answer, preserving
+    exactly the field-agnostic property this suite pins."""
     if preseed_new_patient:
         conv.lead_is_new_patient = True
         db.add(conv)
@@ -70,8 +74,7 @@ def _drive_to_before_final_field(db, c, conv, target, *, preseed_new_patient):
     _send(db, c, conv, "I need a cleaning")
     if not preseed_new_patient:
         _send(db, c, conv, "new patient")          # Package A: patient type first
-    for t in ["Jordan Rivera", "516-555-0100",
-              "skip email", _date_message(target)]:
+    for t in ["Jordan Rivera", "516-555-0100", "skip email"]:
         _send(db, c, conv, t)
 
 
@@ -87,7 +90,7 @@ def test_standard_order_routes_into_calendar(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=False)
-    r = _send(db, c, conv, "morning")           # time window completes intake
+    r = _send(db, c, conv, _date_message(target))   # PACKAGE B: the date completes intake
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert (r.meta or {}).get("calendar_actions")
 
@@ -96,16 +99,16 @@ def test_standard_order_routes_into_calendar(db, fakes, monkeypatch):
 # 2. field-agnostic: time window completes intake (regressions 2, 3a, 4)
 # ---------------------------------------------------------------------------
 
-def test_field_agnostic_time_window_completion_routes(db, fakes, monkeypatch):
-    """Patient type already authoritative; the TIME WINDOW is the final field.
-    Completing it must route into Calendar even though the message ("morning")
-    is not a patient-type answer."""
+def test_field_agnostic_date_completion_routes(db, fakes, monkeypatch):
+    """Patient type already authoritative; the DATE is the final field
+    (PACKAGE B). Completing it must route into Calendar even though the
+    message (a date) is not a patient-type answer."""
     c = _gated_client(db)
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
     assert conv.booking_state == BookingState.NONE          # not yet routed
-    r = _send(db, c, conv, "morning")                       # completes intake
+    r = _send(db, c, conv, _date_message(target))           # completes intake
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert (r.meta or {}).get("calendar_actions")
 
@@ -117,8 +120,8 @@ def test_completing_message_need_not_parse_as_patient_type(db, fakes, monkeypatc
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
-    assert chat_module.detect_new_patient_flag("morning") is None
-    r = _send(db, c, conv, "morning")
+    assert chat_module.detect_new_patient_flag(_date_message(target)) is None
+    r = _send(db, c, conv, _date_message(target))
     assert (r.meta or {}).get("calendar_actions")
 
 
@@ -162,7 +165,7 @@ def test_preseed_new_patient_before_final_field_enters_calendar(db, fakes, monke
     assert conv.lead_is_new_patient is None
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
     assert conv.lead_is_new_patient is True                 # populated up front
-    r = _send(db, c, conv, "morning")                       # final field
+    r = _send(db, c, conv, _date_message(target))           # final field (PACKAGE B: the date)
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert (r.meta or {}).get("calendar_actions")
 
@@ -179,7 +182,7 @@ def test_already_completed_lead_status_blocks_reroute(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
-    _send(db, c, conv, "morning")
+    _send(db, c, conv, _date_message(target))
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert (conv.lead_status or "").strip().lower() == "completed"
     # An ordinary message after completion must not re-enter completion routing.
@@ -195,7 +198,7 @@ def test_affirmative_after_completion_no_second_route(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=False)
-    _send(db, c, conv, "morning")               # time window completes intake
+    _send(db, c, conv, _date_message(target))   # PACKAGE B: the date completes intake
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     r = _send(db, c, conv, "yes")
     assert conv.booking_state in (BookingState.WAITING_FOR_SLOT_SELECTION,
@@ -210,7 +213,7 @@ def test_faq_after_completion_no_reroute(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
-    _send(db, c, conv, "morning")
+    _send(db, c, conv, _date_message(target))
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     r = _send(db, c, conv, "where are you located?")
     assert (r.meta or {}).get("mode") != "lead_complete_after_patient_type"
@@ -251,7 +254,7 @@ def test_calendar_enabled_offers_slots_and_requires_confirmation(db, fakes, monk
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=False)
-    r = _send(db, c, conv, "morning")           # time window completes intake
+    r = _send(db, c, conv, _date_message(target))   # PACKAGE B: the date completes intake
     assert (r.meta or {}).get("calendar_actions")
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert conv.booking_state != BookingState.BOOKED
@@ -264,7 +267,7 @@ def test_no_duplicate_booking_notification_on_completion_turn(db, fakes, monkeyp
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
-    _send(db, c, conv, "morning")
+    _send(db, c, conv, _date_message(target))
     # routine native Calendar sends no generic lead alert on completion
     assert len(fakes.lead_sms) == 0
     assert len(fakes.lead_email) == 0
@@ -298,7 +301,7 @@ def test_start_over_exposed_on_routed_completion(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     _drive_to_before_final_field(db, c, conv, target, preseed_new_patient=True)
-    r = _send(db, c, conv, "morning")
+    r = _send(db, c, conv, _date_message(target))
     assert "show_start_over" in (r.meta or {})
 
 

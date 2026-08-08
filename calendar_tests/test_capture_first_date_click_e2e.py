@@ -163,33 +163,20 @@ def _assert_no_booking_side_effect(db, client, conversation, fakes, before):
 
 
 def _day_turn(db, client, conversation, d, fakes, before):
-    """Turn 1: the exact date ordinary message stores the canonical day-only
-    value and asks the existing morning/afternoon question."""
+    """PACKAGE B — Turn 1 is now the COMPLETING turn: the exact date ordinary
+    message stores the canonical day-only value, completes intake for this
+    Calendar tenant, and returns the engine's exact-slot offer on the SAME
+    turn. The morning/afternoon question is removed; slot selection is still
+    required, so no appointment is booked and no notification is sent."""
     resp = send(db, client, conversation, _human_message(d))
-    assert resp.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert resp.meta.get("calendar_picker") == TIME_SIGNAL
+    assert resp.reply != INTAKE_TIME_PREFERENCE_PROMPT
+    assert resp.meta.get("calendar_picker") != TIME_SIGNAL
+    assert resp.meta.get("calendar_picker") == {"stage": "slot_selection"}
+    assert resp.meta.get("calendar_actions"), "date turn must offer Calendar slots"
     assert conversation.lead_time_window == _canonical(d)
-    _assert_no_side_effects(db, client, conversation, fakes, before)
-    return resp
-
-
-def _assert_completes(resp, conversation, expected_window, fakes, before,
-                      db, client):
-    """A detail turn that COMPLETES the window. Package A captures patient type
-    FIRST, so the time window is the LAST intake field: completing it routes into
-    the existing Calendar slot offering (booking_state -> slot selection,
-    server-owned slot actions) - never a trailing New/Returning question and
-    never a generic 'our team will reach out' handoff. Slot selection is still
-    required, so no appointment is booked and no notification is sent yet."""
-    assert conversation.lead_time_window == expected_window
-    assert GENERIC_REJECT not in resp.reply.lower()
-    assert resp.meta.get("calendar_actions"), "completed intake must offer Calendar slots"
     assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
-    assert "our team will reach out" not in resp.reply.lower()
-    assert "new or returning" not in resp.reply.lower()
-    # No booking side effect yet: slot selection still required.
-    assert _appointment(db, client, conversation) is None
-    assert _counters(fakes) == before
+    _assert_no_booking_side_effect(db, client, conversation, fakes, before)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +212,8 @@ def test_A_weekday_complete_sequence(db, fakes):
 
     d = _next_weekday(client)
     _seed_slot_on(db, client, d)
+    # PACKAGE B: the date turn itself completes intake and offers slots.
     _day_turn(db, client, conversation, d, fakes, before)
-    r2 = send(db, client, conversation, "Morning")
-    _assert_completes(r2, conversation, f"{_canonical(d)} morning",
-                      fakes, before, db, client)
 
 
 # ---------------------------------------------------------------------------
@@ -245,10 +230,8 @@ def test_B_saturday_open_complete_sequence(db, fakes):
     sat = _next_dow(client, 5)
     _seed_slot_on(db, client, sat)
     assert _preview_state_for(db, client, sat) == "open"
+    # PACKAGE B: the date turn itself completes intake and offers slots.
     _day_turn(db, client, conversation, sat, fakes, before)
-    r2 = send(db, client, conversation, "Morning")
-    _assert_completes(r2, conversation, f"{_canonical(sat)} morning",
-                      fakes, before, db, client)
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +248,8 @@ def test_C_sunday_open_complete_sequence(db, fakes):
     sun = _next_dow(client, 6)
     _seed_slot_on(db, client, sun)
     assert _preview_state_for(db, client, sun) == "open"
+    # PACKAGE B: the date turn itself completes intake and offers slots.
     _day_turn(db, client, conversation, sun, fakes, before)
-    r2 = send(db, client, conversation, "Afternoon")
-    _assert_completes(r2, conversation, f"{_canonical(sun)} afternoon",
-                      fakes, before, db, client)
 
 
 # ---------------------------------------------------------------------------
@@ -283,13 +264,19 @@ def test_D_open_sunday_exact_time(db, fakes):
     before = _counters(fakes)
 
     sun = _next_dow(client, 6)
-    _day_turn(db, client, conversation, sun, fakes, before)
-    detail = chat_module.canonicalize_time_window_for_storage(client, "2pm")
-    r2 = send(db, client, conversation, "2pm")
+    _seed_slot_on(db, client, sun, hour=14)
+    # PACKAGE B: the date turn completes intake, so an exact-time detail is
+    # volunteered WITH the date in one message. The open-Sunday detail is
+    # ACCEPTED (never weekend-rejected), stored through the one canonical
+    # owner, and the turn routes into the Calendar slot offer.
+    msg = f"{_human_message(sun)} 2pm"
+    expected = chat_module.canonicalize_time_window_for_storage(client, msg)
+    assert expected and expected.startswith(_canonical(sun))
+    r2 = send(db, client, conversation, msg)
     assert GENERIC_REJECT not in r2.reply.lower()
-    assert conversation.lead_time_window == f"{_canonical(sun)} {detail}"
-    # The detail is accepted and completes intake, which routes into Calendar
-    # (no appointment/notification side effect on this turn).
+    assert conversation.lead_time_window == expected
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    # Slot selection is still required: no appointment/notification yet.
     _assert_no_booking_side_effect(db, client, conversation, fakes, before)
 
 
@@ -324,13 +311,17 @@ def test_E_closed_weekend_detail_stays_failclosed(db, fakes, target_dow, detail_
 
 def test_F_same_day_open_sunday(db, fakes, monkeypatch):
     client = _gated_client(db, _hours(sat_open=False, sun_open=True))
-    # Deterministically pin "now" to a fixed OPEN Sunday morning.
+    # Deterministically pin "now" to a fixed OPEN Sunday morning — BOTH the
+    # route clock and, PACKAGE B, the engine's clock owner, because the date
+    # turn now reaches the engine's slot-eligibility (notice) check.
+    from app.services import booking_conversation as _bc
     base = chat_module.get_client_now(client).date()
     while base.weekday() != 6:
         base += timedelta(days=1)
     pinned = datetime(base.year, base.month, base.day, 10, 0,
                       tzinfo=ZoneInfo("America/New_York"))
     monkeypatch.setattr(chat_module, "get_client_now", lambda c: pinned)
+    monkeypatch.setattr(_bc, "client_now", lambda settings: pinned)
 
     conversation = _pre_date_question(db, client)
     assert send(db, client, conversation, "skip email").meta.get(
@@ -338,17 +329,19 @@ def test_F_same_day_open_sunday(db, fakes, monkeypatch):
     before = _counters(fakes)
 
     today = pinned.date()
+    # Seed relative to the REAL clock make_slot uses — get_client_now is
+    # patched above, so _seed_slot_on's _today() anchor would mis-place it.
+    make_slot(db, client,
+              days_ahead=(today - datetime.now(ZoneInfo("America/New_York")).date()).days,
+              hour=15, status=SlotStatus.AVAILABLE)
     r1 = send(db, client, conversation, _human_message(today))
-    # Same-day rule owns the wording (today-specific, not the generic prompt).
-    assert "today" in r1.reply.lower()
+    # PACKAGE B: today behaves exactly like a future date — the completing
+    # turn returns the exact-slot offer, never the removed today-specific
+    # morning/afternoon prompt, and never the generic rejection.
+    assert GENERIC_REJECT not in r1.reply.lower()
     assert conversation.lead_time_window == _canonical(today)
-    _assert_no_side_effects(db, client, conversation, fakes, before)
-
-    r2 = send(db, client, conversation, "Afternoon")
-    assert GENERIC_REJECT not in r2.reply.lower()
-    assert conversation.lead_time_window == f"{_canonical(today)} afternoon"
-    # The detail is accepted and completes intake, which routes into Calendar
-    # (no appointment/notification side effect on this turn).
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert r1.meta.get("calendar_actions")
     _assert_no_booking_side_effect(db, client, conversation, fakes, before)
 
 
@@ -378,19 +371,37 @@ def test_closed_weekend_date_rejected_no_mutation(db, fakes, target_dow):
 # Same-day WEEKDAY preserves the existing today-specific response.
 # ---------------------------------------------------------------------------
 
-def test_same_day_weekday_preserves_existing_response(db, fakes):
+def test_same_day_weekday_preserves_existing_response(db, fakes, monkeypatch):
     client = _gated_client(db, ALL_OPEN)
+    # PACKAGE B: today reaches the engine's slot-eligibility check, so pin
+    # BOTH clocks to a deterministic weekday morning and seed a today slot.
+    from app.services import booking_conversation as _bc
+    base = chat_module.get_client_now(client).date()
+    while base.weekday() >= 5:
+        base += timedelta(days=1)
+    pinned = datetime(base.year, base.month, base.day, 10, 0,
+                      tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr(chat_module, "get_client_now", lambda c: pinned)
+    monkeypatch.setattr(_bc, "client_now", lambda settings: pinned)
+
     conversation = _pre_date_question(db, client)
     assert send(db, client, conversation, "skip email").meta.get(
         "calendar_picker") == DATE_SIGNAL
     before = _counters(fakes)
 
-    today = _today(client)
+    today = pinned.date()
+    make_slot(db, client,
+              days_ahead=(today - datetime.now(ZoneInfo("America/New_York")).date()).days,
+              hour=15, status=SlotStatus.AVAILABLE)
     resp = send(db, client, conversation, _human_message(today))
+    # PACKAGE B: same-day is accepted exactly like a future date — straight
+    # to the exact-slot offer, never the removed time-preference prompt.
     assert resp.reply != INTAKE_TIME_PREFERENCE_PROMPT
-    assert "today" in resp.reply.lower()
+    assert GENERIC_REJECT not in resp.reply.lower()
     assert conversation.lead_time_window == _canonical(today)
-    _assert_no_side_effects(db, client, conversation, fakes, before)
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert resp.meta.get("calendar_actions")
+    _assert_no_booking_side_effect(db, client, conversation, fakes, before)
 
 
 # ---------------------------------------------------------------------------
@@ -450,17 +461,20 @@ def test_reask_unrelated_text_no_signal(db, fakes):
 
 def test_reask_then_valid_date_advances(db, fakes):
     # After an invalid correction (no signal), a later VALID typed date still
-    # advances through the existing time_preference owner.
+    # advances — PACKAGE B: straight to the exact-slot offer.
     client = _gated_client(db, ALL_OPEN)
     conversation = _at_time_window(db, client)
     r1 = send(db, client, conversation, "yesterday")
     assert "calendar_picker" not in (r1.meta or {})
     assert conversation.lead_time_window is None
     d = _next_weekday(client)
+    _seed_slot_on(db, client, d)
     r2 = send(db, client, conversation, _human_message(d))
-    assert r2.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert r2.meta.get("calendar_picker") == TIME_SIGNAL
+    assert r2.reply != INTAKE_TIME_PREFERENCE_PROMPT
+    assert r2.meta.get("calendar_picker") == {"stage": "slot_selection"}
+    assert r2.meta.get("calendar_actions")
     assert conversation.lead_time_window == _canonical(d)
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
 
 
 # ---------------------------------------------------------------------------

@@ -294,6 +294,13 @@ _module(
     # Inert None keeps this harness's scope: no calendar-picker
     # metadata is ever emitted here.
     intake_time_preference_stage_signal=lambda *a, **k: None,
+    # PACKAGE B: the real app.routes.chat now imports the Calendar-tier
+    # sufficiency owner calendar_intake_day_only_sufficient at module
+    # import time; expose an inert stand-in or collection fails before ANY
+    # of the 46 emergency tests runs. Constant False keeps this harness on
+    # strict Basic intake semantics — Calendar tiering is outside its
+    # scope, and every emergency assertion is tier-independent anyway.
+    calendar_intake_day_only_sufficient=lambda *a, **k: False,
     # V4.3.1: the real app.routes.chat now ALSO imports
     # intake_date_stage_signal at module import time; expose the inert named
     # stand-in defined above or collection fails before ANY of the 46

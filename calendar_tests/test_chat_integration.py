@@ -742,14 +742,18 @@ def test_url_removed_fresh_internal_dialog_starts(db, fakes):
     db.add(client)
     db.commit()
 
+    # PACKAGE B: the seeded date proceeds straight to the slot offer, so
+    # publish one fresh slot for tomorrow the new dialog can offer.
+    fresh_slot = make_slot(db, client, days_ahead=1, hour=10)
     resp = send(db, client, conversation, "can we book tomorrow?")
 
     assert resp.meta.get("mode") == "booking"
-    # A clean NEW dialog: the completing message seeded tomorrow's date;
-    # nothing stale (selected slot / offers) came back with it.
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    # A clean NEW dialog: the completing message seeded tomorrow's date and
+    # offered slots on the SAME turn; nothing stale (no selected slot, and
+    # the offer contains only the FRESH slot) came back with it.
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert conversation.booking_selected_slot_id is None
-    assert conversation.booking_offered_slot_ids in (None, [])
+    assert conversation.booking_offered_slot_ids == [str(fresh_slot.id)]
     assert conversation.booking_link_sent is True          # did not block
     old_row = refreshed_slot(db, old_slot.id)
     assert old_row.status == SlotStatus.AVAILABLE          # not silently re-held
@@ -969,9 +973,11 @@ def test_location_interruption_pauses_and_resumes(db, fakes):
     db.refresh(conversation)
     assert conversation.booking_state == BookingState.WAITING_FOR_DATE
 
+    # PACKAGE B: the resumed date proceeds straight to the slot offer.
+    make_slot(db, client, days_ahead=1, hour=10)
     resumed = send(db, client, conversation, "tomorrow")
     assert resumed.meta.get("mode") == "booking"
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
 
 
 # ===========================================================================

@@ -324,11 +324,10 @@ def test_full_booking_conversation(db, client_row, conversation_row, monkeypatch
     r1 = say("I'd like to book an appointment")
     assert r1.handled and conversation_row.booking_state == BookingState.WAITING_FOR_DATE
 
+    # PACKAGE B: the stored date proceeds DIRECTLY to the exact-slot offer —
+    # the morning/afternoon turn is removed from every Calendar date path.
     r2 = say(local_day)  # e.g. "july 13"
-    assert r2.handled and conversation_row.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-
-    r3 = say("any time works")
-    assert r3.handled and conversation_row.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert r2.handled and conversation_row.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     assert conversation_row.booking_offered_slot_ids
 
     r4 = say("the first one")

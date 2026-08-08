@@ -93,6 +93,7 @@ from app.services.booking_conversation import (
     BOUNDARY_SAFETY_BLOCKED,
     begin_booking_after_intake,
     booking_boundary_state,
+    calendar_intake_day_only_sufficient,
     cancel_active_booking,
     handle_booking_action,
     handle_booking_message,
@@ -924,7 +925,15 @@ def next_booking_capture_prompt(
         # is missing and a field-question tuple branch of that owner always
         # answers it. A "complete" stage is not a capture question, so it
         # releases the handoff instead of being echoed as a prompt.
-        if not priority_intake_is_complete(conversation):
+        # PACKAGE B: a lead whose intake is already SUFFICIENT (Calendar
+        # day-only counts, via the one sufficiency owner) must never be
+        # steered back into the capture-question owner — the completion
+        # sites route it to the booking engine instead. Basic tenants:
+        # sufficiency == strict completeness, so this guard changes nothing.
+        if (
+            not priority_intake_is_complete(conversation)
+            and not normal_lead_capture_is_sufficient(conversation, client)
+        ):
             priority_prompt, priority_stage = receptionist_bypass_reply(conversation, client)
             if priority_stage != "complete" and priority_prompt:
                 return priority_prompt
@@ -6668,20 +6677,83 @@ def source_text_is_generic_appointment_wording(source_text: Optional[str]) -> bo
     return tokens <= (SCHEDULING_CORE_TOKENS | SCHEDULING_FILLER_TOKENS)
 
 
+def _normal_lead_fields_except_window_complete(conversation: Conversation) -> bool:
+    """PACKAGE B mechanical extraction (Rule 3): the non-window half of
+    normal completeness — reason + name + phone + new/returning + email or
+    email opt-out — so the strict predicate and the Calendar sufficiency
+    predicate below share ONE field-set owner and can never drift. Moved
+    verbatim from normal_lead_capture_is_complete; no rule changed."""
+    return (
+        conversation_has_specific_lead_reason(conversation)
+        and bool((getattr(conversation, "lead_name", "") or "").strip())
+        and bool((getattr(conversation, "lead_phone", "") or "").strip())
+        and (getattr(conversation, "lead_is_new_patient", None) is not None)
+        and (
+            bool((getattr(conversation, "lead_email", "") or "").strip())
+            or bool(getattr(conversation, "lead_email_opt_out", False))
+        )
+    )
+
+
 def normal_lead_capture_is_complete(conversation: Conversation) -> bool:
     """
     Normal appointment leads require:
     reason + name + phone + complete preferred time + new/returning + email or email opt-out.
     """
     return (
-        conversation_has_specific_lead_reason(conversation)
-        and bool((getattr(conversation, "lead_name", "") or "").strip())
-        and bool((getattr(conversation, "lead_phone", "") or "").strip())
+        _normal_lead_fields_except_window_complete(conversation)
         and time_window_is_complete(getattr(conversation, "lead_time_window", None))
-        and (getattr(conversation, "lead_is_new_patient", None) is not None)
-        and (
-            bool((getattr(conversation, "lead_email", "") or "").strip())
-            or bool(getattr(conversation, "lead_email_opt_out", False))
+    )
+
+
+def time_window_sufficient_for_intake(client, tw: Optional[str]) -> bool:
+    """
+    Purpose: PACKAGE B — single owner (Rule 3) of "this stored window is
+             enough to finish intake". A window is sufficient when it is
+             COMPLETE by the unchanged Basic rule (specific day + detail,
+             or ASAP), OR when the tenant is Calendar-tier
+             (calendar_intake_day_only_sufficient: booking_enabled strict
+             True) and the window names a specific day — the booking
+             engine's exact-time offer replaces the part-of-day question,
+             so day-only completes intake for Calendar tenants only.
+    Inputs:  client — tenant row (None fails closed to the Basic rule);
+             tw — the canonical stored lead_time_window value.
+    Returns: bool. For booking_enabled anything-but-strict-True this is
+             byte-equivalent to time_window_is_complete, so Basic intake
+             behavior is unchanged everywhere this predicate replaced it.
+    Database effects: none. External effects: none.
+    """
+    if time_window_is_complete(tw):
+        return True
+    if client is None:
+        return False
+    return (
+        bool((tw or "").strip())
+        and time_window_has_specific_day(tw)
+        and calendar_intake_day_only_sufficient(client)
+    )
+
+
+def normal_lead_capture_is_sufficient(conversation: Conversation, client) -> bool:
+    """
+    Purpose: PACKAGE B — the POST-TURN completion test used by the three
+             existing completion-routing sites. Identical field set to
+             normal_lead_capture_is_complete via the ONE extracted owner;
+             only the window test is the Calendar-aware sufficiency. The
+             PRE-TURN snapshot (intake_complete_before_turn) deliberately
+             stays on the strict predicate so a lead persisted day-only
+             BEFORE Package B still registers the incomplete -> complete
+             TRANSITION on its next message and routes exactly once into
+             the same completion owner (acceptance: resumed/persisted date
+             state must not resurrect the time-preference stage).
+    Inputs:  conversation row; client row (None -> strict rule only).
+    Returns: bool. Basic tenants: byte-equivalent to the strict predicate.
+    Database effects: none. External effects: none.
+    """
+    return (
+        _normal_lead_fields_except_window_complete(conversation)
+        and time_window_sufficient_for_intake(
+            client, getattr(conversation, "lead_time_window", None)
         )
     )
 
@@ -8419,6 +8491,15 @@ def _next_intake_prompt(client: Client, conversation) -> str:
         tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
 
         if not time_window_is_complete(tw_val):
+            # PACKAGE B: a Calendar-sufficient day-only window has no
+            # remaining intake question — the completion sites route the
+            # next message straight into the booking engine's exact-slot
+            # offer, so this resume owner emits NOTHING rather than
+            # resurrecting the removed morning/afternoon stage or falsely
+            # promising a handoff that has not been sent. Every caller
+            # already treats an empty prompt as "no question pending".
+            if time_window_sufficient_for_intake(client, tw_val):
+                return ""
             if tw_val in {"Weekday morning", "Weekday afternoon"}:
                 return "Thanks — which weekday works best (Mon–Fri)?"
             if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
@@ -8435,6 +8516,11 @@ def _next_intake_prompt(client: Client, conversation) -> str:
     tw_val = (getattr(conversation, "lead_time_window", None) or "").strip()
 
     if not time_window_is_complete(tw_val):
+        # PACKAGE B: Calendar-sufficient day-only — no pending question;
+        # completion routing owns the next turn (see the short-symptom
+        # branch above for the full rationale). Basic byte-identical.
+        if time_window_sufficient_for_intake(client, tw_val):
+            return ""
         if tw_val in {"Weekday morning", "Weekday afternoon"}:
             return "Thanks — which weekday works best (Mon–Fri)?"
         if tw_val and time_window_has_specific_day(tw_val) and not time_window_has_detail(tw_val):
@@ -9410,7 +9496,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if (
                     not conversation_uses_short_symptom_flow(conversation)
                     and not intake_complete_before_turn
-                    and normal_lead_capture_is_complete(conversation)
+                    # PACKAGE B: post-turn test is the Calendar-aware
+                    # sufficiency, so a day-only answer completes intake for
+                    # a booking_enabled tenant and the engine's exact-slot
+                    # offer replaces the morning/afternoon capture prompt
+                    # built above (that prompt is discarded on routing).
+                    # Basic tenants: byte-equivalent to the strict predicate.
+                    and normal_lead_capture_is_sufficient(conversation, client)
                     and (conversation.lead_status or "").strip().lower() != "completed"
                 ):
                     return _complete_and_route_normal_lead(
@@ -9420,7 +9512,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
                 if (
                     conversation_uses_short_symptom_flow(conversation)
                     and lead_is_ready_for_office_notification(conversation)
-                    and time_window_is_complete(getattr(conversation, "lead_time_window", None))
+                    # PACKAGE B: Calendar-aware sufficiency — a day-only
+                    # short-symptom answer completes for booking_enabled
+                    # tenants (exact-slot offer replaces the part-of-day
+                    # ask); Basic short-symptom behavior is byte-identical.
+                    and time_window_sufficient_for_intake(
+                        client, getattr(conversation, "lead_time_window", None)
+                    )
                     and (conversation.lead_status or "").strip().lower() != "completed"
                 ):
                     lead_email_sent, lead_sms_sent, lead_email_error, lead_sms_error = mark_completed_and_notify_office(
@@ -10852,7 +10950,13 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
 
         
     if (
-        normal_lead_capture_is_complete(conversation)
+        # PACKAGE B: post-turn test is the Calendar-aware sufficiency; the
+        # pre-turn snapshot below stays strict, so a lead persisted with a
+        # day-only window BEFORE Package B registers the transition on its
+        # next message and routes here exactly once (never the removed
+        # morning/afternoon stage). Basic: byte-equivalent to the strict
+        # predicate, so this gate is unchanged for booking_enabled=False.
+        normal_lead_capture_is_sufficient(conversation, client)
         and not intake_complete_before_turn
         and (conversation.lead_status or "").strip().lower() != "completed"
     ):
@@ -11201,7 +11305,11 @@ def chat(req: ChatRequest, request: Request, db: Session = Depends(get_db)):
         or t_lower.startswith("thanks")
     )
 
-    lead_capture_complete = normal_lead_capture_is_complete(conversation)
+    # PACKAGE B: the safety-net completion site below keys on the
+    # Calendar-aware sufficiency, so a lead persisted day-only before
+    # Package B routes into the engine here even on a turn the capture
+    # guard never sees. Basic: byte-equivalent to the strict predicate.
+    lead_capture_complete = normal_lead_capture_is_sufficient(conversation, client)
 
     emergency_lead_complete = (
         bool(getattr(conversation, "lead_is_emergency", False))

@@ -24,10 +24,12 @@
 #   python -m pytest calendar_tests/test_intake_time_stage.py -v
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.calendar_models import BookingState
 from app.models import Conversation
 import app.routes.chat as chat_module
 from app.services.booking_conversation import (
@@ -40,6 +42,7 @@ from calendar_tests.test_chat_integration import (  # noqa: F401
     fakes,
     make_client,
     make_conversation,
+    make_slot,
     send,
 )
 
@@ -116,7 +119,11 @@ def _conversation_row(db, resp):
 # 1. The exact production sequence, end to end
 # ---------------------------------------------------------------------------
 
-def test_exact_production_sequence_day_only_carries_signal(db, fakes):
+def test_exact_production_sequence_day_only_goes_to_slot_offer(db, fakes):
+    # PACKAGE B (was: ...carries_signal): the day-only turn now COMPLETES
+    # intake for this booking-enabled tenant and returns the engine
+    # exact-slot offer with the slot_selection signal; the intake
+    # time-preference stage (and its signal) no longer exists here.
     client = _gated_client(db)
 
     # reason (fresh conversation; the widget sends no conversation_id)
@@ -142,20 +149,20 @@ def test_exact_production_sequence_day_only_carries_signal(db, fakes):
     assert conversation.lead_email_opt_out is True
 
     # day-only time-window answer - THE production response boundary.
-    day_text = _upcoming_weekday_text(db, client)
-    r5 = send(db, client, conversation, day_text)
-    assert r5.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert r5.meta.get("mode") == "intake_time_window_capture"
-    assert r5.meta.get("calendar_picker") == TIME_SIGNAL
+    # PACKAGE B: resolve the same weekday the helper would name, publish a
+    # slot on it, and pin the direct exact-slot offer on the SAME turn.
+    today = chat_module.get_client_now(client).date()
+    target = next(today + timedelta(days=a) for a in (2, 3, 4, 5, 6)
+                  if (today + timedelta(days=a)).weekday() < 5)
+    make_slot(db, client, days_ahead=(target - today).days, hour=10)
+    r5 = send(db, client, conversation, target.strftime("%A"))
+    assert r5.reply != INTAKE_TIME_PREFERENCE_PROMPT
+    assert r5.meta.get("calendar_picker") == {"stage": "slot_selection"}
+    assert r5.meta.get("calendar_actions")
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     # Package A: patient type was collected FIRST (right after the reason).
     assert conversation.lead_is_new_patient is not None
-
-    # Typed preference completes the time window; since patient type is already
-    # collected, this is the LAST field and the flow advances into the existing
-    # Calendar path rather than re-asking New/Returning here.
-    r6 = send(db, client, conversation, "morning")
-    assert "new or returning" not in r6.reply.lower()
-    assert (conversation.lead_time_window or "").endswith("morning")
+    assert "new or returning" not in r5.reply.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +251,7 @@ def test_exact_time_does_not_advertise_stage(db, fakes):
     assert "calendar_picker" not in (resp.meta or {})
 
 
-def test_weekend_day_input_does_not_advertise_stage(db, fakes):
+def test_weekend_day_input_does_not_advertise_stage(db, fakes, monkeypatch):
     # Owner-verified behavior note: this harness client has NO
     # office_hours, so "Saturday" is NOT rejected as a weekend day; it
     # takes a different (non-preference-prompt) intake path. This test
@@ -253,7 +260,21 @@ def test_weekend_day_input_does_not_advertise_stage(db, fakes):
     # stage signal. A true weekend-REJECTION negative would require an
     # office_hours-configured client and is intentionally out of scope
     # here (recorded deviation in the package report).
+    #
+    # DETERMINISM CORRECTION (recorded with Package B; behavior contract
+    # unchanged): run ON a Saturday, the literal "Saturday" resolved to
+    # TODAY and took the pre-existing today-preference path instead of the
+    # future-weekend path this test pins — a run-day collision inherited
+    # from the baseline (the test body is byte-identical there). Pin the
+    # route clock to a weekday so "Saturday" is always a FUTURE weekend
+    # day and the originally pinned path is exercised on every run day.
     client = _gated_client(db)
+    base = chat_module.get_client_now(client).date()
+    while base.weekday() >= 5:
+        base += timedelta(days=1)
+    pinned = datetime(base.year, base.month, base.day, 10, 0,
+                      tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr(chat_module, "get_client_now", lambda c: pinned)
     conversation = _pre_time_window_conversation(db, client)
 
     resp = send(db, client, conversation, "Saturday")

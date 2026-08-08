@@ -252,10 +252,11 @@ def test_meta_present_on_out_of_range_typed_day_reask(db):
 
 
 def test_meta_never_on_non_date_states(db):
-    # C2-A.3 retarget (owner-authorized): the DATE signal is date-stage
-    # ONLY and must not leak into the time-preference question that
-    # FOLLOWS a stored date (C2-A.2 end boundary) — but that question now
-    # legitimately carries the APPROVED C2-A.3 time-preference signal.
+    # C2-A.3 retarget + PACKAGE B: the DATE signal is date-stage ONLY and
+    # must not leak into the reply that FOLLOWS a stored date. That reply is
+    # now the exact-slot offer, which legitimately carries the APPROVED
+    # slot_selection signal — never "date", and never the removed
+    # time-preference stage.
     client = _client(db)
     conversation = _conversation(db, client)
     slot = _slot(db, client)
@@ -267,8 +268,9 @@ def test_meta_never_on_non_date_states(db):
         db, client, conversation, f"pick-date:{day.isoformat()}"
     )
     assert outcome.status == bc.ACTION_EXECUTED
-    assert outcome.reply.meta["calendar_picker"] == {"stage": "time_preference"}
+    assert outcome.reply.meta["calendar_picker"] == {"stage": "slot_selection"}
     assert outcome.reply.meta["calendar_picker"]["stage"] != "date"
+    assert outcome.reply.meta["calendar_picker"]["stage"] != "time_preference"
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +311,10 @@ def test_valid_pick_revalidates_through_preview_owner(db, monkeypatch):
     assert calls[0].service_key is None
 
 
-def test_open_date_follows_typed_transition_and_stops_at_time_stage(db):
+def test_open_date_follows_typed_transition_and_goes_to_slot_offer(db):
+    # PACKAGE B (was: ...stops_at_time_stage): the accepted picker date runs
+    # EXACTLY the typed path's continuation, which now proceeds DIRECTLY to
+    # the exact-slot offer — the morning/afternoon stage is removed.
     client = _client(db)
     conversation = _conversation(db, client)
     slot = _slot(db, client)
@@ -322,20 +327,21 @@ def test_open_date_follows_typed_transition_and_stops_at_time_stage(db):
     assert outcome.status == bc.ACTION_EXECUTED
     # Exactly the typed path's stored value and transition...
     assert conversation.booking_preferred_date == day.isoformat()
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-    # ...and exactly the typed path's next (and LAST C2-A.2) question.
-    assert "morning or afternoon" in outcome.reply.text
-    assert outcome.reply.meta["state"] == BookingState.WAITING_FOR_TIME_PREFERENCE
-    # 14 (C2-A.3 retarget, owner-authorized): the reply carries exactly
-    # mode, state, and the approved C2-A.3 time-preference signal — and
-    # no calendar_actions (time buttons) are attached at this preference
-    # question.
-    assert set(outcome.reply.meta.keys()) == {"mode", "state", "calendar_picker"}
-    assert outcome.reply.meta["calendar_picker"] == {"stage": "time_preference"}
-    assert "calendar_actions" not in outcome.reply.meta
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    # ...and exactly the typed path's next question: the slot offer, never
+    # the removed morning/afternoon ask.
+    assert "morning or afternoon" not in outcome.reply.text.lower()
+    assert outcome.reply.meta["state"] == BookingState.WAITING_FOR_SLOT_SELECTION
+    # PACKAGE B: the offer reply carries exactly mode, state, the approved
+    # slot_selection signal, the server-owned slot actions, and the
+    # existing offered_slots inventory — the unchanged _offer_slots meta.
+    assert set(outcome.reply.meta.keys()) == {
+        "mode", "state", "calendar_picker", "calendar_actions", "offered_slots"}
+    assert outcome.reply.meta["calendar_picker"] == {"stage": "slot_selection"}
+    assert outcome.reply.meta["calendar_actions"]
     # 10. The transcript label is SERVER-formatted from the accepted date.
     assert outcome.user_label == _expected_label(day)
-    # 11. Nothing was booked, held, or notified at the date stage.
+    # 11. Nothing was booked, held, or notified on the offering turn.
     _assert_no_writes(db, client, conversation)
 
 
@@ -511,38 +517,64 @@ def test_duplicate_submission_after_success_is_stale(db):
     db.refresh(conversation)
     # The replay changed nothing the first execution stored.
     assert conversation.booking_preferred_date == stored
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
 
 
 # ---------------------------------------------------------------------------
 # 12. Typed-date behavior is byte-for-byte unchanged in wording and flow.
 # ---------------------------------------------------------------------------
 
+def _slot_on_local_day(db, client, local_day, hour_local=14):
+    """PACKAGE B: one AVAILABLE slot on an EXACT client-local calendar day
+    (same row shape as _slot), so typed-date tests can pin the direct
+    exact-slot offer deterministically in any run timezone."""
+    start_local = datetime(local_day.year, local_day.month, local_day.day,
+                           hour_local, 0, tzinfo=ZoneInfo("America/New_York"))
+    start = start_local.astimezone(timezone.utc)
+    row = AppointmentSlot(
+        id=uuid.uuid4(),
+        client_id=client.id,
+        start_datetime=start,
+        end_datetime=start + timedelta(minutes=30),
+        status=SlotStatus.AVAILABLE,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 def test_typed_date_flow_unchanged_with_picker_enabled(db):
+    # PACKAGE B: the typed path stores the date and proceeds DIRECTLY to the
+    # exact-slot offer — no morning/afternoon question.
     client = _client(db)
     conversation = _conversation(db, client)
     _date_state(db, conversation)
+    tomorrow = date.today() + timedelta(days=1)
+    _slot_on_local_day(db, client, tomorrow)
     reply = bc._handle_date(
         db, client, conversation, _settings(client), "tomorrow", _now_utc()
     )
-    tomorrow = date.today() + timedelta(days=1)
     assert conversation.booking_preferred_date == tomorrow.isoformat()
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert reply.text.startswith("Got it — ")
-    assert "morning or afternoon" in reply.text
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert "morning or afternoon" not in reply.text.lower()
+    assert conversation.booking_offered_slot_ids
 
 
 def test_typed_date_flow_unchanged_with_picker_disabled(db):
+    # PACKAGE B: identical typed-path transition with the picker gate off —
+    # the flow parity the original test pinned, at the new slot-offer stop.
     client = _client(db, picker=False)
     conversation = _conversation(db, client)
     _date_state(db, conversation)
+    tomorrow = date.today() + timedelta(days=1)
+    _slot_on_local_day(db, client, tomorrow)
     reply = bc._handle_date(
         db, client, conversation, _settings(client), "tomorrow", _now_utc()
     )
-    tomorrow = date.today() + timedelta(days=1)
     assert conversation.booking_preferred_date == tomorrow.isoformat()
-    assert conversation.booking_state == BookingState.WAITING_FOR_TIME_PREFERENCE
-    assert "morning or afternoon" in reply.text
+    assert conversation.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert "morning or afternoon" not in reply.text.lower()
+    assert conversation.booking_offered_slot_ids
 
 
 # ---------------------------------------------------------------------------

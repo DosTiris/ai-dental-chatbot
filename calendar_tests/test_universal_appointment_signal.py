@@ -77,6 +77,11 @@ from calendar_tests.test_chat_integration import (  # noqa: F401
 
 DATE_SIGNAL = {"stage": "date", "submit": "message"}
 TIME_SIGNAL = {"stage": "time_preference"}
+# PACKAGE B: a stored date proceeds DIRECTLY to the server-owned exact-slot
+# offer; the slot_selection signal replaces the removed time_preference stage
+# on every date turn, and TIME_SIGNAL below is retained solely to pin that
+# the removed stage never reappears.
+SLOT_SIGNAL = {"stage": "slot_selection"}
 GENERIC_FALLBACK_REASON = "appointment request"
 
 NY = ZoneInfo("America/New_York")
@@ -535,34 +540,78 @@ def _at_date_stage(db, client, reason="cleaning/checkup"):
         lead_time_window=None, lead_is_new_patient=True)
 
 
-def test_future_date_emits_time_preference(db, fakes, monkeypatch):
+def _publish_slot_on(db, client, day, hour=10):
+    """PACKAGE B: one AVAILABLE slot on an EXACT local calendar day, derived
+    through the same make_slot owner (days_ahead relative to the real clock),
+    so date-turn tests can assert the direct exact-slot offer."""
+    real_today = datetime.now(NY).date()
+    return make_slot(db, client, days_ahead=(day - real_today).days, hour=hour,
+                     status=SlotStatus.AVAILABLE)
+
+
+def _pin_both_clocks(monkeypatch, client, hour=10):
+    """PACKAGE B: same-day tests reach the ENGINE on the date turn now, so
+    the engine's single clock owner (booking_conversation.client_now — the
+    sanctioned test_booking_db._fixed_clock pattern) must agree with the
+    route clock; otherwise the slot-eligibility notice check floats with the
+    real run time."""
+    import app.services.booking_conversation as _bc
+    pinned = _pin_open_weekday(monkeypatch, client, hour=hour)
+    monkeypatch.setattr(_bc, "client_now", lambda settings: pinned)
+    return pinned
+
+
+def _assert_direct_slot_offer(resp, conv):
+    """PACKAGE B shared pin: a stored date proceeds DIRECTLY to the
+    server-owned exact-slot offer — WAITING_FOR_SLOT_SELECTION with
+    calendar_choice actions and the slot_selection picker signal — and the
+    removed time-preference stage never reappears in any form."""
+    assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
+    assert (resp.meta or {}).get("calendar_picker") == SLOT_SIGNAL
+    assert resp.reply != INTAKE_TIME_PREFERENCE_PROMPT
+    assert resp.reply != INTAKE_TIME_PREFERENCE_TODAY_PROMPT
+    assert "morning or afternoon" not in (resp.reply or "").lower()
+    actions = (resp.meta or {}).get("calendar_actions")
+    assert actions, "server-owned slot buttons expected on the date turn"
+    for e in actions:
+        assert e["action"]["type"] == "calendar_choice"
+
+
+def test_future_date_advances_directly_to_slot_offer(db, fakes, monkeypatch):
+    # PACKAGE B (was: ...emits_time_preference): a valid FUTURE date at the
+    # intake date stage completes intake and returns the engine's exact-slot
+    # offer on the SAME turn — no morning/afternoon question, no
+    # time_preference signal, ever.
     client = _gated_client(db)
-    pinned = _pin_open_weekday(monkeypatch, client)
+    pinned = _pin_both_clocks(monkeypatch, client)
     conv = _at_date_stage(db, client)
     d = pinned.date() + timedelta(days=1)
     while d.weekday() >= 5:
         d += timedelta(days=1)
+    _publish_slot_on(db, client, d)
     resp = send(db, client, conv, _date_message(d))
-    assert resp.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert resp.meta.get("calendar_picker") == TIME_SIGNAL
+    _assert_direct_slot_offer(resp, conv)
 
 
-def test_same_day_full_month_name_message_emits_time_preference(db, fakes, monkeypatch):
+def test_same_day_full_month_name_advances_directly_to_slot_offer(db, fakes, monkeypatch):
+    # PACKAGE B: today (full month-name message) behaves exactly like a
+    # future date — straight to the exact-slot offer.
     client = _gated_client(db)
-    pinned = _pin_open_weekday(monkeypatch, client)
+    pinned = _pin_both_clocks(monkeypatch, client)
     conv = _at_date_stage(db, client)
+    _publish_slot_on(db, client, pinned.date(), hour=15)
     resp = send(db, client, conv, _date_message(pinned.date()))
-    assert resp.reply == INTAKE_TIME_PREFERENCE_TODAY_PROMPT
-    assert resp.meta.get("calendar_picker") == TIME_SIGNAL
+    _assert_direct_slot_offer(resp, conv)
 
 
-def test_same_day_typed_today_emits_time_preference(db, fakes, monkeypatch):
+def test_same_day_typed_today_advances_directly_to_slot_offer(db, fakes, monkeypatch):
+    # PACKAGE B: typed "today" — straight to the exact-slot offer.
     client = _gated_client(db)
-    _pin_open_weekday(monkeypatch, client)
+    pinned = _pin_both_clocks(monkeypatch, client)
     conv = _at_date_stage(db, client)
+    _publish_slot_on(db, client, pinned.date(), hour=15)
     resp = send(db, client, conv, "today")
-    assert resp.reply == INTAKE_TIME_PREFERENCE_TODAY_PROMPT
-    assert resp.meta.get("calendar_picker") == TIME_SIGNAL
+    _assert_direct_slot_offer(resp, conv)
 
 
 # ===========================================================================
@@ -597,9 +646,7 @@ def _run_full_flow(db, client, monkeypatch, *, entry, expect_key=None,
           -> name / phone / email boundaries as applicable
           -> {"stage": "date", "submit": "message"}
           -> valid date
-          -> {"stage": "time_preference"}
-          -> Morning
-          -> server-owned slot calendar_actions
+          -> (PACKAGE B) server-owned slot calendar_actions on the SAME turn
              (action.type == "calendar_choice"; patient-facing label == message;
               opaque choice_id never shown as a label or in the reply).
     """
@@ -634,19 +681,13 @@ def _run_full_flow(db, client, monkeypatch, *, entry, expect_key=None,
         assert (resp.reply or "").endswith(
             INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL)
 
-    # valid date -> time_preference signal
-    r_date = send(db, client, conv, _date_message(target))
-    assert r_date.meta.get("calendar_picker") == TIME_SIGNAL
-
-    # Morning -> server-owned slot actions.
-    # The STANDARD intake asks the single new/returning-patient boundary AFTER
-    # the time preference and BEFORE offering slots (short-symptom / priority
-    # branches do not). Answer that one boundary ONLY when the real route
-    # actually asks it, then slots appear. Verified live against the owner:
-    # standard flow -> "are you a new or returning patient?" -> slot actions.
-    # Patient type was answered up front (Package A), so the time preference is
-    # the final field and slots appear on this turn.
-    r_slots = send(db, client, conv, "morning")
+    # PACKAGE B: valid date -> the engine's exact-slot offer on the SAME
+    # turn. The morning/afternoon step is removed for Calendar tenants;
+    # the date turn IS the slot turn, carrying the slot_selection signal.
+    r_slots = send(db, client, conv, _date_message(target))
+    assert r_slots.meta.get("calendar_picker") == SLOT_SIGNAL
+    assert (r_slots.reply or "") not in (INTAKE_TIME_PREFERENCE_PROMPT,
+                                         INTAKE_TIME_PREFERENCE_TODAY_PROMPT)
     assert conv.booking_state == BookingState.WAITING_FOR_SLOT_SELECTION
     actions = r_slots.meta.get("calendar_actions")
     assert actions, "server-owned slot buttons expected"
@@ -959,14 +1000,17 @@ def test_night_guard_full_flow_to_slot_actions(db, fakes, monkeypatch):
 
 
 def test_night_guard_bare_evening_still_captures(db, fakes, monkeypatch):
-    # #5 A bare "evening" at the time stage still captures an evening window
-    # (proves the fix suppresses only service-selection turns, not time answers).
+    # #5 A bare "evening" is still consumable as a genuine time answer
+    # (proves the fix suppresses only service-selection turns, not time
+    # answers). PACKAGE B: a stored DATE now hands the conversation to the
+    # booking engine on the same turn, so the bare time answer is pinned at
+    # the intake time-window stage itself — the only place route-level
+    # window capture still runs for a Calendar tenant.
     client = _gated_client(db)
-    _, target = _publish_future_open_slot(db, client, monkeypatch)
+    _publish_future_open_slot(db, client, monkeypatch)
     conv = _fresh(db, client)
     send(db, client, conv, "dental cleaning")          # specific reason first
     _complete_intake_to_date(db, client, conv)
-    send(db, client, conv, _date_message(target))
     send(db, client, conv, "evening")
     db.refresh(conv)
     assert "evening" in (conv.lead_time_window or "").lower(), (
@@ -974,13 +1018,13 @@ def test_night_guard_bare_evening_still_captures(db, fakes, monkeypatch):
 
 
 def test_night_guard_i_prefer_evening_still_captures(db, fakes, monkeypatch):
-    # #6 "I prefer evening" still captures an evening window.
+    # #6 "I prefer evening" still captures an evening window (same PACKAGE B
+    # placement rationale as #5).
     client = _gated_client(db)
-    _, target = _publish_future_open_slot(db, client, monkeypatch)
+    _publish_future_open_slot(db, client, monkeypatch)
     conv = _fresh(db, client)
     send(db, client, conv, "dental cleaning")
     _complete_intake_to_date(db, client, conv)
-    send(db, client, conv, _date_message(target))
     send(db, client, conv, "I prefer evening")
     db.refresh(conv)
     assert "evening" in (conv.lead_time_window or "").lower(), (
@@ -1078,24 +1122,26 @@ def test_closed_weekend_date_rejected_by_same_owner(db, fakes, weekday, day_key)
 
 @pytest.mark.parametrize("weekday,day_key", [(5, "sat"), (6, "sun")])
 def test_open_weekend_date_advances(db, fakes, weekday, day_key):
-    # audit #8, #9: a tenant that OPENS a weekend day advances that weekend
-    # date to time preference exactly like a weekday. Weekend availability is
-    # tenant-owned, never assumed universally closed.
+    # audit #8, #9 (PACKAGE B): a tenant that OPENS a weekend day advances
+    # that weekend date straight to the exact-slot offer, exactly like a
+    # weekday. Weekend availability is tenant-owned, never assumed closed.
     client = _gated_client(db, office_hours=_hours_closing())   # all seven open
     conv = _at_date_stage(db, client)
-    resp = send(db, client, conv, _date_message(_next_date_with_weekday(client, weekday)))
-    assert resp.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert (resp.meta or {}).get("calendar_picker") == TIME_SIGNAL
+    d = _next_date_with_weekday(client, weekday)
+    _publish_slot_on(db, client, d)
+    resp = send(db, client, conv, _date_message(d))
+    _assert_direct_slot_offer(resp, conv)
 
 
 def test_open_weekday_date_advances(db, fakes):
-    # audit #10: control -- an OPEN weekday still advances when a DIFFERENT
-    # weekday is the one closed.
+    # audit #10 (PACKAGE B): control -- an OPEN weekday still advances,
+    # straight to the exact-slot offer, when a DIFFERENT weekday is closed.
     client = _gated_client(db, office_hours=_hours_closing("wed"))
     conv = _at_date_stage(db, client)
-    resp = send(db, client, conv, _date_message(_next_date_with_weekday(client, 3)))  # Thu open
-    assert resp.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert (resp.meta or {}).get("calendar_picker") == TIME_SIGNAL
+    d = _next_date_with_weekday(client, 3)                      # Thu open
+    _publish_slot_on(db, client, d)
+    resp = send(db, client, conv, _date_message(d))
+    _assert_direct_slot_offer(resp, conv)
 
 
 def test_today_closed_typed_is_rejected(db, fakes, monkeypatch):
@@ -1118,13 +1164,14 @@ def test_today_closed_typed_is_rejected(db, fakes, monkeypatch):
 
 
 def test_today_open_typed_advances(db, fakes, monkeypatch):
-    # audit #12: "today" advances and emits the (same-day) time-preference
-    # signal when today's configured weekday is genuinely open.
+    # audit #12 (PACKAGE B): "today" advances straight to the exact-slot
+    # offer when today's configured weekday is genuinely open.
     client = _gated_client(db, office_hours=_hours_closing())   # all seven open
-    pinned = _pin_open_weekday(monkeypatch, client)             # Mon-Fri, open
+    pinned = _pin_both_clocks(monkeypatch, client)              # Mon-Fri, open
     conv = _at_date_stage(db, client)
+    _publish_slot_on(db, client, pinned.date(), hour=15)
     resp = send(db, client, conv, "today")
-    assert (resp.meta or {}).get("calendar_picker") == TIME_SIGNAL
+    _assert_direct_slot_offer(resp, conv)
 
 
 def test_short_symptom_closed_date_no_mutation(db, fakes):
@@ -1170,9 +1217,10 @@ def test_closed_date_then_open_date_advances(db, fakes):
     db.refresh(conv)
     assert (r_bad.meta or {}).get("calendar_picker") != TIME_SIGNAL
     assert conv.lead_time_window == before
-    r_good = send(db, client, conv, _date_message(_next_date_with_weekday(client, 3)))  # Thu open
-    assert r_good.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert (r_good.meta or {}).get("calendar_picker") == TIME_SIGNAL
+    d_good = _next_date_with_weekday(client, 3)                 # Thu open
+    _publish_slot_on(db, client, d_good)
+    r_good = send(db, client, conv, _date_message(d_good))
+    _assert_direct_slot_offer(r_good, conv)                     # PACKAGE B
 
 
 # ===========================================================================
@@ -1201,12 +1249,14 @@ def _no_hours_client(db):
 
 def test_no_hours_day_only_date_advances(db, fakes):
     # no configured hours + DAY-ONLY date: fallback preserved end to end
-    # through the real route -- the date advances to time preference.
+    # through the real route -- PACKAGE B: the date advances straight to the
+    # exact-slot offer (an unconfigured office advertises no closures).
     client = _no_hours_client(db)
     conv = _at_date_stage(db, client)
-    resp = send(db, client, conv, _date_message(_next_date_with_weekday(client, 2)))
-    assert resp.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert (resp.meta or {}).get("calendar_picker") == TIME_SIGNAL
+    d = _next_date_with_weekday(client, 2)
+    _publish_slot_on(db, client, d)
+    resp = send(db, client, conv, _date_message(d))
+    _assert_direct_slot_offer(resp, conv)
 
 
 def test_no_hours_exact_time_still_rejected(db, fakes):
@@ -1253,9 +1303,9 @@ def test_rejected_date_then_valid_date_advances(db, fakes, monkeypatch):
     good = pinned.date() + timedelta(days=1)
     while good.weekday() >= 5:
         good += timedelta(days=1)
+    _publish_slot_on(db, client, good)
     r_good = send(db, client, conv, _date_message(good))
-    assert r_good.reply == INTAKE_TIME_PREFERENCE_PROMPT
-    assert r_good.meta.get("calendar_picker") == TIME_SIGNAL
+    _assert_direct_slot_offer(r_good, conv)                     # PACKAGE B
 
 
 def test_safety_blocked_conversation_emits_no_signal(db, fakes):
