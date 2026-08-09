@@ -13,7 +13,7 @@ from typing import List, Optional
 
 from app.repositories import appointment_repository
 from app.services.appointment_intent import PREF_ANY
-from app.services.availability_rules import filter_bookable_slots
+from app.services.availability_rules import filter_bookable_slots, list_bookable_slots
 from app.services.calendar_settings_service import CalendarSettings, local_day_utc_window
 
 
@@ -45,6 +45,40 @@ def get_available_slots(
 
     rows = appointment_repository.list_slots_between(db, client_id, day_start_utc, day_end_utc)
     return filter_bookable_slots(rows, now_utc, settings, time_preference, service_key)
+
+
+def get_bookable_slots_for_day(
+    db,
+    client_id: uuid.UUID,
+    settings: CalendarSettings,
+    day: date,
+    time_preference: str,
+    now_utc: datetime,
+    service_key: Optional[str] = None,
+) -> List:
+    """
+    Purpose: Fetch + filter EVERY bookable slot for one LOCAL calendar day -
+             the UNCAPPED sibling of get_available_slots (UX-A slot
+             pagination). Same UTC-window fetch, same single pure rule owner
+             (list_bookable_slots); the ONLY difference is that
+             max_offered_slots is not applied here, so the offer owner in
+             booking_conversation can page through the full chronological
+             day without a second slot engine (Rule 3).
+    Inputs:  identical to get_available_slots.
+    Returns: EVERY bookable slot row for the day, soonest first, uncapped.
+             By construction get_available_slots(...) equals
+             get_bookable_slots_for_day(...)[: settings.max_offered_slots]
+             (filter_bookable_slots is documented as exactly that thin cap
+             over list_bookable_slots); a UX-A acceptance test pins the
+             equivalence so the two callers can never drift apart.
+    Database effects: SELECT only (via repository).
+    Possible failures: database errors propagate to the caller (Rule 4 - no
+        broad exception handling that hides failures).
+    """
+    day_start_utc, day_end_utc = local_day_utc_window(day, settings.timezone_name)
+
+    rows = appointment_repository.list_slots_between(db, client_id, day_start_utc, day_end_utc)
+    return list_bookable_slots(rows, now_utc, settings, time_preference, service_key)
 
 
 def find_days_with_availability(

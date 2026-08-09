@@ -108,6 +108,22 @@ CONFIRM_NO_CHOICE_PREFIX = "confirm-no:"
 # surface: it can propose a date, never book one.
 DATE_SELECT_CHOICE_PREFIX = "pick-date:"
 
+# UX-A (slot pagination): the two server-DEFINED slot-page navigation choice
+# ids. Fixed literals - deliberately NOT UUID-shaped and NOT prefixed forms
+# of any persisted identifier - so a navigation tap can never be mistaken
+# for a slot selection (a UUID parse of either raises). They resolve ONLY at
+# WAITING_FOR_SLOT_SELECTION, BEFORE the offered-membership check, and a
+# navigation NEVER places a hold, NEVER books, NEVER notifies: it rewrites
+# only the Patch 2C offer trio with a freshly REVALIDATED adjacent page.
+# Paging stays server-authoritative - hidden later slot ids are never
+# pre-sent to the browser; each page is recomputed from live availability.
+SLOTS_LATER_CHOICE_ID = "slots-later"
+SLOTS_EARLIER_CHOICE_ID = "slots-earlier"
+SLOT_NAV_CHOICE_IDS = frozenset({SLOTS_LATER_CHOICE_ID, SLOTS_EARLIER_CHOICE_ID})
+# Exact patient-facing labels (owner contract - never shortened to "Back").
+SLOTS_LATER_LABEL = "See later times"
+SLOTS_EARLIER_LABEL = "Back to earlier times"
+
 # C2-A.3 (visual time stages): the server-defined stage-signal vocabulary
 # for the EXISTING meta.calendar_picker channel introduced by C2-A.2.
 # "date" (owned by _date_stage_meta, untouched) tells the widget to render
@@ -414,6 +430,83 @@ def _slot_choice_actions(slots, tz_name: str) -> List[dict]:
                        "choice_id": str(s.id)},
         })
     return actions
+
+
+def _slot_nav_actions(has_earlier: bool, has_later: bool) -> List[dict]:
+    """UX-A: the server-issued slot-page navigation choices for the CURRENT
+    page - 'Back to earlier times' first, then 'See later times' (owner
+    contract ordering). Issued ONLY alongside slot calendar_actions at
+    WAITING_FOR_SLOT_SELECTION; the ids are the fixed non-UUID literals
+    above and are navigation, never selection (no hold, no booking, no
+    notification). Each flag reflects the FRESH eligible list, so a page
+    that is truly first/last never advertises a direction it cannot take."""
+    actions = []
+    if has_earlier:
+        actions.append({
+            "label": SLOTS_EARLIER_LABEL,
+            "message": SLOTS_EARLIER_LABEL,
+            "action": {"type": CALENDAR_CHOICE_ACTION_TYPE,
+                       "choice_id": SLOTS_EARLIER_CHOICE_ID},
+        })
+    if has_later:
+        actions.append({
+            "label": SLOTS_LATER_LABEL,
+            "message": SLOTS_LATER_LABEL,
+            "action": {"type": CALENDAR_CHOICE_ACTION_TYPE,
+                       "choice_id": SLOTS_LATER_CHOICE_ID},
+        })
+    return actions
+
+
+def _current_page_nav_actions(db, client, conversation, settings, now_utc,
+                              page_rows):
+    """
+    Purpose: READ-ONLY truthful navigation for the CURRENT persisted page
+             (round-2 audit F4). Authoritative restates and STALE_CHOICE
+             replacements re-show the persisted page; this single owner
+             restores the pagination controls that page truthfully has
+             RIGHT NOW - so a later page always carries "Back to earlier
+             times" and a middle page carries both directions - recomputed
+             from CURRENT availability, never from the stored offer.
+    Inputs:  live session, client row, conversation row, settings, now_utc,
+             page_rows - the surviving persisted-page slot rows the caller
+             is about to re-show (vanished rows already dropped).
+    Returns: navigation action list from the _slot_nav_actions owner
+             (possibly empty). Never slot chips, never hidden UUIDs.
+    Database effects: none (availability SELECTs only). No conversation
+        field, no hold, no appointment, and no notification is touched -
+        the callers are non-mutating paths and stay that way.
+    Possible failures: service/db errors propagate (Rule 4).
+    """
+    if not page_rows:
+        return []
+    day = _get_pref_date(conversation)
+    if day is None:
+        # Corrupt/missing stored date: never guess a fetch window for a
+        # read-only decoration - simply omit the controls.
+        return []
+    eligible = availability_service.get_bookable_slots_for_day(
+        db, client.id, settings, day,
+        _revalidation_preference(conversation), now_utc,
+        service_key=(conversation.lead_reason or None),
+    )
+    if not eligible:
+        return []
+    page_starts = [ensure_utc(r.start_datetime) for r in page_rows]
+    first_start = min(page_starts)
+    last_start = max(page_starts)
+    # Directions are judged against CURRENT chronological availability
+    # relative to the page being re-shown (the same start-time anchoring
+    # rule _select_slot_page pages by).
+    has_earlier = any(
+        ensure_utc(s.start_datetime) < first_start for s in eligible
+    )
+    has_later = any(
+        ensure_utc(s.start_datetime) > last_start for s in eligible
+    )
+    if not (has_earlier or has_later):
+        return []
+    return _slot_nav_actions(has_earlier, has_later)
 
 
 # ---------------------------------------------------------------------------
@@ -966,8 +1059,10 @@ def _revalidation_preference(conversation) -> str:
 
 
 def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
-    """Fetch availability for the stored day+preference and present up to
-    max_offered_slots numbered options, or suggest other days."""
+    """Fetch availability for the stored day+preference and present the
+    FIRST PAGE of up to max_offered_slots numbered options - appending the
+    'See later times' navigation choice when more eligible slots exist on
+    the same day (UX-A) - or suggest other days."""
     day = _get_pref_date(conversation)
     if day is None:  # Corrupt/missing date: fall back to asking the day again.
         conversation.booking_state = BookingState.WAITING_FOR_DATE
@@ -977,21 +1072,33 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
                             _date_stage_meta(settings))
 
     preference = conversation.booking_time_preference or PREF_ANY
-    slots = availability_service.get_available_slots(
+    # UX-A: fetch the UNCAPPED chronological eligible list through the same
+    # single rule owner, so the first page can truthfully know whether later
+    # times exist on this day without a second availability computation.
+    eligible = availability_service.get_bookable_slots_for_day(
         db, client.id, settings, day, preference, now_utc,
         service_key=(conversation.lead_reason or None),
     )
     relaxed = False
-    if not slots and preference != PREF_ANY:
+    if not eligible and preference != PREF_ANY:
         # Same day, other times: better than a dead end, and clearly labeled.
-        slots = availability_service.get_available_slots(
+        eligible = availability_service.get_bookable_slots_for_day(
             db, client.id, settings, day, PREF_ANY, now_utc,
             service_key=(conversation.lead_reason or None),
         )
-        relaxed = bool(slots)
+        relaxed = bool(eligible)
 
-    if not slots:
+    if not eligible:
         return _suggest_other_days(db, client, conversation, settings, day, now_utc)
+
+    # UX-A first page: the first max_offered_slots eligible slots - by
+    # construction the IDENTICAL membership and order the pre-pagination
+    # capped fetch produced (filter_bookable_slots is documented as exactly
+    # list_bookable_slots + this same slice, and a pagination test pins the
+    # equivalence). has_later is the ONLY new fact derived from the tail;
+    # hidden later slot ids are never persisted, exposed, or pre-sent.
+    slots = eligible[: settings.max_offered_slots]
+    has_later = len(eligible) > len(slots)
 
     # PATCH 2C: the offer gets an explicit bounded lifetime and records the
     # EFFECTIVE preference it was filtered with (PREF_ANY when relaxed) so
@@ -1023,6 +1130,13 @@ def _offer_slots(db, client, conversation, settings, now_utc) -> BookingReply:
         reply_meta["calendar_actions"] = _slot_choice_actions(
             slots, settings.timezone_name
         )
+        # UX-A: append 'See later times' when - and only when - eligible
+        # slots exist beyond this first page. A day whose slots fit one
+        # page keeps the action set byte-identical to the frozen
+        # pre-pagination behavior (first-page slot chips are unchanged
+        # either way; the navigation chip is purely additive).
+        if has_later:
+            reply_meta["calendar_actions"] += _slot_nav_actions(False, True)
         # C2-A.3: the slot_selection stage signal attaches ONLY alongside
         # slot calendar_actions, and only under the strict triple gate
         # (single owner: _picker_stage_signal). A reply without actions
@@ -1085,6 +1199,205 @@ def _suggest_other_days(db, client, conversation, settings, day, now_utc) -> Boo
                         _date_stage_meta(settings))
 
 
+def _refresh_expired_offer(db, client, conversation, settings, now_utc) -> BookingReply:
+    """PATCH 2C expiry recovery - extracted MECHANICALLY from
+    _handle_slot_selection for UX-A so the typed path and the navigation
+    action path share the single owner (Rule 3); the moved logic is byte-
+    preserved. Clear ALL THREE stale values, then generate a fresh offer
+    for the same stored day/preference; the patient re-picks from CURRENT
+    times. The stale menu can never place a hold."""
+    conversation.booking_offered_slot_ids = None
+    conversation.booking_offer_expires_at = None
+    conversation.booking_effective_time_preference = None
+    db.add(conversation)
+    reply = _offer_slots(db, client, conversation, settings, now_utc)
+    reply.meta["reason"] = "offer_expired"
+    return reply
+
+
+def _select_slot_page(eligible, prev_rows, page_size, go_later):
+    """
+    Purpose: Pure UX-A page math - choose the adjacent page of the freshly
+             revalidated chronological eligible list, anchored on the start
+             times of the rows the patient is navigating FROM.
+    Inputs:
+        eligible:  the fresh uncapped bookable list (chronological, non-
+                   empty - the caller owns the empty-day branch).
+        prev_rows: surviving rows of the currently persisted page (may be
+                   empty when staff removed every one of them).
+        page_size: settings.max_offered_slots (already clamped 1..10).
+        go_later:  True for 'See later times', False for 'Back to earlier
+                   times'.
+    Returns: (page, moved) - page is a non-empty slice of eligible; moved
+             is True only when the page really lies in the requested
+             direction relative to the anchor (drives truthful wording).
+    Database effects: none (pure).
+    Possible failures: none - every degenerate input falls back to a real,
+        CURRENTLY eligible page (first or last), never an empty offer and
+        never an invented or resurrected slot.
+
+    Anchoring is by START TIME, never by list index: availability may have
+    changed since the previous page was shown (booked / newly held /
+    staff-removed rows), so index arithmetic against the stale list would
+    lie. Later = the first page_size eligible slots strictly AFTER the
+    previous page's latest start; earlier = the last page_size strictly
+    BEFORE its earliest start (the slots immediately preceding it). With
+    no surviving anchor the first page is the only honest answer; with
+    nothing beyond the anchor the CURRENT last (or first) page is shown
+    instead, flagged unmoved so the reply never claims a false direction.
+    """
+    if not prev_rows:
+        return eligible[:page_size], False
+    if go_later:
+        anchor = max(ensure_utc(r.start_datetime) for r in prev_rows)
+        page = [s for s in eligible
+                if ensure_utc(s.start_datetime) > anchor][:page_size]
+        if page:
+            return page, True
+        return eligible[-page_size:], False
+    anchor = min(ensure_utc(r.start_datetime) for r in prev_rows)
+    earlier = [s for s in eligible if ensure_utc(s.start_datetime) < anchor]
+    if earlier:
+        return earlier[-page_size:], True
+    return eligible[:page_size], False
+
+
+def _offer_adjacent_slot_page(db, client, conversation, settings, now_utc,
+                              go_later, entry_offered_ids) -> BookingReply:
+    """
+    Purpose: Execute ONE UX-A slot-page navigation ('See later times' /
+             'Back to earlier times') at WAITING_FOR_SLOT_SELECTION.
+    Inputs:  live session, client row, conversation row, settings, now_utc,
+             go_later (True = later page, False = earlier page),
+             entry_offered_ids (the persisted page ids THIS request entered
+             from - the resolver's boundary-reloaded view; the winner gate
+             below requires the newest committed row to still equal them).
+    Returns: BookingReply presenting the revalidated adjacent page, or the
+             truthful current-state reply when this request lost a per-
+             conversation race (zero mutation on that path).
+    Database effects: rewrites ONLY the Patch 2C offer trio (offered ids,
+        display expiry, effective preference) and re-asserts the selection
+        state - the SAME fields _offer_slots owns. NO hold is placed or
+        released, NO appointment is created, and the stored day is never
+        changed here.
+    External effects: none - navigation never notifies.
+    Possible failures: service/db errors propagate (Rule 4).
+
+    CONCURRENCY (V2/V4 discipline; round-1 audit F1): this mutation may be
+    racing a slot selection, another navigation, or a new-date offer that
+    committed AFTER this request's V4 boundary reload. So BEFORE any field
+    changes: reacquire the tenant-scoped row under SELECT ... FOR UPDATE
+    via the existing _lock_conversation_row owner, reload the newest
+    committed state, and proceed ONLY while the conversation still awaits
+    a selection, no slot has been selected, and the persisted offer still
+    equals the page this request entered from. Every loser releases the
+    row lock without writing and answers through the existing
+    _truthful_current_state_reply owner - a request that began from an
+    older ORM snapshot never overwrites a newer committed state. An offer
+    that expired in flight, and the corrupt-date self-heal, both run their
+    EXISTING recovery owners under this same row lock (their internal
+    commits release it atomically with the recovery).
+
+    Every navigation revalidates against CURRENT availability through the
+    same uncapped owner the first page uses, filtered with the EFFECTIVE
+    preference the live offer was filtered with (_revalidation_preference -
+    the Patch 2C reader hold/finalize already trust), so a relaxed PREF_ANY
+    offer pages through PREF_ANY times and is never re-narrowed. A day that
+    lost ALL availability falls through to the existing _suggest_other_days
+    owner (unchanged semantics). Only THIS page's slot ids are persisted
+    and exposed; a slot that stopped being eligible between pages can never
+    reappear, because membership comes from the fresh list alone.
+    """
+    # Winner gate (audit F1): lock + reload FIRST, then decide on the
+    # newest row - never on the entry snapshot (module V2 header rule).
+    locked = _lock_conversation_row(db, client, conversation)
+    fresh_selected = getattr(conversation, "booking_selected_slot_id", None)
+    if (locked is None
+            or _get_state(conversation) != BookingState.WAITING_FOR_SLOT_SELECTION
+            or fresh_selected is not None
+            or _get_offered_ids(conversation) != list(entry_offered_ids or [])):
+        # A selection, another navigation, or a new-date offer won while
+        # this request was in flight: PRESERVE it. Release the row lock
+        # without writing and answer truthfully for the state that won.
+        db.commit()  # No writes: releases the FOR UPDATE row lock only.
+        return _truthful_current_state_reply(
+            db, client, conversation, settings, now_utc
+        )
+    if _offer_is_expired(conversation, now_utc):
+        # Entry saw a live offer that expired in flight: the EXISTING
+        # Patch 2C recovery, now under the row lock taken above (its
+        # internal commit releases the lock atomically with the fresh
+        # first page). Same behavior the typed path delivers.
+        return _refresh_expired_offer(db, client, conversation, settings, now_utc)
+
+    day = _get_pref_date(conversation)
+    if day is None:
+        # Corrupt/missing date: the SAME self-heal owner _offer_slots uses,
+        # under the row lock (its internal commit releases the lock).
+        return _offer_slots(db, client, conversation, settings, now_utc)
+
+    preference = _revalidation_preference(conversation)
+    prev_rows = _load_offered_slots(db, client, conversation)
+    eligible = availability_service.get_bookable_slots_for_day(
+        db, client.id, settings, day, preference, now_utc,
+        service_key=(conversation.lead_reason or None),
+    )
+    if not eligible:
+        return _suggest_other_days(db, client, conversation, settings, day, now_utc)
+
+    page, moved = _select_slot_page(
+        eligible, prev_rows, settings.max_offered_slots, go_later
+    )
+    has_earlier = (ensure_utc(eligible[0].start_datetime)
+                   < ensure_utc(page[0].start_datetime))
+    has_later = (ensure_utc(eligible[-1].start_datetime)
+                 > ensure_utc(page[-1].start_datetime))
+
+    # Same persisted-offer contract as _offer_slots: THIS page's ids become
+    # the ONLY selectable set, with a fresh display TTL; the effective
+    # preference is re-asserted with the identical value so the Patch 2C
+    # trio stays coherent for hold/finalize revalidation.
+    normalized_now = ensure_utc(now_utc)
+    conversation.booking_offered_slot_ids = [str(s.id) for s in page]
+    conversation.booking_offer_expires_at = (
+        normalized_now + timedelta(minutes=BOOKING_OFFER_TTL_MINUTES)
+    )
+    conversation.booking_effective_time_preference = preference
+    conversation.booking_state = BookingState.WAITING_FOR_SLOT_SELECTION
+    db.add(conversation)
+    db.commit()
+
+    menu = _slot_menu(page, settings.timezone_name)
+    if moved and go_later:
+        prefix = f"Here are later times on {_fmt_day(day)}: "
+    elif moved:
+        prefix = f"Here are earlier times on {_fmt_day(day)}: "
+    else:
+        # Availability changed underneath the tap (or the previous page's
+        # rows all vanished): present what is CURRENTLY open and never
+        # claim a direction the page does not actually take (Rule 16).
+        prefix = f"Here\u2019s what\u2019s currently open on {_fmt_day(day)}: "
+    reply_meta = {"mode": "booking", "state": conversation.booking_state,
+                  "offered_slots": conversation.booking_offered_slot_ids}
+    if settings.calendar_actions_enabled:
+        # Slot chips for THIS page plus the truthful navigation choices;
+        # the stage signal keeps its strict triple-gated single owner.
+        reply_meta["calendar_actions"] = (
+            _slot_choice_actions(page, settings.timezone_name)
+            + _slot_nav_actions(has_earlier, has_later)
+        )
+        picker_signal = _picker_stage_signal(
+            settings, PICKER_STAGE_SLOT_SELECTION
+        )
+        if picker_signal is not None:
+            reply_meta["calendar_picker"] = picker_signal
+    return BookingReply(
+        True,
+        f"{prefix}{menu}. Which works best?",
+        reply_meta,
+    )
+
+
 def _handle_slot_selection(db, client, conversation, settings, user_text, now_utc) -> BookingReply:
     """WAITING_FOR_SLOT_SELECTION: map the reply to ONE offered slot, place a
     hold, and move to confirmation. A new day restarts availability instead."""
@@ -1106,13 +1419,9 @@ def _handle_slot_selection(db, client, conversation, settings, user_text, now_ut
     if getattr(conversation, "booking_offered_slot_ids", None) and _offer_is_expired(
         conversation, now_utc
     ):
-        conversation.booking_offered_slot_ids = None
-        conversation.booking_offer_expires_at = None
-        conversation.booking_effective_time_preference = None
-        db.add(conversation)
-        reply = _offer_slots(db, client, conversation, settings, now_utc)
-        reply.meta["reason"] = "offer_expired"
-        return reply
+        # UX-A: recovery body extracted VERBATIM to _refresh_expired_offer
+        # so the navigation action path shares this single owner (Rule 3).
+        return _refresh_expired_offer(db, client, conversation, settings, now_utc)
 
     tz = ZoneInfo(settings.timezone_name)
     pairs: List[Tuple[str, datetime]] = [
@@ -1773,7 +2082,9 @@ def _resolve_date_action(db, client, conversation, settings, choice,
 
 def _resolve_selection_action(db, client, conversation, settings, choice,
                               now_utc) -> ActionOutcome:
-    """WAITING_FOR_SLOT_SELECTION: the choice must be a member of THIS
+    """WAITING_FOR_SLOT_SELECTION: the choice is either one of the two
+    UX-A navigation literals (resolved FIRST - paging, never selection) or
+    a member of THIS
     conversation's persisted offer AND the offer must be unexpired
     (booking_offer_expires_at — the existing Patch 2C authority). A valid
     re-submission after an interrupted transition re-runs the hold (ONE
@@ -1782,6 +2093,29 @@ def _resolve_selection_action(db, client, conversation, settings, choice,
     replacement set when it exists (no state mutation on rejection)."""
     offered_ids = _get_offered_ids(conversation)
     offer_live = bool(offered_ids) and not _offer_is_expired(conversation, now_utc)
+
+    # UX-A slot-page navigation. The two fixed literals can never collide
+    # with a slot UUID, and they resolve BEFORE the membership check:
+    # navigation is not selection. The pager owns the WHOLE transition
+    # under the V2/V4 row-lock discipline (round-1 audit F1): a live offer
+    # pages; an offer that expired in flight runs the SAME Patch 2C
+    # recovery the typed path uses (fresh first page, reason=offer_expired)
+    # UNDER the row lock; and a request that lost a per-conversation race
+    # gets the truthful current-state reply with ZERO mutation. All of
+    # those are executed transitions with the tapped label as the
+    # transcript row. Only a conversation with NO persisted offer at all
+    # treats the tap like any forged/superseded token: STALE_CHOICE.
+    if choice in SLOT_NAV_CHOICE_IDS:
+        if not offered_ids:
+            return ActionOutcome(ACTION_STALE_CHOICE)
+        label = (SLOTS_LATER_LABEL if choice == SLOTS_LATER_CHOICE_ID
+                 else SLOTS_EARLIER_LABEL)
+        reply = _offer_adjacent_slot_page(
+            db, client, conversation, settings, now_utc,
+            go_later=(choice == SLOTS_LATER_CHOICE_ID),
+            entry_offered_ids=offered_ids,
+        )
+        return ActionOutcome(ACTION_EXECUTED, reply=reply, user_label=label)
 
     if offer_live and choice in offered_ids:
         offered = _load_offered_slots(db, client, conversation)
@@ -1801,6 +2135,11 @@ def _resolve_selection_action(db, client, conversation, settings, choice,
         live_rows = _load_offered_slots(db, client, conversation)
         if live_rows:
             replacement = _slot_choice_actions(live_rows, settings.timezone_name)
+            # F4: the replacement re-shows the CURRENT page, so it keeps
+            # that page's truthful pagination controls (read-only owner).
+            replacement += _current_page_nav_actions(
+                db, client, conversation, settings, now_utc, live_rows
+            )
     return ActionOutcome(ACTION_STALE_CHOICE, calendar_actions=replacement)
 
 
@@ -2054,6 +2393,15 @@ def _truthful_current_state_reply(db, client, conversation, settings,
                 if settings.calendar_actions_enabled:
                     reply_meta["calendar_actions"] = _slot_choice_actions(
                         rows, settings.timezone_name
+                    )
+                    # F4: restore this page's truthful pagination controls
+                    # (single read-only nav-truth owner; recomputed from
+                    # CURRENT availability; zero mutation).
+                    reply_meta["calendar_actions"] += (
+                        _current_page_nav_actions(
+                            db, client, conversation, settings, now_utc,
+                            rows,
+                        )
                     )
                     # C2-A.3: same gated slot_selection signal as
                     # _offer_slots — attached only alongside actions.

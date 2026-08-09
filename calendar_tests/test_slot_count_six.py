@@ -127,6 +127,25 @@ def _expected_labels(hours):
     return out
 
 
+NAV_LATER = [{
+    "label": bc.SLOTS_LATER_LABEL, "message": bc.SLOTS_LATER_LABEL,
+    "action": {"type": "calendar_choice",
+               "choice_id": bc.SLOTS_LATER_CHOICE_ID},
+}]
+
+
+def _split_nav(actions):
+    """UX-A: separate the ADDITIVE slot-page navigation entries from the
+    slot chips, so every original slot-count pin below keeps asserting the
+    identical slot subset while the expected navigation set is pinned
+    EXPLICITLY per scenario (never silently filtered away)."""
+    slots = [e for e in actions
+             if e["action"]["choice_id"] not in bc.SLOT_NAV_CHOICE_IDS]
+    nav = [e for e in actions
+           if e["action"]["choice_id"] in bc.SLOT_NAV_CHOICE_IDS]
+    return slots, nav
+
+
 def _selected_slot_hour(db, conv):
     """Local start hour of the slot the conversation has selected/held."""
     slot = db.query(AppointmentSlot).filter(
@@ -223,15 +242,17 @@ def test_default_busy_day_offers_exactly_first_six_chronological(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]  # 8 eligible
     resp, conv, _ = _offer_on_busy_day(db, _default_cap_client(db), hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
-    assert _labels(actions) == _expected_labels(hours[:6])
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6
+    assert nav == NAV_LATER  # 8 eligible > cap: navigation offered
+    assert _labels(slots) == _expected_labels(hours[:6])
     # The persisted offer is the SAME six, in the same order.
-    assert conv.booking_offered_slot_ids == _choice_ids(actions)
+    assert conv.booking_offered_slot_ids == _choice_ids(slots)
     # The visible menu numbers all six and stops there.
     assert "6)" in resp.reply and "7)" not in resp.reply
     # The 7th/8th chronological times are not offered anywhere.
-    assert "3:00 PM" not in _labels(actions)
-    assert "4:00 PM" not in _labels(actions)
+    assert "3:00 PM" not in _labels(slots)
+    assert "4:00 PM" not in _labels(slots)
 
 
 # ===========================================================================
@@ -294,8 +315,10 @@ def test_explicit_three_still_offers_three(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 3
-    assert _labels(actions) == _expected_labels(hours[:3])
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 3
+    assert nav == NAV_LATER  # 8 eligible > cap 3
+    assert _labels(slots) == _expected_labels(hours[:3])
 
 
 def test_explicit_eight_still_offers_eight(db, fakes):
@@ -303,8 +326,10 @@ def test_explicit_eight_still_offers_eight(db, fakes):
     hours = [8, 9, 10, 11, 12, 13, 14, 15, 16]  # 9 eligible
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 8
-    assert _labels(actions) == _expected_labels(hours[:8])
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 8
+    assert nav == NAV_LATER  # 9 eligible > cap 8
+    assert _labels(slots) == _expected_labels(hours[:8])
 
 
 # ===========================================================================
@@ -315,8 +340,10 @@ def test_route_cap_below_floor_clamps_to_one(db, fakes):
     client = _set_cap(db, _gated_client(db), 0)
     resp, conv, _ = _offer_on_busy_day(db, client, [9, 10, 11, 12])
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 1
-    assert _labels(actions) == ["9:00 AM"]
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 1
+    assert nav == NAV_LATER  # 4 eligible > clamped cap 1
+    assert _labels(slots) == ["9:00 AM"]
 
 
 def test_route_cap_above_ceiling_clamps_to_ten(db, fakes):
@@ -324,8 +351,10 @@ def test_route_cap_above_ceiling_clamps_to_ten(db, fakes):
     hours = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]  # 11 eligible
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 10
-    assert _labels(actions) == _expected_labels(hours[:10])
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 10
+    assert nav == NAV_LATER  # 11 eligible > clamped cap 10
+    assert _labels(slots) == _expected_labels(hours[:10])
 
 
 # ===========================================================================
@@ -374,8 +403,10 @@ def test_pref_any_first_six_span_morning_and_afternoon(db, fakes):
     hours = [9, 10, 11, 13, 14, 16, 17]  # 7 eligible across the day
     resp, conv, _ = _offer_on_busy_day(db, _default_cap_client(db), hours)
     actions = _assert_direct_offer(resp, conv)
-    labels = _labels(actions)
-    assert len(actions) == 6
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    labels = _labels(slots)
+    assert len(slots) == 6
+    assert nav == NAV_LATER  # 7 eligible > cap 6
     assert labels == _expected_labels(hours[:6])
     assert any(label.endswith("AM") for label in labels)
     assert any(label.endswith("PM") for label in labels)
@@ -391,21 +422,29 @@ def test_no_duplicate_actions_at_six(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, _default_cap_client(db), hours)
     actions = _assert_direct_offer(resp, conv)
-    ids = _choice_ids(actions)
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    ids = _choice_ids(slots)
     assert len(ids) == 6 and len(set(ids)) == 6
-    assert len(set(_labels(actions))) == 6
+    assert len(set(_labels(slots))) == 6
     assert conv.booking_offered_slot_ids == ids
+    # UX-A strengthening: the FULL action set (chips + nav) stays unique.
+    assert len(set(_choice_ids(actions))) == len(actions) == 7
 
 
 def test_slot_ids_remain_opaque_at_six(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, _default_cap_client(db), hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
-    for entry in actions:
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6
+    for entry in slots:
         cid = entry["action"]["choice_id"]
         assert cid and cid != entry["label"]
         assert cid not in (resp.reply or "")
+    # UX-A: the navigation id is the fixed non-UUID literal and stays out
+    # of the visible reply exactly like the slot ids do.
+    assert nav == NAV_LATER
+    assert bc.SLOTS_LATER_CHOICE_ID not in (resp.reply or "")
 
 
 # ===========================================================================
@@ -421,7 +460,8 @@ def test_digit_six_selects_sixth_offer(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6 and nav == NAV_LATER
     send(db, client, conv, "6")
     assert conv.booking_state == BookingState.WAITING_FOR_CONFIRMATION
     assert _selected_slot_hour(db, conv) == 14  # the sixth offer: 2:00 PM
@@ -448,7 +488,8 @@ def test_confirmation_required_then_books_exactly_once_via_fifth(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6 and nav == NAV_LATER
 
     send(db, client, conv, "5")
     assert conv.booking_state == BookingState.WAITING_FOR_CONFIRMATION
@@ -484,7 +525,8 @@ def test_offer_of_six_causes_no_side_effects(db, fakes):
 
     resp = send(db, client, conv, _human(d))
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6 and nav == NAV_LATER
     assert appointment_repository.get_appointment_by_conversation(
         db, client.id, conv.id) is None
     assert len(fakes.booking_sms) == 0 and len(fakes.booking_email) == 0
@@ -504,7 +546,8 @@ def test_nonmatching_reply_clarifies_count_agnostic(db, fakes):
     hours = [9, 10, 11, 12, 13, 14, 15, 16]
     resp, conv, _ = _offer_on_busy_day(db, client, hours)
     actions = _assert_direct_offer(resp, conv)
-    assert len(actions) == 6
+    slots, nav = _split_nav(actions)  # UX-A: additive See-later chip
+    assert len(slots) == 6 and nav == NAV_LATER
     offered_before = list(conv.booking_offered_slot_ids)
 
     r_clarify = send(db, client, conv, "banana")
