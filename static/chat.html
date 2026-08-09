@@ -1855,8 +1855,10 @@
       };
       strip.addEventListener("scroll", syncFade, { passive: true });
       // Synchronous: reading scrollWidth forces the reflow we need. We do NOT
-      // schedule a frame here, so the ONLY picker requestAnimationFrame stays
-      // pickDate's single bounded visibility restoration (V8 contract).
+      // schedule a frame here; the picker's only requestAnimationFrame owners
+      // remain the bounded V8 visibility restorations — pickDate's inline
+      // frame and the "See full calendar" reveal (shared
+      // restoreSelectedVisibility). No frame is ever scheduled for fades.
       syncFade();
     }
 
@@ -1916,6 +1918,17 @@
         if (pickerSubmitted) return;              // no reopen after submit
         panel.hidden = !panel.hidden;             // reveal/hide the SAME grid
         more.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+        // UX-B (owner-observed mobile defect): the grid revealed BELOW this
+        // toggle can land entirely under the fold of the scrolled #messages
+        // container on short mobile-widget viewports (72dvh iframe + fixed
+        // input row), so a successful tap looked like nothing happened.
+        // Reuse the SAME bounded V8 restoration every other picker
+        // interaction uses: one frame, connected-element guard,
+        // block:"nearest" (a no-op when the grid is already in view, so
+        // desktop behavior is unchanged). OPEN only — closing needs no
+        // scroll — and Start Over removes the row first, so a pending
+        // frame finds a detached grid and must not scroll or reopen it.
+        if (!panel.hidden) restoreSelectedVisibility(panel);
       });
       panel.moreControl = more;   // stable persistent "See full calendar" ref
       panel.persistentControls = [more];

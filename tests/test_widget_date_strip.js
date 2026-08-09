@@ -237,7 +237,14 @@ function buildSandbox(options = {}) {
     window: {
       location: { search: "?client_key=test-client", hostname: "localhost",
         origin: "http://localhost" },
-      matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+      // UX-B: options.mobile models the phone-widget environment by making
+      // ONLY the "(max-width: 640px)" query match; every other query (e.g.
+      // prefers-reduced-motion) keeps the existing default, so all prior
+      // sandboxes remain byte-for-byte behaviorally identical.
+      matchMedia: (q) => ({
+        matches: !!options.mobile && String(q).includes("max-width: 640px"),
+        addEventListener: () => {},
+      }),
     },
     URLSearchParams, URL, Date: makeFakeDate(options.nowIso || STRIP_TODAY),
     setTimeout, clearTimeout,
@@ -1546,6 +1553,124 @@ async function main() {
       /\.slot-chip\.sp-selected\s*\{[^}]*color:\s*var\(--mia-on-primary/.test(sb.html));
     ok("G3 static: a single shared derivation exists (one applyOnPrimaryContrast)",
       (sb.html.match(/function applyOnPrimaryContrast/g) || []).length === 1);
+  }
+
+  // ------------------------------------------------------------------------
+  // UX-B — mobile "See full calendar": revealing the grid on a short
+  // scrolled viewport must restore its visibility with the SAME single
+  // bounded V8 mechanism the rest of the picker uses (one frame,
+  // connected-element guard, block:"nearest"). Open only; Start Over safe.
+  // ------------------------------------------------------------------------
+  {
+    const sb = buildSandbox({ mobile: true });
+    await openStrip(sb, { openDays: [nextLocalIso(0)] });
+    const more = moreOf(sb);
+    ok("UXB: mobile env — See full calendar is a real enabled BUTTON, grid hidden, aria-controls wired",
+      run(sb.context, "mobileQuery.matches") === true &&
+      more.tagName === "BUTTON" && more.type === "button" &&
+      more.disabled === false && gridOf(sb).hidden === true &&
+      more.attributes["aria-controls"] === "miaFullCalendar");
+    const fetchesBefore = previewFetches(sb).length;
+    more.click();
+    ok("UXB BITE: ONE mobile tap reveals the grid AND queues exactly one bounded restoration frame (zero extra fetches, nothing synchronous)",
+      gridOf(sb).hidden === false &&
+      more.attributes["aria-expanded"] === "true" &&
+      previewFetches(sb).length === fetchesBefore &&
+      sb.rafQueue.length === 1 &&
+      gridOf(sb).scrollIntoViewCalls.length === 0);
+    await flush();
+    ok("UXB: exactly one state transition per tap — no touch+click double-fire toggling it straight back closed",
+      gridOf(sb).hidden === false && (more.listeners.click || []).length === 1);
+    sb.flushRaf();
+    ok("UXB BITE: the frame scrolls the LIVE revealed grid into view with block:'nearest' — one frame only, none re-queued",
+      gridOf(sb).scrollIntoViewCalls.length === 1 &&
+      gridOf(sb).scrollIntoViewCalls[0] !== null &&
+      gridOf(sb).scrollIntoViewCalls[0].block === "nearest" &&
+      sb.rafQueue.length === 0);
+    more.click();
+    ok("UXB: tapping again hides the grid and queues NO restoration frame (closing needs no scroll)",
+      gridOf(sb).hidden === true &&
+      more.attributes["aria-expanded"] === "false" &&
+      sb.rafQueue.length === 0);
+  }
+  {
+    // Submission-lock retention: with POST /chat held unresolved after a
+    // strip-chip selection, the toggle is swept disabled and its handler is
+    // inert — activating it reveals nothing and queues no NEW frame (the
+    // single pending frame is pickDate's own V8 restoration for the chip).
+    const sb = buildSandbox({ mobile: true });
+    await openStrip(sb, { openDays: [nextLocalIso(0)] });
+    sb.setChatResponder(() => new Promise(() => {}));
+    stripChips(sb).find((c) => hasClass(c, "dp-open")).click();
+    await flush();
+    const more = moreOf(sb);
+    const fetches = previewFetches(sb).length;
+    const posts = chatPosts(sb).length;
+    const framesBefore = sb.rafQueue.length;
+    more.click();
+    ok("UXB: during an unresolved date submission the disabled toggle stays inert — no reveal, no fetch, no POST, no new frame",
+      more.disabled === true &&
+      gridOf(sb).hidden === true &&
+      previewFetches(sb).length === fetches &&
+      chatPosts(sb).length === posts &&
+      sb.rafQueue.length === framesBefore);
+  }
+  {
+    // Start Over with the reveal's restoration frame still pending: the row
+    // is removed first, so the late frame finds a DETACHED grid — it must
+    // neither scroll nor reopen anything; a brand-new picker starts clean.
+    const sb = buildSandbox({ mobile: true });
+    await openStrip(sb, { openDays: [nextLocalIso(0)] });
+    const panel = gridOf(sb);
+    moreOf(sb).click();
+    ok("UXB: Start Over precondition — calendar open with the restoration frame still pending",
+      panel.hidden === false && sb.rafQueue.length === 1);
+    run(sb.context, "startOver()");
+    ok("UXB: Start Over removes the OPEN calendar and resets picker state",
+      pickerRows(sb).length === 0 && panel.isConnected === false &&
+      run(sb.context, "pickerSubmitted") === false);
+    sb.flushRaf();
+    ok("UXB: the late pending frame skips the detached grid — no scroll, no reopen after Start Over",
+      panel.scrollIntoViewCalls.length === 0 && pickerRows(sb).length === 0);
+    await openStrip(sb, { openDays: [nextLocalIso(0)] });
+    const more2 = moreOf(sb);
+    const panel2 = gridOf(sb);
+    ok("UXB: a new picker after Start Over starts closed from clean state — one fresh listener, no leftover frames",
+      panel2 !== panel && panel2.hidden === true &&
+      more2.attributes["aria-expanded"] === "false" &&
+      (more2.listeners.click || []).length === 1 &&
+      sb.rafQueue.length === 0);
+  }
+  {
+    // Desktop mechanism parity: the SAME single bounded frame runs, and
+    // block:"nearest" makes it a visual no-op when the grid is already in
+    // view — the existing desktop reveal contract is unchanged.
+    const sb = buildSandbox();
+    await openStrip(sb, { openDays: [nextLocalIso(0)] });
+    const before = previewFetches(sb).length;
+    moreOf(sb).click();
+    ok("UXB: desktop reveal keeps the existing contract (open, truthful aria, zero extra fetches) via the same bounded mechanism",
+      gridOf(sb).hidden === false &&
+      moreOf(sb).attributes["aria-expanded"] === "true" &&
+      previewFetches(sb).length === before &&
+      sb.rafQueue.length === 1);
+    sb.flushRaf();
+    ok("UXB: desktop restoration is the shared minimal block:'nearest' scroll (a no-op when already visible)",
+      gridOf(sb).scrollIntoViewCalls.length === 1 &&
+      gridOf(sb).scrollIntoViewCalls[0].block === "nearest");
+  }
+  {
+    // Static pin (EOL-normalized): the reveal reuses the SHARED V8 helper,
+    // OPEN only, and the toggle binds click ONLY — no touch listener that
+    // could double-fire a mobile tap into open-then-closed.
+    const html = fs.readFileSync(CHAT_HTML, "utf8").replace(/\r\n/g, "\n");
+    const block = html.slice(
+      html.indexOf('more.textContent = "See full calendar"'),
+      html.indexOf("panel.moreControl = more"));
+    ok("UXB static: open-only shared restoreSelectedVisibility, click-only binding on the toggle",
+      block.includes("if (!panel.hidden) restoreSelectedVisibility(panel);") &&
+      (block.match(/addEventListener\(/g) || []).length === 1 &&
+      !/touchstart|touchend|pointerdown/.test(block));
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
