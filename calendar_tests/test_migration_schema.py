@@ -979,3 +979,237 @@ def test_006_up_reapplies_after_down(migrated_connection):
     finally:
         _run_migration_file(migrated_connection, DOWN_006)
         assert not _attempts_table_exists(migrated_connection)
+
+
+# ---------------------------------------------------------------------------
+# P2 - migration 007 (office_users portal tenant binding). Same self-
+# contained pattern as 003..006: each test applies 007 itself from the
+# fixture-guaranteed baseline (001+002 only - 007 depends only on clients)
+# and removes it in cleanup.
+# ---------------------------------------------------------------------------
+
+UP_007 = "007_office_users_up.sql"
+DOWN_007 = "007_office_users_down.sql"
+
+OFFICE_USERS_UNIQUE_INDEX = "uq_office_users_auth_user"
+OFFICE_USERS_CLIENT_INDEX = "ix_office_users_client_id"
+
+
+def _office_users_columns(connection) -> dict:
+    rows = connection.exec_driver_sql(
+        "SELECT column_name, data_type, is_nullable"
+        " FROM information_schema.columns"
+        " WHERE table_schema = %s AND table_name = 'office_users'",
+        (SCHEMA,),
+    ).fetchall()
+    return {name: (data_type, nullable) for name, data_type, nullable in rows}
+
+
+def test_007_creates_office_users_with_approved_shape(migrated_connection):
+    """007 creates office_users with the approved columns, the unique
+    auth-user binding index, the client listing index, the closed role
+    vocabulary CHECK, and the active/deactivated consistency CHECK.
+
+    All row data uses fresh gen_random_uuid() values and is cleaned up by
+    exact id: the module-scoped schema may already hold rows left by earlier
+    self-contained blocks, and this test must neither collide with them nor
+    delete them (their FK chains are not this test's to break)."""
+    assert _office_users_columns(migrated_connection) == {}   # clean baseline
+
+    def _new_uuid():
+        return migrated_connection.exec_driver_sql(
+            "SELECT gen_random_uuid()").scalar()
+
+    client_id = None
+    try:
+        _run_migration_file(migrated_connection, UP_007)
+        columns = _office_users_columns(migrated_connection)
+        assert columns["auth_user_id"] == ("uuid", "NO")
+        assert columns["client_id"] == ("uuid", "NO")
+        assert columns["role"] == ("text", "NO")
+        assert columns["active"] == ("boolean", "NO")
+        assert columns["deactivated_at"] == ("timestamp with time zone", "YES")
+
+        definitions = _index_definitions(migrated_connection)
+        assert OFFICE_USERS_UNIQUE_INDEX in definitions
+        assert "UNIQUE" in definitions[OFFICE_USERS_UNIQUE_INDEX].upper()
+        assert OFFICE_USERS_CLIENT_INDEX in definitions
+
+        # F-P2-1: row level security ENABLED (not FORCED - the owning
+        # backend role must stay exempt) with ZERO policies: default deny
+        # for every non-owner, non-BYPASSRLS role such as anon/authenticated.
+        rls = migrated_connection.exec_driver_sql(
+            "SELECT relrowsecurity, relforcerowsecurity FROM pg_class"
+            " WHERE oid = %s::regclass",
+            (f"{SCHEMA}.office_users",),
+        ).fetchone()
+        assert rls == (True, False)
+        policy_count = migrated_connection.exec_driver_sql(
+            "SELECT count(*) FROM pg_policies"
+            " WHERE schemaname = %s AND tablename = 'office_users'",
+            (SCHEMA,),
+        ).scalar()
+        assert policy_count == 0
+
+        client_id = _new_uuid()
+        auth_id = _new_uuid()
+        migrated_connection.exec_driver_sql(
+            "INSERT INTO clients (id) VALUES (%s)", (client_id,))
+        migrated_connection.exec_driver_sql(
+            "INSERT INTO office_users (auth_user_id, client_id)"
+            " VALUES (%s, %s)", (auth_id, client_id))
+
+        # Closed role vocabulary: unknown roles are impossible to persist.
+        with pytest.raises(Exception):
+            migrated_connection.exec_driver_sql(
+                "INSERT INTO office_users (auth_user_id, client_id, role)"
+                " VALUES (%s, %s, 'super_admin')", (_new_uuid(), client_id))
+        migrated_connection.exec_driver_sql("ROLLBACK")
+
+        # V1 binding rule: one office per auth user (unique index).
+        with pytest.raises(Exception):
+            migrated_connection.exec_driver_sql(
+                "INSERT INTO office_users (auth_user_id, client_id)"
+                " VALUES (%s, %s)", (auth_id, client_id))
+        migrated_connection.exec_driver_sql("ROLLBACK")
+
+        # Consistency CHECK: an ACTIVE binding cannot carry deactivated_at.
+        with pytest.raises(Exception):
+            migrated_connection.exec_driver_sql(
+                "INSERT INTO office_users"
+                " (auth_user_id, client_id, active, deactivated_at)"
+                " VALUES (%s, %s, true, now())", (_new_uuid(), client_id))
+        migrated_connection.exec_driver_sql("ROLLBACK")
+    finally:
+        _run_migration_file(migrated_connection, DOWN_007)
+        if client_id is not None:
+            migrated_connection.exec_driver_sql(
+                "DELETE FROM clients WHERE id = %s", (client_id,))
+        assert _office_users_columns(migrated_connection) == {}
+
+
+def test_007_rls_denies_browser_data_api_roles(migrated_connection):
+    """F-P2-1 posture proof, simulating Supabase faithfully: the Data API
+    roles (anon / authenticated) receive table grants automatically via
+    ALTER DEFAULT PRIVILEGES, so this test creates those roles, installs the
+    same default-privilege grant, THEN applies 007 and proves:
+
+      1. the migration's conditional REVOKE stripped the auto-granted table
+         privileges (defense in depth);
+      2. even when SELECT/INSERT are granted back, enabled-RLS-with-no-policy
+         hides every row and blocks every write (default deny);
+      3. the table owner keeps full access with no policy (backend path).
+
+    Self-contained: every role, grant, default-privilege change, and row it
+    creates is removed in the finally block (roles are cluster-global even
+    in a throwaway database, and a grantee role cannot be dropped while
+    grants reference it)."""
+    conn = migrated_connection
+    created_roles = []
+    applied_007 = False
+    client_id = None
+    try:
+        for role in ("anon", "authenticated"):
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)
+            ).fetchone()
+            if exists is None:
+                conn.exec_driver_sql(f"CREATE ROLE {role} NOLOGIN")
+                created_roles.append(role)
+        conn.exec_driver_sql(
+            f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA}"
+            " GRANT ALL ON TABLES TO anon, authenticated")
+        conn.exec_driver_sql(
+            f"GRANT USAGE ON SCHEMA {SCHEMA} TO anon, authenticated")
+
+        _run_migration_file(conn, UP_007)
+        applied_007 = True
+
+        # 1) The REVOKE branch executed: the Supabase-style default grant
+        #    is GONE for both browser roles.
+        for role in ("anon", "authenticated"):
+            has_select = conn.exec_driver_sql(
+                "SELECT has_table_privilege(%s, %s, 'SELECT')",
+                (role, f"{SCHEMA}.office_users"),
+            ).scalar()
+            assert has_select is False
+
+        # 2) Even with privileges granted back, RLS default-deny holds.
+        client_id = conn.exec_driver_sql(
+            "SELECT gen_random_uuid()").scalar()
+        conn.exec_driver_sql(
+            "INSERT INTO clients (id) VALUES (%s)", (client_id,))
+        conn.exec_driver_sql(
+            "INSERT INTO office_users (auth_user_id, client_id)"
+            " VALUES (gen_random_uuid(), %s)", (client_id,))
+        conn.exec_driver_sql(
+            "GRANT SELECT, INSERT ON office_users TO anon")
+        conn.exec_driver_sql("SET ROLE anon")
+        visible = conn.exec_driver_sql(
+            "SELECT count(*) FROM office_users").scalar()
+        assert visible == 0                      # rows hidden by RLS
+        with pytest.raises(Exception):
+            conn.exec_driver_sql(
+                "INSERT INTO office_users (auth_user_id, client_id)"
+                " VALUES (gen_random_uuid(), %s)", (client_id,))
+        conn.exec_driver_sql("RESET ROLE")
+
+        # 3) Owner path (the backend's situation): full access, no policy.
+        owner_count = conn.exec_driver_sql(
+            "SELECT count(*) FROM office_users").scalar()
+        assert owner_count == 1
+    finally:
+        conn.exec_driver_sql("RESET ROLE")
+        if applied_007:
+            _run_migration_file(conn, DOWN_007)
+        conn.exec_driver_sql(
+            f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA}"
+            " REVOKE ALL ON TABLES FROM anon, authenticated")
+        conn.exec_driver_sql(
+            f"REVOKE USAGE ON SCHEMA {SCHEMA} FROM anon, authenticated")
+        if client_id is not None:
+            conn.exec_driver_sql(
+                "DELETE FROM clients WHERE id = %s", (client_id,))
+        for role in created_roles:
+            conn.exec_driver_sql(f"DROP ROLE IF EXISTS {role}")
+
+
+def test_reapplying_007_fails_loudly(migrated_connection):
+    """007 has NO 'IF NOT EXISTS' on purpose (002..006 convention)."""
+    from sqlalchemy.exc import ProgrammingError
+
+    _run_migration_file(migrated_connection, UP_007)
+    try:
+        try:
+            with pytest.raises(ProgrammingError):
+                _run_migration_file(migrated_connection, UP_007)
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
+    finally:
+        _run_migration_file(migrated_connection, DOWN_007)
+
+
+def test_007_down_removes_table_and_preserves_others(migrated_connection):
+    """Round trip up -> down -> up; the down removes exactly office_users
+    (IF EXISTS: repeat run is a no-op) and leaves the 001/002 tables and
+    indexes untouched."""
+    appointments_before = _table_columns(migrated_connection, "appointments")
+    slots_before = _table_columns(migrated_connection, "appointment_slots")
+
+    _run_migration_file(migrated_connection, UP_007)
+    _run_migration_file(migrated_connection, DOWN_007)
+    assert _office_users_columns(migrated_connection) == {}
+    _run_migration_file(migrated_connection, DOWN_007)     # no-op repeat
+    _run_migration_file(migrated_connection, UP_007)
+    try:
+        assert OFFICE_USERS_UNIQUE_INDEX in _index_definitions(
+            migrated_connection)
+    finally:
+        _run_migration_file(migrated_connection, DOWN_007)
+
+    assert _table_columns(migrated_connection, "appointments") == appointments_before
+    assert _table_columns(migrated_connection, "appointment_slots") == slots_before
+    definitions = _index_definitions(migrated_connection)
+    for index_name in (CONVERSATION_INDEX, SLOT_INDEX):
+        assert index_name in definitions
