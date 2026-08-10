@@ -254,12 +254,32 @@ def calendar_intake_day_only_sufficient(client) -> bool:
 # Documented duplication (Rule 3 note): the same phrase is present in the
 # raw S3 f-string; a pinning test asserts the two stay byte-identical, and
 # unifying them is recorded as deferred drift.
+# UX-C: these two are now the BASIC-tier tails only. Calendar tenants
+# (booking_enabled strict True — calendar_intake_day_only_sufficient)
+# get the CALENDAR_* date-only tails below, and intake_date_stage_signal
+# matches ONLY those — a Basic-worded reply can never carry the Calendar
+# picker signal, and emitter drift fails closed (no signal).
 INTAKE_DATE_WINDOW_PROMPT_TAIL = "What day/time window works best (e.g., Tue morning)?"
 # Short-symptom variant (Finding 1): the short-symptom branch omits the
 # "(e.g., Tue morning)" example, so its date-selection prompt ends here.
 # Distinct suffix from the standard tail (which ends with the example),
 # so the two kinds never cross-match.
 INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL = "What day/time window works best?"
+
+# UX-C — Calendar-tier date-only prompt tails. For Calendar tenants
+# (calendar_intake_day_only_sufficient: booking_enabled strict True) the
+# capture-first date question drops the time-window / part-of-day framing:
+# Package B's exact-time slot offer replaces it, so the prompt asks for a
+# DAY only. The wording reuses the native booking engine's house phrasing
+# so both surfaces speak with one voice. The two tails are a non-suffix
+# pair ("...for your appointment?" vs "...for you?"), so the two kinds can
+# never cross-match via endswith. app/routes/chat.py interpolates THESE
+# constants into its Calendar-branch f-strings (single source), so
+# emitter/matcher drift cannot recur for the Calendar pair; the Basic pair
+# above keeps its documented raw-literal duplication unchanged.
+CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL = "What day would work best for your appointment?"
+# Short-symptom Calendar variant: same date-only rule, shorter frame.
+CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL = "What day would work best for you?"
 
 
 def intake_date_stage_signal(client, reply_text, entered_date_stage, date_stage_kind) -> Optional[dict]:
@@ -286,8 +306,8 @@ def intake_date_stage_signal(client, reply_text, entered_date_stage, date_stage_
              byte-identical by reply text alone.
     Returns: {"stage": "date", "submit": "message"} only when
              entered_time_window_stage is literal True AND reply_text is the
-             standard capture-first day/time-window prompt (identified by
-             its name-independent tail) AND booking_enabled,
+             Calendar-tier capture-first DATE-ONLY prompt (identified by
+             its name-independent CALENDAR_* tail; UX-C) AND booking_enabled,
              calendar_actions_enabled, and calendar_picker_enabled are ALL
              strict True - the same triple gate as every other C2-A.3
              signal, decided by the same owner (_picker_stage_signal).
@@ -310,10 +330,18 @@ def intake_date_stage_signal(client, reply_text, entered_date_stage, date_stage_
     # re-asks the same prompt keeps entered_date_stage False -> no signal.
     if entered_date_stage is not True:
         return None
+    # UX-C: the signal proves the CALENDAR wording. Its triple strict-True
+    # gate (checked below) is a strict subset of booking_enabled, which is
+    # exactly the emitter's Calendar-branch condition
+    # (calendar_intake_day_only_sufficient) — so whenever this signal can
+    # fire, receptionist_bypass_reply emitted the date-only tails. The old
+    # Basic tails are deliberately NOT matched here: Basic tenants never
+    # pass the gate, and a Basic-worded reply under Calendar gates would
+    # indicate emitter drift that must fail closed (no signal).
     if date_stage_kind == "standard":
-        tail = INTAKE_DATE_WINDOW_PROMPT_TAIL
+        tail = CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL
     elif date_stage_kind == "short_symptom":
-        tail = INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL
+        tail = CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL
     else:
         # Unknown/closed-vocabulary kind: no signal (never guess).
         return None

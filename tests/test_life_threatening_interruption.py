@@ -294,6 +294,19 @@ _module(
     # Inert None keeps this harness's scope: no calendar-picker
     # metadata is ever emitted here.
     intake_time_preference_stage_signal=lambda *a, **k: None,
+    # UX-C: the real app.routes.chat now imports the Calendar date-only
+    # wording owners CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL and
+    # CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL at module import
+    # time; expose them or collection fails before ANY of the 46 emergency
+    # tests runs. Values mirror the real service constants. With
+    # calendar_intake_day_only_sufficient stubbed False below, this harness
+    # stays on strict Basic wording and these tails are inert here.
+    CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL=(
+        "What day would work best for your appointment?"
+    ),
+    CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL=(
+        "What day would work best for you?"
+    ),
     # PACKAGE B: the real app.routes.chat now imports the Calendar-tier
     # sufficiency owner calendar_intake_day_only_sufficient at module
     # import time; expose an inert stand-in or collection fails before ANY

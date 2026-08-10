@@ -15,6 +15,11 @@
 # owner receptionist_bypass_reply() is deliberately NOT refactored (Rule 12);
 # the helper recognizes the prompt by its name-independent tail.
 #
+# UX-C: Calendar tenants (booking_enabled strict True) now receive the
+# DATE-ONLY wording (CALENDAR_INTAKE_DATE_ONLY_* tails) and the signal
+# matches ONLY those tails; Basic tenants keep the original day/time-window
+# wording byte-identical, and Basic-worded replies never signal.
+#
 # Run (PostgreSQL required, as every calendar_tests module):
 #   python -m pytest calendar_tests/test_capture_first_date_stage.py -v
 
@@ -26,7 +31,10 @@ import pytest
 from app.models import Conversation
 import app.routes.chat as chat_module
 from app.services.booking_conversation import (
+    CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL,
+    CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL,
     INTAKE_DATE_WINDOW_PROMPT_TAIL,
+    INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL,
     INTAKE_TIME_PREFERENCE_PROMPT,
     PICKER_STAGE_DATE,
     intake_date_stage_signal,
@@ -145,7 +153,10 @@ def test_exact_capture_first_sequence_carries_date_signal(db, fakes):
     # skip email -> THE capture-first day/time-window question (mode "bypass").
     r4 = send(db, client, conversation, "skip email")
     assert conversation.lead_email_opt_out is True
-    assert r4.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert r4.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
+    # UX-C B1: the stale time-window framing is gone for Calendar tenants.
+    assert "day/time window" not in r4.reply
+    assert "Tue morning" not in r4.reply
     assert r4.meta.get("mode") == "bypass"
     assert r4.meta.get("calendar_picker") == DATE_SIGNAL
     # Everything else about the bypass turn is preserved.
@@ -165,7 +176,7 @@ def test_preseeded_date_question_carries_signal(db, fakes):
 
     resp = send(db, client, conversation, "skip email")
 
-    assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert resp.meta.get("mode") == "bypass"
     assert resp.meta.get("calendar_picker") == DATE_SIGNAL
     assert resp.meta.get("hours_hint")
@@ -182,10 +193,12 @@ def test_preseeded_date_question_carries_signal(db, fakes):
     {"booking": False},
     {"actions": False},
     {"picker": False},
+    {"actions": False, "picker": False},
     {"booking": OMIT},
     {"actions": OMIT},
     {"picker": OMIT},
 ], ids=["booking-false", "actions-false", "picker-false",
+        "actions-picker-false",
         "booking-missing", "actions-missing", "picker-missing"])
 def test_disabled_or_missing_flag_suppresses_signal(db, fakes, flags):
     client = _gated_client(db, **flags)
@@ -193,8 +206,16 @@ def test_disabled_or_missing_flag_suppresses_signal(db, fakes, flags):
 
     resp = send(db, client, conversation, "skip email")
 
-    # The reply itself is unchanged; only the signal is gated off.
-    assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    # UX-C (fulfils B3): the WORDING tier is booking_enabled alone; the
+    # SIGNAL needs all three gates. booking-false/-missing rows fall back
+    # to the Basic wording byte-identically; every presentation-flag row
+    # (actions/picker false or missing, in any combination) keeps the
+    # Calendar date-only wording with the picker signal gated off.
+    if flags.get("booking", True) is True:
+        assert resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
+        assert "day/time window" not in resp.reply
+    else:
+        assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
     assert resp.meta.get("mode") == "bypass"
     assert resp.meta.get("hours_hint")
     assert "calendar_picker" not in resp.meta
@@ -214,7 +235,12 @@ def test_malformed_flag_suppresses_signal(db, fakes, flag, malformed):
 
     resp = send(db, client, conversation, "skip email")
 
-    assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    # UX-C: a malformed booking flag is not strict True -> Basic wording;
+    # malformed actions/picker leave booking True -> Calendar wording.
+    if flag == "booking":
+        assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    else:
+        assert resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert "calendar_picker" not in resp.meta
 
 
@@ -228,12 +254,12 @@ def test_other_bypass_stages_do_not_carry_date_signal(db, fakes):
     # reason -> New/Returning prompt (Package A order)
     r1 = send(db, client, None, "I'd like to book a cleaning")
     conversation = _conversation_row(db, r1)
-    assert not r1.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert not r1.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert "calendar_picker" not in (r1.meta or {})
 
     # patient type -> name prompt
     r_pt = send(db, client, conversation, "new patient")
-    assert not r_pt.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert not r_pt.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert "calendar_picker" not in (r_pt.meta or {})
 
     # name -> phone prompt
@@ -283,7 +309,7 @@ def test_emergency_reply_carries_no_date_signal(db, fakes):
         "I have severe facial swelling and trouble breathing",
     )
 
-    assert not resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert not resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert "calendar_picker" not in (resp.meta or {})
 
 
@@ -298,7 +324,7 @@ def test_route_date_prompt_matches_owned_tail(db, fakes):
 
     resp = send(db, client, conversation, "skip email")
 
-    assert resp.reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
     assert resp.reply.startswith("Great")
     assert conversation.lead_name in resp.reply
 
@@ -309,19 +335,27 @@ def test_route_date_prompt_matches_owned_tail(db, fakes):
 
 def test_helper_emits_only_for_date_prompt_when_gated(db, fakes):
     client = _gated_client(db)
-    date_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
+    date_prompt = "Great-thanks Kevin. " + CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL
+    basic_std_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
 
     # entered_time_window_stage=True is the genuine-transition fact from the route.
     assert intake_date_stage_signal(client, date_prompt, True, "standard") == DATE_SIGNAL
     # Every non-date reply -> None, even fully gated and entered.
     assert intake_date_stage_signal(client, INTAKE_TIME_PREFERENCE_PROMPT, True, "standard") is None
-    # This bare non-example prompt now matches the SHORT-SYMPTOM tail, so it
-    # emits ONLY under the short_symptom kind; under standard it stays None.
+    # UX-C (B6): the Basic tails are rejected under fully-gated Calendar
+    # conditions in BOTH kinds - a Basic-worded reply must never signal.
+    assert intake_date_stage_signal(client, basic_std_prompt, True, "standard") is None
     assert intake_date_stage_signal(
         client, "Thanks Kevin. What day/time window works best?", True, "standard") is None
     assert intake_date_stage_signal(
         client, "Thanks Kevin. What day/time window works best?", True,
-        "short_symptom") == DATE_SIGNAL
+        "short_symptom") is None
+    # The Calendar short tail emits ONLY under its own kind; cross-kind
+    # never matches (non-suffix pair by construction).
+    short_prompt = "Thanks Kevin. " + CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL
+    assert intake_date_stage_signal(client, short_prompt, True, "short_symptom") == DATE_SIGNAL
+    assert intake_date_stage_signal(client, short_prompt, True, "standard") is None
+    assert intake_date_stage_signal(client, date_prompt, True, "short_symptom") is None
     assert intake_date_stage_signal(client, "", True, "standard") is None
     assert intake_date_stage_signal(client, None, True, "standard") is None
     # Transition gate: the exact date prompt, fully gated, but NOT a genuine
@@ -342,10 +376,66 @@ def test_helper_emits_only_for_date_prompt_when_gated(db, fakes):
 ])
 def test_helper_suppresses_when_any_gate_not_strict_true(db, fakes, flags):
     client = _gated_client(db, **flags)
-    date_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
+    # UX-C: use the LIVE Calendar prompt so None proves the GATE, not a
+    # tail mismatch.
+    date_prompt = "Great-thanks Kevin. " + CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL
     # entered=True isolates the FEATURE-GATE suppression under test.
     assert intake_date_stage_signal(client, date_prompt, True, "standard") is None
 
 
 def test_date_stage_vocabulary_reused(db, fakes):
     assert PICKER_STAGE_DATE == "date"
+
+
+# ---------------------------------------------------------------------------
+# 10. UX-C - Calendar date-only wording vs byte-identical Basic wording
+# ---------------------------------------------------------------------------
+
+def test_uxc_calendar_short_symptom_uses_date_only_wording(db, fakes):
+    """UX-C B2: Calendar all-three-True short-symptom flow asks the
+    date-only short prompt and still carries the capture-first date signal."""
+    client = _gated_client(db)
+    r1 = send(db, client, None, "I have tooth pain")
+    conv = _conversation_row(db, r1)
+    if "new or returning" in (r1.reply or "").lower():
+        send(db, client, conv, "new patient")
+    send(db, client, conv, "Jordan Rivera")
+    resp = send(db, client, conv, "516-555-0100")
+    if (resp.meta or {}).get("calendar_picker") != DATE_SIGNAL:
+        resp = send(db, client, conv, "skip email")
+    assert resp.reply.endswith(CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL)
+    assert "day/time window" not in resp.reply
+    assert "Tue morning" not in resp.reply
+    assert resp.meta.get("calendar_picker") == DATE_SIGNAL
+
+
+def test_uxc_basic_standard_wording_byte_identical(db, fakes):
+    """UX-C B4: Basic tenants keep the original standard wording exactly
+    (full-reply byte pin), and Basic replies never carry the signal."""
+    client = make_client(db, calendar_enabled=None)   # no calendar settings
+    conversation = _pre_date_question_conversation(db, client)
+    resp = send(db, client, conversation, "skip email")
+    assert resp.reply == (
+        f"Great\u2014thanks {conversation.lead_name}. "
+        + INTAKE_DATE_WINDOW_PROMPT_TAIL)
+    assert "(e.g., Tue morning)" in resp.reply
+    assert "calendar_picker" not in (resp.meta or {})
+
+
+def test_uxc_basic_short_symptom_wording_byte_identical(db, fakes):
+    """UX-C B5: Basic short-symptom keeps the original short wording
+    exactly (full-reply byte pin), with no signal."""
+    client = make_client(db, calendar_enabled=None)
+    r1 = send(db, client, None, "I have tooth pain")
+    conv = _conversation_row(db, r1)
+    if "new or returning" in (r1.reply or "").lower():
+        send(db, client, conv, "new patient")
+    send(db, client, conv, "Jordan Rivera")
+    resp = send(db, client, conv, "516-555-0100")
+    if not resp.reply.endswith(INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL):
+        resp = send(db, client, conv, "skip email")
+    assert conv.lead_name
+    assert resp.reply == (
+        f"Thanks {conv.lead_name}. "
+        + INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL)
+    assert "calendar_picker" not in (resp.meta or {})

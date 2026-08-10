@@ -93,6 +93,8 @@ from app.services.booking_conversation import (
     BOUNDARY_SAFETY_BLOCKED,
     begin_booking_after_intake,
     booking_boundary_state,
+    CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL,
+    CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL,
     calendar_intake_day_only_sufficient,
     cancel_active_booking,
     handle_booking_action,
@@ -8319,6 +8321,20 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
                 return (INTAKE_TIME_PREFERENCE_PROMPT, "time_window")
             name = (conversation.lead_name or "").strip()
             name_part = f" {name}" if name else ""
+            # UX-C: Calendar tenants (booking_enabled strict True — the same
+            # Package B tier owner that makes a day-only window sufficient)
+            # ask for a DAY only; the exact-time slot offer replaces the
+            # part-of-day framing. The wording is interpolated from the
+            # service-owned constant so this emitter and the picker-signal
+            # matcher can never drift apart. The None guard mirrors
+            # time_window_sufficient_for_intake: no client -> Basic. Basic
+            # tenants keep the original wording byte-identical below.
+            if client is not None and calendar_intake_day_only_sufficient(client):
+                return (
+                    f"Thanks{name_part}. "
+                    f"{CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL}",
+                    "time_window",
+                )
             return (f"Thanks{name_part}. What day/time window works best?", "time_window")
 
         return (build_short_symptom_handoff_reply(conversation), "complete")
@@ -8339,6 +8355,16 @@ def receptionist_bypass_reply(conversation: Conversation, client: Optional[Clien
             return (INTAKE_TIME_PREFERENCE_PROMPT, "time_window")
         name = (conversation.lead_name or "").strip()
         name_part = f" {name}" if name else ""
+        # UX-C: Calendar tier (booking_enabled strict True) asks for a DAY
+        # only — constant-sourced so emitter/matcher cannot drift (see the
+        # short-symptom branch note above). Basic tenants keep the original
+        # wording byte-identical below.
+        if client is not None and calendar_intake_day_only_sufficient(client):
+            return (
+                f"Great—thanks{name_part}. "
+                f"{CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL}",
+                "time_window",
+            )
         return (f"Great—thanks{name_part}. What day/time window works best (e.g., Tue morning)?", "time_window")
     # New/Returning is asked first now (right after the reason, above); it is
     # always known here, so the tail only reports completion.

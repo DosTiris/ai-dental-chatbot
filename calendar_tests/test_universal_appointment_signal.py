@@ -62,8 +62,8 @@ from app.services.booking_conversation import (
     intake_date_stage_signal,
     INTAKE_TIME_PREFERENCE_PROMPT,
     INTAKE_TIME_PREFERENCE_TODAY_PROMPT,
-    INTAKE_DATE_WINDOW_PROMPT_TAIL,
-    INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL,
+    CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL,
+    CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL,
 )
 from app.services.service_policy_mapping import (
     calendar_policy_value_for_master_service,
@@ -263,8 +263,9 @@ def _assert_date_stage(conv, client, resp, key=None):
     assert resp.meta.get("calendar_picker") == DATE_SIGNAL, (
         "date signal missing for %r" % key)
     reply = resp.reply or ""
-    assert (reply.endswith(INTAKE_DATE_WINDOW_PROMPT_TAIL)
-            or reply.endswith(INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL)), (
+    # UX-C: the signal pairs ONLY with the Calendar date-only tails.
+    assert (reply.endswith(CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL)
+            or reply.endswith(CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL)), (
         "date prompt tail unrecognized for %r: %r" % (key, reply))
     assert (capture_first_time_window_pending(conv, client)
             or capture_first_short_symptom_time_window_pending(conv, client)), (
@@ -490,7 +491,7 @@ def test_mode_short_symptom_service_reaches_date_signal(db, fakes, mode):
     resp = _complete_intake_to_date(db, client, conv)
     _assert_date_stage(conv, client, resp, "tooth_pain(%s)" % mode)
     # Short-symptom branch specifically owns the short tail.
-    assert (resp.reply or "").endswith(INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL)
+    assert (resp.reply or "").endswith(CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL)
 
 
 # ===========================================================================
@@ -679,7 +680,7 @@ def _run_full_flow(db, client, monkeypatch, *, entry, expect_key=None,
     assert resp.meta.get("calendar_picker") == DATE_SIGNAL
     if short_symptom:
         assert (resp.reply or "").endswith(
-            INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL)
+            CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL)
 
     # PACKAGE B: valid date -> the engine's exact-slot offer on the SAME
     # turn. The morning/afternoon step is removed for Calendar tenants;
@@ -784,8 +785,9 @@ def test_predicates_are_mutually_exclusive_and_pure(db, fakes, monkeypatch):
 
 def test_direct_helper_matrix_kinds_and_gate(db, fakes):
     client = _gated_client(db)
-    std_prompt = "Great-thanks Kevin. " + INTAKE_DATE_WINDOW_PROMPT_TAIL
-    short_prompt = "Thanks Kevin. " + INTAKE_DATE_WINDOW_SHORT_SYMPTOM_PROMPT_TAIL
+    # UX-C: the matcher recognizes the live Calendar date-only prompts.
+    std_prompt = "Great-thanks Kevin. " + CALENDAR_INTAKE_DATE_ONLY_PROMPT_TAIL
+    short_prompt = "Thanks Kevin. " + CALENDAR_INTAKE_DATE_ONLY_SHORT_SYMPTOM_PROMPT_TAIL
     assert intake_date_stage_signal(client, std_prompt, True, "standard") == DATE_SIGNAL
     assert intake_date_stage_signal(client, short_prompt, True, "short_symptom") == DATE_SIGNAL
     # Cross-kind must never match.
