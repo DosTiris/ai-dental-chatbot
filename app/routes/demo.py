@@ -1,7 +1,13 @@
 import os
 import resend
 import re
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
+# SEC-1: the /admin/demo-requests* management endpoints below are operator
+# tooling and must require the SAME global ADMIN_API_KEY as every other
+# /admin route. The single owner of that rule (Rule 3) is require_admin in
+# app/routes/admin.py; it is imported here, never re-implemented. admin.py
+# imports no route modules, so this import cannot create a cycle.
+from app.routes.admin import require_admin
 from pydantic import BaseModel
 from app.database import SessionLocal
 from sqlalchemy import text
@@ -128,7 +134,16 @@ def create_demo_request(payload: DemoRequest):
         db.close()
 
 @router.get("/admin/demo-requests")
-def get_demo_requests():
+def get_demo_requests(
+    # SEC-1: global operator authentication. FastAPI resolves this dependency
+    # BEFORE the handler body runs, so an unauthenticated or wrong-key request
+    # is rejected with 401 before SessionLocal() is ever called (no query, no
+    # mutation). NOTE: in app/main.py this GET is currently shadowed by
+    # admin.py's authenticated GET (router registration order). It is
+    # authenticated anyway so a future registration-order change can never
+    # silently expose prospect PII (P1B finding F-P1B-1).
+    _: None = Depends(require_admin),
+):
     db = SessionLocal()
 
     try:
@@ -180,7 +195,13 @@ def get_demo_requests():
         db.close()
 
 @router.post("/admin/demo-requests/{request_id}/status")
-def update_demo_request_status(request_id: str, payload: dict):
+def update_demo_request_status(
+    request_id: str,
+    payload: dict,
+    # SEC-1: global operator authentication - a rejected request never reaches
+    # this handler, so the UPDATE below cannot run without a valid key.
+    _: None = Depends(require_admin),
+):
     db = SessionLocal()
 
     allowed_statuses = [
@@ -222,7 +243,13 @@ def update_demo_request_status(request_id: str, payload: dict):
         db.close()
 
 @router.post("/admin/demo-requests/{request_id}/notes")
-def update_demo_request_notes(request_id: str, payload: dict):
+def update_demo_request_notes(
+    request_id: str,
+    payload: dict,
+    # SEC-1: global operator authentication - a rejected request never reaches
+    # this handler, so the UPDATE below cannot run without a valid key.
+    _: None = Depends(require_admin),
+):
     db = SessionLocal()
 
     notes = payload.get("notes", "")
