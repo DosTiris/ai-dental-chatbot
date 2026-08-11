@@ -13,6 +13,14 @@ from app.routes.demo import router as demo_router
 # see them; the router import mounts the X-Admin-Key calendar admin routes.
 from app.routes import calendar as calendar_routes  # Calendar admin endpoints
 import app.calendar_models  # noqa: F401  (registers calendar tables)
+# P2 (Office Portal auth foundation): portal wiring per docs/PORTAL_AUTH_SETUP.md.
+# The router import mounts the Bearer-token /portal identity endpoint; tenant
+# binding is resolved server-side by app/services/portal_auth.py - never from
+# the browser. office_users is DELIBERATELY NOT registered on Base (it lives
+# on its own PortalBase, F-P2-3), so the create_all below can never create it:
+# migration 007 is the sole creation authority and MUST run before this code
+# is deployed (rollout order in docs/PORTAL_AUTH_SETUP.md).
+from app.routes import portal as portal_routes  # Office Portal endpoints
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -57,6 +65,7 @@ app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(demo_router)
 app.include_router(calendar_routes.router)  # PATCH 3: calendar admin routes
+app.include_router(portal_routes.router)  # P2: office portal auth foundation
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)
