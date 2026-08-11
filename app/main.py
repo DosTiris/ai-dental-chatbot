@@ -21,6 +21,12 @@ import app.calendar_models  # noqa: F401  (registers calendar tables)
 # migration 007 is the sole creation authority and MUST run before this code
 # is deployed (rollout order in docs/PORTAL_AUTH_SETUP.md).
 from app.routes import portal as portal_routes  # Office Portal endpoints
+# P3-B1 (Office Portal read-only data slice): dashboard + leads endpoints.
+# Transport wiring lives in app/routes/portal_leads.py; every query rule is
+# owned by app/services/portal_leads_service.py. Authentication and tenant
+# binding are REUSED from the P2 owner (portal_auth via portal.py) - this
+# router adds no new auth path and performs no database write.
+from app.routes import portal_leads as portal_leads_routes  # Portal leads (read-only)
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -66,6 +72,7 @@ app.include_router(admin_router)
 app.include_router(demo_router)
 app.include_router(calendar_routes.router)  # PATCH 3: calendar admin routes
 app.include_router(portal_routes.router)  # P2: office portal auth foundation
+app.include_router(portal_leads_routes.router)  # P3-B1: portal read-only dashboard/leads
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

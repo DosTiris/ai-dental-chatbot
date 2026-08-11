@@ -173,3 +173,195 @@ body {
   font-size: 20px;
   font-weight: 700;
 }
+
+/* ------------------------------------------------------------------ */
+/* P3-B1: authenticated shell - Dashboard / Leads / Lead detail        */
+/* ------------------------------------------------------------------ */
+
+/* The auth views keep the compact 420px column; the authenticated shell
+ * widens so lead rows are readable. portal-app.js toggles this class. */
+.portal-wrap.portal-wrap-wide { max-width: 760px; }
+
+.portal-shell-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.portal-shell-header .portal-button { width: auto; padding: 8px 14px; }
+
+.portal-nav {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--portal-border);
+  margin-bottom: 14px;
+}
+
+.portal-nav-button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--portal-muted);
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.portal-nav-button.portal-nav-active {
+  color: var(--portal-primary);
+  border-bottom-color: var(--portal-primary);
+}
+
+.portal-page-state { min-height: 18px; margin: 6px 0; }
+
+.portal-section-title {
+  margin: 16px 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.portal-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.portal-count {
+  border: 1px solid var(--portal-border);
+  border-radius: var(--portal-radius);
+  padding: 10px 12px;
+  background: var(--portal-bg);
+}
+
+.portal-count dt { font-size: 12px; color: var(--portal-muted); }
+
+.portal-count dd {
+  margin: 4px 0 0;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.portal-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.portal-filters .portal-label { margin: 0; }
+
+.portal-filters .portal-input { width: auto; min-width: 160px; }
+
+.portal-filters .portal-button { width: auto; padding: 9px 16px; }
+
+.portal-lead-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.portal-lead-item + .portal-lead-item { margin-top: 8px; }
+
+.portal-lead-row {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  background: var(--portal-card-bg);
+  border: 1px solid var(--portal-border);
+  border-radius: var(--portal-radius);
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--portal-text);
+  cursor: pointer;
+}
+
+.portal-lead-row:hover { border-color: var(--portal-primary); }
+
+.portal-lead-name { font-weight: 600; }
+
+.portal-lead-contact { color: var(--portal-muted); font-size: 13px; }
+
+.portal-lead-meta {
+  margin-left: auto;
+  color: var(--portal-muted);
+  font-size: 13px;
+}
+
+.portal-badge {
+  display: inline-block;
+  background: #fef2f2;
+  color: var(--portal-status);
+  border: 1px solid #fecaca;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.portal-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.portal-pager .portal-button { width: auto; padding: 8px 14px; }
+
+.portal-pager .portal-button:disabled { opacity: 0.5; cursor: default; }
+
+.portal-detail-fields {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 6px 14px;
+  margin: 0 0 6px;
+}
+
+.portal-detail-fields dt { color: var(--portal-muted); font-size: 13px; }
+
+.portal-detail-fields dd { margin: 0; font-size: 14px; }
+
+.portal-badges { min-height: 18px; margin: 0 0 8px; }
+
+.portal-messages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.portal-message {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--portal-radius);
+  margin-bottom: 6px;
+}
+
+.portal-message-patient { background: var(--portal-bg); }
+
+.portal-message-assistant { background: #eff6ff; }
+
+.portal-message-role {
+  flex: 0 0 56px;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--portal-muted);
+}
+
+.portal-message-content { white-space: pre-wrap; }
+
+/* A2: the explicit partial-transcript notice above the conversation. */
+.portal-transcript-note { font-size: 13px; margin: 0 0 8px; }
+
+@media (max-width: 560px) {
+  .portal-lead-meta { margin-left: 0; width: 100%; }
+  .portal-detail-fields { grid-template-columns: 1fr; }
+}

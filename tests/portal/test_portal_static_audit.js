@@ -25,7 +25,9 @@ const PORTAL_FILES = [
   "portal.css",
   "portal-core.js",
   "portal-app.js",
-  "portal-reset.js"
+  "portal-reset.js",
+  "portal-data.js",   /* P3-B1: read-only data access */
+  "portal-pages.js"   /* P3-B1: dashboard/leads DOM glue */
 ];
 
 function read(name) {
@@ -134,7 +136,8 @@ test("audit: no client identifier vocabulary in any portal file", () => {
 });
 
 test("audit: portal JS never reads the query string (no tenant/params channel)", () => {
-  for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js"]) {
+  for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js",
+    "portal-data.js", "portal-pages.js"]) {
     const content = read(name);
     assert(content.indexOf("location.search") === -1,
       name + " must not read location.search");
@@ -146,11 +149,40 @@ test("audit: portal JS never reads the query string (no tenant/params channel)",
 /* ------------------------------------------------------------------ */
 
 test("audit: portal JS references no operator or Calendar admin routes", () => {
-  for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js"]) {
+  for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js",
+    "portal-data.js", "portal-pages.js"]) {
     const content = read(name);
     assert(content.indexOf("/admin/") === -1, name + " must not call /admin/ routes");
     assert(content.indexOf("/chat") === -1, name + " must not call the patient chat API");
   }
+});
+
+/* P3-B1: the data layer's OWN backend allow-list - exactly the two
+ * read-only endpoint literals, nothing else, and both must exist. */
+test("audit: portal-data calls only the two allow-listed read endpoints", () => {
+  const content = read("portal-data.js");
+  const portalCalls = content.match(/"\/portal\/[a-z-]*"/g) || [];
+  const allowed = ['"/portal/dashboard"', '"/portal/leads"'];
+  for (const call of portalCalls) {
+    assert(allowed.indexOf(call) !== -1,
+      call + " is not an allowed portal data endpoint");
+  }
+  assert(portalCalls.indexOf('"/portal/dashboard"') !== -1,
+    "dashboard endpoint literal must exist");
+  assert(portalCalls.indexOf('"/portal/leads"') !== -1,
+    "leads endpoint literal must exist");
+});
+
+/* P3-B1: portal-pages is DOM glue ONLY - it owns no network surface at
+ * all, so a future edit cannot quietly grow a second request pathway. */
+test("audit: portal-pages performs no network requests of its own", () => {
+  const content = read("portal-pages.js");
+  assert(content.indexOf("fetch(") === -1,
+    "portal-pages.js must not call fetch");
+  assert(content.indexOf("XMLHttpRequest") === -1,
+    "portal-pages.js must not use XMLHttpRequest");
+  assert(content.indexOf('"/portal/') === -1,
+    "portal-pages.js must not hold backend endpoint literals");
 });
 
 test("audit: the only backend endpoints the portal calls are /portal/config and /portal/me", () => {

@@ -66,19 +66,93 @@
       </p>
     </section>
 
-    <!-- Minimal authenticated shell (P3-A scope): the server-verified
-         practice name and a sign-out action. Business features (leads,
-         appointments, calendar settings) are later P3 tasks. -->
+    <!-- Authenticated shell (P3-B1 scope): the server-verified practice
+         name, sign-out, and the READ-ONLY Dashboard / Leads pages. All
+         values are rendered via textContent by portal-pages.js; nothing
+         tenant-specific is shown until /portal/me has verified the
+         session server-side. -->
     <section id="view-shell" class="portal-card" hidden>
-      <p class="portal-muted portal-shell-kicker">Signed in to</p>
-      <h2 id="shell-practice-name" class="portal-shell-practice"></h2>
-      <p class="portal-muted">
-        Your office portal is being built in stages. Leads, appointments and
-        calendar settings will appear here in upcoming releases.
-      </p>
+      <header class="portal-shell-header">
+        <div>
+          <p class="portal-muted portal-shell-kicker">Signed in to</p>
+          <h2 id="shell-practice-name" class="portal-shell-practice"></h2>
+        </div>
+        <button id="shell-logout" class="portal-button portal-button-secondary"
+                type="button">Sign out</button>
+      </header>
+      <nav class="portal-nav" aria-label="Portal sections">
+        <button id="nav-dashboard" class="portal-nav-button"
+                type="button">Dashboard</button>
+        <button id="nav-leads" class="portal-nav-button"
+                type="button">Leads</button>
+      </nav>
       <p id="shell-status" class="portal-status" aria-live="polite"></p>
-      <button id="shell-logout" class="portal-button portal-button-secondary"
-              type="button">Sign out</button>
+
+      <section id="page-dashboard" hidden>
+        <p id="dashboard-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <dl id="dashboard-counts" class="portal-counts" hidden>
+          <div class="portal-count">
+            <dt>Conversations</dt><dd id="count-conversations"></dd>
+          </div>
+          <div class="portal-count">
+            <dt>Total leads</dt><dd id="count-leads"></dd>
+          </div>
+          <div class="portal-count">
+            <dt>Urgent leads</dt><dd id="count-urgent-leads"></dd>
+          </div>
+          <div class="portal-count">
+            <dt>Leads, last 7 days</dt><dd id="count-recent-leads"></dd>
+          </div>
+        </dl>
+        <h3 class="portal-section-title">Recent leads</h3>
+        <ul id="dashboard-recent" class="portal-lead-list"></ul>
+      </section>
+
+      <section id="page-leads" hidden>
+        <form id="leads-filter-form" class="portal-filters" novalidate>
+          <label class="portal-label" for="leads-search">Search</label>
+          <input class="portal-input" id="leads-search" type="search"
+                 placeholder="Name, phone, or email" />
+          <label class="portal-label" for="leads-status">Status</label>
+          <select class="portal-input" id="leads-status">
+            <option value="">All statuses</option>
+            <option value="new">Intake not completed</option>
+            <option value="contacted">Contacted</option>
+            <option value="booked">Booked</option>
+            <option value="completed">Intake completed</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button id="leads-apply" class="portal-button"
+                  type="submit">Apply</button>
+        </form>
+        <p id="leads-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <ul id="leads-list" class="portal-lead-list"></ul>
+        <div class="portal-pager">
+          <button id="leads-prev" class="portal-button portal-button-secondary"
+                  type="button">Previous</button>
+          <span id="leads-page-label" class="portal-muted"></span>
+          <button id="leads-next" class="portal-button portal-button-secondary"
+                  type="button">Next</button>
+        </div>
+      </section>
+
+      <section id="page-lead-detail" hidden>
+        <button id="detail-back" class="portal-button portal-button-secondary"
+                type="button">Back to leads</button>
+        <p id="detail-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <div id="detail-body" hidden>
+          <h3 id="detail-name" class="portal-section-title"></h3>
+          <p id="detail-badges" class="portal-badges"></p>
+          <dl id="detail-fields" class="portal-detail-fields"></dl>
+          <h3 class="portal-section-title">Conversation</h3>
+          <p id="detail-transcript-note"
+             class="portal-muted portal-transcript-note"></p>
+          <ul id="detail-messages" class="portal-messages"></ul>
+        </div>
+      </section>
     </section>
 
     <noscript>
@@ -88,6 +162,8 @@
     </noscript>
   </main>
   <script src="/static/portal/portal-core.js"></script>
+  <script src="/static/portal/portal-data.js"></script>
+  <script src="/static/portal/portal-pages.js"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>

@@ -12,7 +12,9 @@ const path = require("path");
 
 const suites = [
   "test_portal_core.js",
-  "test_portal_static_audit.js"
+  "test_portal_static_audit.js",
+  "test_portal_data.js",    /* P3-B1 */
+  "test_portal_pages.js"    /* P3-B1 */
 ];
 
 let failed = 0;

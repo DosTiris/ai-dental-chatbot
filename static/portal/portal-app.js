@@ -35,16 +35,25 @@
 
   var core = null;
 
+  /* P3-B1: the authenticated pages module (Dashboard/Leads). Created once
+   * on first authorized entry; portal-pages.js is DOM glue over
+   * portal-data.js and holds no auth rule. */
+  var pages = null;
+
   function byId(id) {
     return document.getElementById(id);
   }
 
-  /* Show exactly one view; hide the rest (single-meaning state). */
+  /* Show exactly one view; hide the rest (single-meaning state). The
+   * page wrap widens only for the authenticated shell (P3-B1), so the
+   * auth views keep their original compact layout. */
   function showView(viewId) {
     var views = ["view-loading", "view-login", "view-forgot", "view-shell"];
     for (var i = 0; i < views.length; i++) {
       byId(views[i]).hidden = views[i] !== viewId;
     }
+    document.querySelector(".portal-wrap").classList
+      .toggle("portal-wrap-wide", viewId === "view-shell");
   }
 
   /* One status line per page area; text only (never HTML) so server or
@@ -59,6 +68,39 @@
   }
 
   /*
+   * P3-B1: a data request reported the session dead ("signed_out" or
+   * "unauthorized" after portal-data's one refresh-and-retry). The pages
+   * module has already wiped its rendered content; here the session is
+   * dropped and the office lands on login with an honest message -
+   * mirroring how portal-core treats a rejected /portal/me.
+   */
+  function onSessionLost() {
+    core.clearSession();
+    /* A4: the practice name is tenant-specific rendered content - wipe it
+     * with everything else before the login view appears. It is only ever
+     * repopulated from a fresh verified /portal/me response. */
+    byId("shell-practice-name").textContent = "";
+    showView("view-login");
+    setStatus("login-status", MESSAGES.session_expired);
+  }
+
+  /* P3-B1: create the pages module once, then (re-)enter it. Entry always
+   * starts from a fresh Dashboard load; nothing is rendered from cache. */
+  function enterPages() {
+    if (!pages) {
+      pages = window.createMiaPortalPages({
+        data: window.createMiaPortalData({
+          core: core,
+          fetchImpl: window.fetch.bind(window)
+        }),
+        documentRef: document,
+        onSessionLost: onSessionLost
+      });
+    }
+    pages.enter();
+  }
+
+  /*
    * Purpose: route a portal-core bootstrap outcome to a view.
    * "authorized" is the ONLY outcome that enters the shell; every other
    * outcome lands on the login view with an honest message (fail closed).
@@ -68,6 +110,7 @@
       byId("shell-practice-name").textContent = outcome.practiceName;
       setStatus("shell-status", "");
       showView("view-shell");
+      enterPages();
       return;
     }
     showView("view-login");
@@ -151,6 +194,14 @@
    * best-effort server revocation; the UI returns to login either way. */
   function onLogoutClick() {
     setBusy("shell-logout", true);
+    /* P3-B1: wipe every rendered lead value BEFORE leaving the shell so
+     * no office data lingers on a shared front-desk computer. The practice
+     * name is tenant-specific too (A4); it returns only via a fresh
+     * verified /portal/me. */
+    if (pages) {
+      pages.reset();
+    }
+    byId("shell-practice-name").textContent = "";
     core.signOut().then(function () {
       setBusy("shell-logout", false);
       byId("login-password").value = "";
