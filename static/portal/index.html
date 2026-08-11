@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- The portal is a private tool: never index it. -->
+  <meta name="robots" content="noindex, nofollow" />
+  <!-- Baseline CSP: same-origin assets only; network calls limited to this
+       origin and https (the office's Supabase project URL is configured at
+       runtime, so it cannot be pinned here). Header-based CSP is a future
+       backend hardening task and is documented in the P3-A runbook. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'self'" />
+  <title>Mia Office Portal | Sign in</title>
+  <link rel="stylesheet" href="/static/portal/portal.css" />
+</head>
+<body>
+  <main class="portal-wrap">
+    <header class="portal-brand">
+      <div class="portal-logo" aria-hidden="true">M</div>
+      <h1 class="portal-title">Mia Office Portal</h1>
+      <p class="portal-subtitle">Dos Tiris</p>
+    </header>
+
+    <!-- Restoring a stored session: nothing tenant-specific is shown until
+         /portal/me has verified the session server-side. -->
+    <section id="view-loading" class="portal-card" aria-live="polite">
+      <p class="portal-muted">Checking your session&hellip;</p>
+    </section>
+
+    <!-- Sign in. This portal intentionally offers no self-registration
+         path anywhere: accounts are created by invitation only (P3-A rule 9). -->
+    <section id="view-login" class="portal-card" hidden>
+      <h2 class="portal-card-title">Sign in</h2>
+      <form id="login-form" novalidate>
+        <label class="portal-label" for="login-email">Email</label>
+        <input class="portal-input" id="login-email" name="email" type="email"
+               autocomplete="username" required />
+        <label class="portal-label" for="login-password">Password</label>
+        <input class="portal-input" id="login-password" name="password"
+               type="password" autocomplete="current-password" required />
+        <p id="login-status" class="portal-status" role="alert" aria-live="polite"></p>
+        <button id="login-submit" class="portal-button" type="submit">Sign in</button>
+      </form>
+      <p class="portal-footnote">
+        <a id="login-forgot-link" href="#forgot">Forgot your password?</a>
+      </p>
+      <p class="portal-footnote portal-muted">
+        Access is by invitation from Dos Tiris. There is no self-registration.
+      </p>
+    </section>
+
+    <!-- Forgot password: the confirmation wording is identical whether or
+         not the email has an account (anti-enumeration). -->
+    <section id="view-forgot" class="portal-card" hidden>
+      <h2 class="portal-card-title">Reset your password</h2>
+      <form id="forgot-form" novalidate>
+        <label class="portal-label" for="forgot-email">Email</label>
+        <input class="portal-input" id="forgot-email" name="email" type="email"
+               autocomplete="username" required />
+        <p id="forgot-status" class="portal-status" role="alert" aria-live="polite"></p>
+        <button id="forgot-submit" class="portal-button" type="submit">Send reset link</button>
+      </form>
+      <p class="portal-footnote">
+        <a id="forgot-back-link" href="#login">Back to sign in</a>
+      </p>
+    </section>
+
+    <!-- Minimal authenticated shell (P3-A scope): the server-verified
+         practice name and a sign-out action. Business features (leads,
+         appointments, calendar settings) are later P3 tasks. -->
+    <section id="view-shell" class="portal-card" hidden>
+      <p class="portal-muted portal-shell-kicker">Signed in to</p>
+      <h2 id="shell-practice-name" class="portal-shell-practice"></h2>
+      <p class="portal-muted">
+        Your office portal is being built in stages. Leads, appointments and
+        calendar settings will appear here in upcoming releases.
+      </p>
+      <p id="shell-status" class="portal-status" aria-live="polite"></p>
+      <button id="shell-logout" class="portal-button portal-button-secondary"
+              type="button">Sign out</button>
+    </section>
+
+    <noscript>
+      <section class="portal-card">
+        <p>The Mia Office Portal requires JavaScript. Please enable it and reload.</p>
+      </section>
+    </noscript>
+  </main>
+  <script src="/static/portal/portal-core.js"></script>
+  <script src="/static/portal/portal-app.js"></script>
+</body>
+</html>

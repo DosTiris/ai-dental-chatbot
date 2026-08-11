@@ -86,3 +86,34 @@ def portal_me(
         role=identity.office_user.role,
         email=identity.email,
     )
+
+
+# ---------------------------------------------------------------------------
+# P3A-PORTAL-CONFIG (appended by MIA_P3A_PORTAL_AUTH_UI v1.0.1, F-P3A-1)
+# Public, unauthenticated browser bootstrap configuration for the office
+# portal frontend. Configuration transport only: it requires no portal
+# token and exposes no tenant identity and no secret. All derivation and
+# validation logic is owned by app.services.portal_config_service
+# (Rule 3: single owner); this block is transport wiring only, matching
+# the role portal.py was given in P2.
+# ---------------------------------------------------------------------------
+from app.services.portal_config_service import build_portal_public_config
+
+
+@router.get("/config")
+def get_portal_config():
+    """
+    Purpose:
+        Supply the browser with the two PUBLIC values it needs to reach
+        Supabase Auth: supabase_url and supabase_publishable_key.
+    Inputs:
+        None. No Authorization header is required or read.
+    Returns:
+        {"supabase_url": ..., "supabase_publishable_key": ...} - exactly
+        these two keys, nothing else.
+    Possible failures:
+        503 when SUPABASE_AUTH_ISSUER or SUPABASE_PUBLISHABLE_KEY is
+        missing or malformed (fail closed; no guessed defaults).
+    Database effects: none.  External effects: none.
+    """
+    return build_portal_public_config()

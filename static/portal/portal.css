@@ -1,0 +1,175 @@
+/*
+ * portal.css - Mia Office Portal (P3-A).
+ * Office-facing surface: light, quiet, professional. Reuses the Mia brand
+ * primary (#2563eb) from the patient widget token set so both surfaces
+ * read as one product family. No external fonts or assets are loaded:
+ * the portal makes no third-party requests except the office's own
+ * Supabase project.
+ */
+
+:root {
+  --portal-primary: #2563eb;
+  --portal-primary-dark: #1d4ed8;
+  --portal-bg: #f1f5f9;
+  --portal-card-bg: #ffffff;
+  --portal-border: #e2e8f0;
+  --portal-text: #0f172a;
+  --portal-muted: #64748b;
+  --portal-status: #b91c1c;
+  --portal-radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  background: var(--portal-bg);
+  color: var(--portal-text);
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.portal-wrap {
+  width: 100%;
+  max-width: 420px;
+}
+
+.portal-brand {
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.portal-logo {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 10px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--portal-primary), #06b6d4);
+  color: #ffffff;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 48px;
+}
+
+.portal-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.portal-subtitle {
+  color: var(--portal-muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.portal-card {
+  background: var(--portal-card-bg);
+  border: 1px solid var(--portal-border);
+  border-radius: var(--portal-radius);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+.portal-card-title {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+.portal-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 12px 0 6px;
+}
+
+.portal-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--portal-text);
+  background: #ffffff;
+  border: 1px solid var(--portal-border);
+  border-radius: 8px;
+}
+
+.portal-input:focus {
+  outline: 2px solid var(--portal-primary);
+  outline-offset: 1px;
+  border-color: var(--portal-primary);
+}
+
+.portal-button {
+  width: 100%;
+  margin-top: 16px;
+  padding: 11px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #ffffff;
+  background: var(--portal-primary);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.portal-button:hover { background: var(--portal-primary-dark); }
+
+.portal-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.portal-button-secondary {
+  background: #ffffff;
+  color: var(--portal-text);
+  border: 1px solid var(--portal-border);
+}
+
+.portal-button-secondary:hover { background: var(--portal-bg); }
+
+/* Status lines double as the error surface; empty by default. */
+.portal-status {
+  min-height: 18px;
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--portal-status);
+}
+
+.portal-footnote {
+  margin: 14px 0 0;
+  font-size: 13px;
+  text-align: center;
+}
+
+.portal-footnote a {
+  color: var(--portal-primary);
+  text-decoration: none;
+}
+
+.portal-footnote a:hover { text-decoration: underline; }
+
+.portal-muted { color: var(--portal-muted); }
+
+.portal-shell-kicker {
+  margin: 0 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.portal-shell-practice {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 700;
+}

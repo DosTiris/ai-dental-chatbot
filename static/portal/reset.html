@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'self'" />
+  <title>Mia Office Portal | Set password</title>
+  <link rel="stylesheet" href="/static/portal/portal.css" />
+</head>
+<body>
+  <main class="portal-wrap">
+    <header class="portal-brand">
+      <div class="portal-logo" aria-hidden="true">M</div>
+      <h1 class="portal-title">Mia Office Portal</h1>
+      <p class="portal-subtitle">Dos Tiris</p>
+    </header>
+
+    <section class="portal-card">
+      <!-- Heading and intro are set by portal-reset.js from the link type:
+           recovery = "Set a new password", invite = "Activate your account".
+           Both flows end at the normal sign-in page; the portal is only
+           entered through the verified /portal/me path. -->
+      <h2 id="reset-heading" class="portal-card-title">Set a new password</h2>
+      <p id="reset-intro" class="portal-muted"></p>
+
+      <form id="reset-form" novalidate hidden>
+        <label class="portal-label" for="reset-password">New password</label>
+        <input class="portal-input" id="reset-password" name="new-password"
+               type="password" autocomplete="new-password" required minlength="8" />
+        <label class="portal-label" for="reset-password-confirm">Confirm new password</label>
+        <input class="portal-input" id="reset-password-confirm" name="confirm-password"
+               type="password" autocomplete="new-password" required minlength="8" />
+        <button id="reset-submit" class="portal-button" type="submit">Set password</button>
+      </form>
+
+      <p id="reset-status" class="portal-status" role="alert" aria-live="polite"></p>
+
+      <p id="reset-done" class="portal-footnote" hidden>
+        <a href="/static/portal/index.html">Continue to sign in</a>
+      </p>
+    </section>
+
+    <noscript>
+      <section class="portal-card">
+        <p>This page requires JavaScript. Please enable it and reload.</p>
+      </section>
+    </noscript>
+  </main>
+  <script src="/static/portal/portal-core.js"></script>
+  <script src="/static/portal/portal-reset.js"></script>
+</body>
+</html>
