@@ -137,7 +137,16 @@ def test_email_skip_final_field_routes(db, fakes, monkeypatch):
     _, target = _publish_future_open_slot(db, c, monkeypatch)
     conv = _fresh(db, c)
     conv.lead_is_new_patient = True
-    conv.lead_time_window = "Mon 2026-08-10 morning"
+    # DATE-ROT FIX: this fixture used to hard-code "Mon 2026-08-10 morning",
+    # which fell into the past on 2026-08-11 and rerouted the flow to
+    # waiting_for_date. Build the SAME canonical stored shape
+    # ("Www YYYY-MM-DD morning") from the future weekday `target` the
+    # helper above already published a 10:00 (morning) slot for — so the
+    # window is deterministic on any run day and always bookable.
+    conv.lead_time_window = "%s %s morning" % (
+        ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[target.weekday()],
+        target.isoformat(),
+    )
     db.add(conv)
     db.commit()
     db.refresh(conv)
