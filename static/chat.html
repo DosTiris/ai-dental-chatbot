@@ -1947,8 +1947,10 @@
       messagesEl.scrollTop = messagesEl.scrollHeight;
 
       const now = new Date();
+      // fromSignal: this is the signal-driven initial load of a freshly
+      // rebuilt picker (see the fetchPickerMonth entry guard).
       fetchPickerMonth(panel, now.getFullYear(), now.getMonth(),
-                       PICKER_PATIENT_JUMP_BUDGET);
+                       PICKER_PATIENT_JUMP_BUDGET, true);
     }
 
     function pickerShowStatus(panel, text, retry, year, monthIndex) {
@@ -2004,11 +2006,21 @@
       }
     }
 
-    async function fetchPickerMonth(panel, year, monthIndex, jumpBudget) {
+    async function fetchPickerMonth(panel, year, monthIndex, jumpBudget, fromSignal) {
       // Refuse to begin a month preview while a structured date action is
       // unresolved. (Navigation before submission does not touch the strip
       // tail; a date submission freezes BOTH lifecycles \u2014 see pickDate.)
-      if (pickerSubmitted || structuredActionInFlight) return;
+      // EXCEPTION (confirmation-decline re-entry defect): the ONE call
+      // renderDatePicker makes while RENDERING a structured action's own
+      // success response (fromSignal === true) is part of delivering that
+      // response -- the "in-flight" action IS the picker signal being
+      // rendered, so refusing it deadlocks the fresh picker into a
+      // permanently empty shell (no fetch, no strip chips, empty full
+      // calendar). Every other caller (month navigation, Retry, clamp
+      // jumps) omits the marker and keeps the full guard; the
+      // pickerSubmitted freeze and every post-await stale/supersession
+      // check apply to signal-driven loads unchanged.
+      if (pickerSubmitted || (structuredActionInFlight && fromSignal !== true)) return;
       const seq = ++pickerFetchSeq;
       const win = pickerMonthWindow(year, monthIndex);
       pickerShowStatus(panel, "Loading available days…", false, year, monthIndex);
