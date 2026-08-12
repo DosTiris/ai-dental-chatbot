@@ -875,7 +875,10 @@
 
         const lead = allLeads.find(l => l.conversation_id === conversationId);
         if (lead) {
-          lead.lead_status = newStatus;
+          // P3-B2-S2: the server stores operator workflow in office_status
+          // (lead_status is Mia's untouched system intake state), so the
+          // optimistic local update mirrors exactly that; "new" clears it.
+          lead.office_status = (newStatus === "new") ? null : newStatus;
         }
 
         renderLeads(allLeads);
@@ -1017,6 +1020,7 @@
         lead.lead_email,
         lead.lead_reason,
         lead.lead_status,
+        lead.office_status,
       ].join(" ").toLowerCase();
 
       return haystack.includes(query.toLowerCase());
@@ -1129,7 +1133,7 @@
 
             <div>
               <div class="lead-detail"><b>Reason:</b> ${escapeHtml(l.lead_reason || "—")}</div>
-              <div class="lead-detail"><b>Status:</b> ${escapeHtml((l.lead_status || "new").replace("_", " "))}</div>
+              <div class="lead-detail"><b>Status:</b> ${escapeHtml(((l.office_status || l.lead_status) || "new").replace("_", " "))}</div>
               <div class="lead-detail"><b>Preferred Time:</b> ${escapeHtml(l.lead_time_window || "—")}</div>
             </div>
 
@@ -1154,12 +1158,12 @@
 
               <button class="btn-soft" type="button"
                 onclick="updateLeadStatus('${l.conversation_id}', 'contacted')">
-                ${l.lead_status === "contacted" ? "✓ Contacted" : "Contacted"}
+                ${(l.office_status || l.lead_status) === "contacted" ? "✓ Contacted" : "Contacted"}
               </button>
 
               <button class="btn-soft" type="button"
                 onclick="updateLeadStatus('${l.conversation_id}', 'booked')">
-                ${l.lead_status === "booked" ? "✓ Booked" : "Booked"}
+                ${(l.office_status || l.lead_status) === "booked" ? "✓ Booked" : "Booked"}
               </button>
 
               <button class="btn-soft" type="button"

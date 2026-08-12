@@ -527,6 +527,8 @@ def list_leads(
             "lead_name": conv.lead_name,
             "lead_reason": conv.lead_reason,
             "lead_status": conv.lead_status,
+            # P3-B2-S2 additive: office-owned workflow value (008).
+            "office_status": getattr(conv, "office_status", None),
             "lead_is_priority": bool(getattr(conv, "lead_is_priority", False)),
             "lead_is_emergency": bool(getattr(conv, "lead_is_emergency", False)),
             "lead_is_outside_hours": bool(getattr(conv, "lead_is_outside_hours", False)),
@@ -548,8 +550,48 @@ def update_lead_status(
     body: LeadStatusUpdateBody,
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
-    
 ):
+    """
+    P3-B2-S2: operator workflow status writes to the office-owned
+    office_status column (migration 008) - NEVER to lead_status.
+
+    lead_status is Mia's system intake state ("new" at creation,
+    "completed" written only by mark_lead_completed_silently in
+    app/routes/chat.py). Before S2 this endpoint wrote manual values into
+    that same column, which Mia could silently rewrite to "completed" on
+    later patient activity and which made a completed intake look
+    incomplete to routing. The wire contract is deliberately UNCHANGED for
+    the existing admin dashboard: same route, same body field name
+    (lead_status), same accepted vocabulary, same auth, same 400/404
+    behavior, same tenant-unscoped operator-global lookup.
+
+    Vocabulary mapping (Rule 4/16 closed set, anything else is a 400):
+        "contacted" / "booked" / "closed" -> office_status = that value
+        "new" -> office_status = NULL (clear). "new" is accepted ONLY for
+                 wire compatibility with the existing admin UI/API; it
+                 never writes the word "new" anywhere.
+
+    office_status_updated_at is a SERVER-generated UTC concurrency/version
+    token (migration-008 contract): it advances on EVERY successful
+    mutation, INCLUDING a clear to NULL and a re-set to the same value,
+    and it is never reset to NULL. No client-supplied timestamp exists in
+    the request model, and none is read.
+
+    Database effects: exactly office_status and office_status_updated_at
+    on one conversations row. lead_status, office_note,
+    office_note_updated_at, intake, notification, and booking state are
+    NOT touched.
+
+    Response: prior keys preserved. "lead_status" now reports the
+    UNTOUCHED system value; "office_status" is additive and reports the
+    stored office value; "unchanged" is now computed truthfully - the
+    pre-S2 implementation hardcoded "unchanged": True on every call, and
+    the sole caller (static/admin/dashboard.html updateLeadStatus) reads
+    only res.ok and the error detail, so this correction cannot break it.
+
+    Possible failures: 400 unknown status word; 404 unknown conversation
+    id; 401 via require_admin (global operator X-Admin-Key, unchanged).
+    """
     allowed = {"new", "contacted", "booked", "closed"}
     if body.lead_status not in allowed:
         raise HTTPException(400, f"lead_status must be one of {sorted(list(allowed))}")
@@ -558,16 +600,28 @@ def update_lead_status(
     if not conv:
         raise HTTPException(404, "Conversation not found")
 
-    conv.lead_status = body.lead_status
+    # The legacy reset word clears the office workflow value (NULL = no
+    # current office status); every other allowed word is stored verbatim.
+    new_office_status = None if body.lead_status == "new" else body.lead_status
+    unchanged = conv.office_status == new_office_status
+
+    conv.office_status = new_office_status
+    # Server clock ONLY. Advances even on clear and on same-value re-set so
+    # the token always records the operator's last action (008 contract).
+    conv.office_status_updated_at = datetime.now(timezone.utc)
     db.add(conv)
     db.commit()
 
-    print(f"[STATUS_UPDATE] conversation_id={body.conversation_id} lead_status={body.lead_status}")
+    print(
+        f"[STATUS_UPDATE] conversation_id={body.conversation_id} "
+        f"office_status={new_office_status} request_word={body.lead_status}"
+    )
     return {
         "ok": True,
         "conversation_id": str(conv.id),
         "lead_status": conv.lead_status,
-        "unchanged": True,
+        "office_status": conv.office_status,
+        "unchanged": unchanged,
     }
 # -----------------------------
 # Dashboard / Analytics
@@ -599,7 +653,7 @@ def dashboard_overview(
 
     recent_leads = db.execute(
     sql_text(
-        "select id as conversation_id, visitor_id, lead_name, lead_phone, lead_email, lead_reason, lead_status, "
+        "select id as conversation_id, visitor_id, lead_name, lead_phone, lead_email, lead_reason, lead_status, office_status, "
         "lead_is_outside_hours, lead_is_priority, lead_is_emergency, "
         "lead_time_window, lead_outside_hours_note, lead_is_new_patient, "
         "lead_name_source_text, lead_reason_source_text, "
