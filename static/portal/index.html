@@ -147,6 +147,35 @@
           <h3 id="detail-name" class="portal-section-title"></h3>
           <p id="detail-badges" class="portal-badges"></p>
           <dl id="detail-fields" class="portal-detail-fields"></dl>
+
+          <h3 class="portal-section-title">Office workflow</h3>
+          <div class="portal-workflow">
+            <label class="portal-label" for="detail-office-status">Office status</label>
+            <select class="portal-input" id="detail-office-status">
+              <option value="">No status</option>
+              <option value="contacted">Contacted</option>
+              <option value="booked">Booked</option>
+              <option value="closed">Closed</option>
+            </select>
+            <p id="detail-status-meta" class="portal-muted"></p>
+            <button id="detail-status-save" class="portal-button" type="button">
+              Save status</button>
+            <p id="detail-status-feedback" class="portal-muted"
+               aria-live="polite"></p>
+
+            <label class="portal-label" for="detail-office-note">Office note</label>
+            <textarea class="portal-input portal-textarea" id="detail-office-note"
+                      rows="4" maxlength="2000"></textarea>
+            <p id="detail-note-meta" class="portal-muted"></p>
+            <button id="detail-note-save" class="portal-button" type="button">
+              Save note</button>
+            <button id="detail-note-clear"
+                    class="portal-button portal-button-secondary" type="button">
+              Clear note</button>
+            <p id="detail-note-feedback" class="portal-muted"
+               aria-live="polite"></p>
+          </div>
+
           <h3 class="portal-section-title">Conversation</h3>
           <p id="detail-transcript-note"
              class="portal-muted portal-transcript-note"></p>

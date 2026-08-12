@@ -167,21 +167,72 @@
        * total must agree with the page actually delivered - an honest
        * partial-transcript notice cannot be built from numbers that
        * contradict the payload. */
+      /* P3-B2: the office workflow slice is part of the approved detail
+       * contract - reject a detail body that lost or malformed it. */
+      if (!hasValidWorkflowFields(body)) {
+        return false;
+      }
       if (body.messages_truncated === false) {
         return body.messages_total === body.messages.length;
       }
       return body.messages_total > body.messages.length;
     }
 
+    /* P3-B2: one office workflow field pair is either (null value) or a
+     * value with a string token; a non-null value MUST carry its token
+     * (mirrors the migration-008 CHECK), and the token itself is null only
+     * while the office has never touched the field. */
+    function isValidWorkflowPair(value, token, allowedValues) {
+      if (token !== null && typeof token !== "string") {
+        return false;
+      }
+      if (value === null) {
+        return true;
+      }
+      if (typeof value !== "string" || token === null) {
+        return false;
+      }
+      if (allowedValues) {
+        for (var i = 0; i < allowedValues.length; i++) {
+          if (allowedValues[i] === value) { return true; }
+        }
+        return false;
+      }
+      return true;
+    }
+
+    var OFFICE_STATUS_VALUES = ["contacted", "booked", "closed"];
+
+    function hasValidWorkflowFields(body) {
+      return isValidWorkflowPair(body.office_status,
+          body.office_status_updated_at, OFFICE_STATUS_VALUES) &&
+        isValidWorkflowPair(body.office_note,
+          body.office_note_updated_at, null);
+    }
+
+    /* PUT /portal/leads/<id>/(status|note) response: exactly the office
+     * workflow slice keyed to the lead it mutated. */
+    function isValidWorkflowBody(body) {
+      return typeof body.lead_id === "string" && body.lead_id !== "" &&
+        hasValidWorkflowFields(body);
+    }
+
     /* One raw authenticated GET. Network failure resolves to status 0 so
      * callers can distinguish "could not reach the portal" from a
      * rejection (the portal-core requestPortalMeOnce convention). */
-    function requestOnce(url, accessToken) {
-      return fetchImpl(url, {
-        method: "GET",
+    function requestOnce(url, accessToken, method, payload) {
+      var init = {
+        method: method || "GET",
         cache: "no-store",
         headers: { "Authorization": "Bearer " + accessToken }
-      }).then(function (res) {
+      };
+      if (payload !== undefined) {
+        /* P3-B2 mutations: the payload NEVER carries a tenant selector -
+         * tenancy is the verified bearer token alone. */
+        init.headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(payload);
+      }
+      return fetchImpl(url, init).then(function (res) {
         if (!res) {
           return { status: 0, body: null };
         }
@@ -211,6 +262,11 @@
       if (result.status === 404) {
         return { ok: false, state: "not_found" };
       }
+      if (result.status === 409) {
+        /* P3-B2: optimistic-concurrency conflict - the lead changed
+         * elsewhere. The pages must refresh authoritative state. */
+        return { ok: false, state: "conflict" };
+      }
       if (result.status === 400 || result.status === 422) {
         return { ok: false, state: "bad_request" };
       }
@@ -230,7 +286,7 @@
      * External effects: one or two same-origin GETs; possibly one token
      * refresh via core.
      */
-    function authorizedGet(url, isValidBody) {
+    function authorizedSend(method, url, payload, isValidBody) {
       return core.ensureFreshAccessToken().then(function (tokenResult) {
         if (tokenResult.error === "signed_out") {
           return { ok: false, state: "signed_out" };
@@ -241,7 +297,7 @@
         if (tokenResult.error) {
           return { ok: false, state: "unauthorized" };
         }
-        return requestOnce(url, tokenResult.token).then(function (first) {
+        return requestOnce(url, tokenResult.token, method, payload).then(function (first) {
           if (first.status !== 401) {
             return interpret(first, isValidBody);
           }
@@ -256,13 +312,19 @@
             if (!refreshed) {
               return { ok: false, state: "unauthorized" };
             }
-            return requestOnce(url, refreshed.accessToken)
+            return requestOnce(url, refreshed.accessToken, method, payload)
               .then(function (retried) {
                 return interpret(retried, isValidBody);
               });
           });
         });
       });
+    }
+
+    /* The ONE authenticated GET pathway (delegates to authorizedSend so a
+     * single implementation owns token handling and the 401 retry). */
+    function authorizedGet(url, isValidBody) {
+      return authorizedSend("GET", url, undefined, isValidBody);
     }
 
     /* Public surface: one function per backend endpoint, nothing else. */
@@ -284,6 +346,24 @@
         return authorizedGet(
           LEADS_URL + "/" + encodeURIComponent(String(leadId)),
           isValidLeadDetailBody);
+      },
+      /* PUT /portal/leads/<id>/status - set or clear (null) the office
+       * workflow status under the expected concurrency token. */
+      putLeadStatus: function (leadId, status, expectedToken) {
+        return authorizedSend("PUT",
+          LEADS_URL + "/" + encodeURIComponent(String(leadId)) + "/status",
+          { office_status: status,
+            expected_office_status_updated_at: expectedToken },
+          isValidWorkflowBody);
+      },
+      /* PUT /portal/leads/<id>/note - save or clear (null) the office
+       * note under the expected concurrency token. */
+      putLeadNote: function (leadId, note, expectedToken) {
+        return authorizedSend("PUT",
+          LEADS_URL + "/" + encodeURIComponent(String(leadId)) + "/note",
+          { office_note: note,
+            expected_office_note_updated_at: expectedToken },
+          isValidWorkflowBody);
       },
       /* Exported for the Node suite (pure function). */
       buildLeadsQuery: buildLeadsQuery

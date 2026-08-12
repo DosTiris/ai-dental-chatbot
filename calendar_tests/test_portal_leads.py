@@ -71,7 +71,11 @@ APPROVED_SUMMARY_FIELDS = {
     "last_lead_at", "created_at",
 }
 APPROVED_DETAIL_FIELDS = APPROVED_SUMMARY_FIELDS | {
-    "messages", "messages_total", "messages_truncated"}
+    "messages", "messages_total", "messages_truncated",
+    # P3-B2 (intentional contract extension): the office workflow slice.
+    # DETAIL ONLY - the summary/list surface deliberately did not grow.
+    "office_status", "office_status_updated_at",
+    "office_note", "office_note_updated_at"}
 APPROVED_MESSAGE_FIELDS = {"role", "content", "created_at"}
 APPROVED_DASHBOARD_FIELDS = {
     "practice_name", "total_conversations", "total_leads", "urgent_leads",

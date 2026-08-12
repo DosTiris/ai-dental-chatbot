@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 # Reused P2/P3-A owners: the per-request session factory and the ONE portal
@@ -85,6 +85,14 @@ class PortalLeadDetailView(PortalLeadSummaryView):
     messages: List[PortalLeadMessageView]
     messages_total: int
     messages_truncated: bool
+    # P3-B2: the office workflow slice (migration 008). office_status is
+    # office-owned and lives beside - never inside - Mia's lead_status.
+    # The *_updated_at values double as the optimistic-concurrency tokens
+    # the two PUT writers require.
+    office_status: Optional[str]
+    office_status_updated_at: Optional[datetime]
+    office_note: Optional[str]
+    office_note_updated_at: Optional[datetime]
 
 
 class PortalLeadListView(BaseModel):
@@ -108,6 +116,37 @@ class PortalDashboardView(BaseModel):
     urgent_leads: int
     leads_last_7_days: int
     recent_leads: List[PortalLeadSummaryView]
+
+
+class PortalLeadStatusWriteBody(BaseModel):
+    """PUT /portal/leads/{id}/status body: ONLY the requested value and the
+    concurrency token. Both fields are REQUIRED but nullable - the browser
+    must always state which office_status_updated_at it last saw (null =
+    "the office had never set a status when I loaded"). There is
+    deliberately no tenant field; extra JSON keys are ignored by pydantic,
+    so a smuggled client_id changes nothing (Rule 15)."""
+    office_status: Optional[str] = Field(...)
+    expected_office_status_updated_at: Optional[datetime] = Field(...)
+
+
+class PortalLeadNoteWriteBody(BaseModel):
+    """PUT /portal/leads/{id}/note body: the note text (null = explicit
+    clear) and the office_note_updated_at token last observed. Same
+    required-but-nullable and no-tenant-field rules as the status body."""
+    office_note: Optional[str] = Field(...)
+    expected_office_note_updated_at: Optional[datetime] = Field(...)
+
+
+class PortalLeadWorkflowView(BaseModel):
+    """Both writers' response: the COMPLETE office workflow slice as
+    persisted - enough safe current state for the frontend to update its
+    tokens without a refetch, and nothing else (no system fields, no
+    tenant identifiers)."""
+    lead_id: uuid.UUID
+    office_status: Optional[str]
+    office_status_updated_at: Optional[datetime]
+    office_note: Optional[str]
+    office_note_updated_at: Optional[datetime]
 
 
 def _summary_view(conversation) -> PortalLeadSummaryView:
@@ -242,4 +281,80 @@ def portal_lead_detail(
         ],
         messages_total=messages_total,
         messages_truncated=messages_truncated,
+        office_status=conversation.office_status,
+        office_status_updated_at=conversation.office_status_updated_at,
+        office_note=conversation.office_note,
+        office_note_updated_at=conversation.office_note_updated_at,
     )
+
+
+def _workflow_view(conversation) -> PortalLeadWorkflowView:
+    """The ONE mapping from a Conversation row to the office workflow
+    response slice (explicit field-by-field, same leak rule as
+    _summary_view)."""
+    return PortalLeadWorkflowView(
+        lead_id=conversation.id,
+        office_status=conversation.office_status,
+        office_status_updated_at=conversation.office_status_updated_at,
+        office_note=conversation.office_note,
+        office_note_updated_at=conversation.office_note_updated_at,
+    )
+
+
+@router.put("/leads/{lead_id}/status", response_model=PortalLeadWorkflowView)
+def portal_write_lead_status(
+    lead_id: uuid.UUID,
+    body: PortalLeadStatusWriteBody,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: The office sets or clears its workflow status on ONE of its
+        own leads - the first portal write path.
+    Inputs: the Authorization header (dependency), the lead id path
+        segment, and the two-field body above. The verified identity ALONE
+        selects the tenant.
+    Returns: PortalLeadWorkflowView (persisted state incl. fresh tokens).
+    Database effects: one compare-and-set UPDATE + one re-read via the
+        service owner; lead_status and note fields untouched.
+    Possible failures: 400 (closed vocabulary; "new" is refused - portal
+        clearing is null); 404 tenant-opaque; 409 stale token; 401/503 as
+        on every portal endpoint; database errors propagate (fail closed).
+    """
+    conversation = leads_service.set_office_status(
+        db,
+        identity.client,
+        lead_id,
+        body.office_status,
+        body.expected_office_status_updated_at,
+    )
+    return _workflow_view(conversation)
+
+
+@router.put("/leads/{lead_id}/note", response_model=PortalLeadWorkflowView)
+def portal_write_lead_note(
+    lead_id: uuid.UUID,
+    body: PortalLeadNoteWriteBody,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: The office saves or clears its ONE current note on ONE of its
+        own leads (V1: no note history).
+    Inputs: the Authorization header (dependency), the lead id path
+        segment, and the two-field body above.
+    Returns: PortalLeadWorkflowView (persisted state incl. fresh tokens).
+    Database effects: one compare-and-set UPDATE + one re-read via the
+        service owner; status fields untouched.
+    Possible failures: 400 (whitespace-only or >2000 chars after trim);
+        404 tenant-opaque; 409 stale token; 401/503 as on every portal
+        endpoint; database errors propagate (fail closed).
+    """
+    conversation = leads_service.set_office_note(
+        db,
+        identity.client,
+        lead_id,
+        body.office_note,
+        body.expected_office_note_updated_at,
+    )
+    return _workflow_view(conversation)

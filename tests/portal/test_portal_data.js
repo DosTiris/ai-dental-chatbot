@@ -95,7 +95,13 @@ function validDetailBody(overrides) {
     lead_name: "X",
     messages: [],
     messages_total: 0,
-    messages_truncated: false
+    messages_truncated: false,
+    /* P3-B2: the office workflow slice is part of the approved detail
+     * contract (nulls = the office never touched the lead). */
+    office_status: null,
+    office_status_updated_at: null,
+    office_note: null,
+    office_note_updated_at: null
   }, overrides || {});
 }
 
@@ -471,3 +477,105 @@ test("A3 bite: missing required fields are rejected", async () => {
   const summary = await h.runRegisteredTests("test_portal_data");
   process.exitCode = summary.failed === 0 ? 0 : 1;
 })();
+
+
+/* ------------------------------------------------------------------ */
+/* P3-B2: office workflow mutations                                     */
+/* ------------------------------------------------------------------ */
+
+function validWorkflowBody(overrides) {
+  return Object.assign({
+    lead_id: "11111111-1111-1111-1111-111111111111",
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T03:00:00Z",
+    office_note: null,
+    office_note_updated_at: null
+  }, overrides || {});
+}
+
+test("putLeadStatus sends EXACTLY the two-field body to the status path", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/leads/abc/status", method: "PUT",
+      headerEquals: { "Authorization": "Bearer tok-a",
+                      "Content-Type": "application/json" },
+      bodyJson: { office_status: "contacted",
+                  expected_office_status_updated_at: null } },
+    { status: 200, json: validWorkflowBody() }
+  );
+  const outcome = await env.data.putLeadStatus("abc", "contacted", null);
+  assert(outcome.ok, "expected ok outcome");
+  assertEqual(outcome.data.office_status, "contacted", "body passthrough");
+  assertEqual(env.fetch.remaining(), 0, "no leftover expectations");
+});
+
+test("putLeadNote null clears via an explicit null body value", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/leads/abc/note", method: "PUT",
+      bodyJson: { office_note: null,
+                  expected_office_note_updated_at: "2026-08-12T03:00:00Z" } },
+    { status: 200, json: validWorkflowBody({
+        office_status: null, office_status_updated_at: null,
+        office_note: null, office_note_updated_at: "2026-08-12T03:05:00Z" }) }
+  );
+  const outcome = await env.data.putLeadNote("abc", null,
+    "2026-08-12T03:00:00Z");
+  assert(outcome.ok, "expected ok outcome");
+  assertEqual(outcome.data.office_note_updated_at,
+    "2026-08-12T03:05:00Z", "fresh token passthrough");
+});
+
+test("a 409 mutation response maps to the conflict outcome", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/leads/abc/status", method: "PUT" },
+    { status: 409, json: { detail: "stale" } }
+  );
+  const outcome = await env.data.putLeadStatus("abc", "booked", "old-token");
+  assert(!outcome.ok, "conflict is not ok");
+  assertEqual(outcome.state, "conflict", "409 -> conflict state");
+});
+
+test("mutation response validation fails closed on a malformed body", async () => {
+  const env = makeData();
+  seedSession(env);
+  /* office_status present but its token missing violates the pair rule. */
+  env.fetch.expect(
+    { urlEquals: "/portal/leads/abc/status", method: "PUT" },
+    { status: 200, json: validWorkflowBody({
+        office_status: "booked", office_status_updated_at: null }) }
+  );
+  const outcome = await env.data.putLeadStatus("abc", "booked", null);
+  assert(!outcome.ok, "malformed body must not be ok");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("mutation response validation rejects an out-of-vocabulary status", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/leads/abc/status", method: "PUT" },
+    { status: 200, json: validWorkflowBody({ office_status: "hot" }) }
+  );
+  const outcome = await env.data.putLeadStatus("abc", "contacted", null);
+  assert(!outcome.ok, "unknown status value must not be ok");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("detail validator REJECTS a body missing the office workflow slice", async () => {
+  const env = makeData();
+  seedSession(env);
+  const body = validDetailBody();
+  delete body.office_status;
+  env.fetch.expect(
+    { urlIncludes: "/portal/leads/", method: "GET" },
+    { status: 200, json: body }
+  );
+  const outcome = await env.data.getLeadDetail("abc");
+  assert(!outcome.ok, "detail without the office slice must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});

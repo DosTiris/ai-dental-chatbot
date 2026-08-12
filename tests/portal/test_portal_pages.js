@@ -22,6 +22,25 @@
  *   - the pure helpers (pagerModel, leadBadges, formatTimestamp,
  *     emptyLeadsMessage) behave.
  *
+ * P3-B2 v1.0.1 audit-correction proofs (each fails against the v1.0.0
+ * portal-pages.js):
+ *   - a delayed mutation response for Lead A never renders into Lead B
+ *     (responses are bound to the authoritative lead, not just a sequence);
+ *   - status and note in-flight lifecycles are fully independent - one
+ *     control's completion never re-enables the other mid-flight;
+ *   - a mutation response applies ONLY its own control's value + token:
+ *     an older status response cannot roll back a newer note result, and
+ *     vice versa;
+ *   - a 409 conflict refresh never overwrites or re-enables the sibling
+ *     control's in-flight request.
+ *
+ * P3-B2 v1.0.2 audit-correction proofs (each fails against v1.0.1):
+ *   - a conflict refresh that STARTS while the sibling is in flight must
+ *     not roll the sibling back even when the sibling settles (busy flag
+ *     cleared, newer value + token applied) BEFORE the stale refresh
+ *     response arrives - proven in both directions (status refresh vs a
+ *     settling note, and note refresh vs a settling status).
+ *
  * Run: node tests/portal/test_portal_pages.js
  */
 "use strict";
@@ -97,7 +116,10 @@ const PAGE_ELEMENT_IDS = [
   "leads-state", "leads-list", "leads-prev", "leads-next", "leads-page-label",
   "detail-back", "detail-state", "detail-body", "detail-name",
   "detail-badges", "detail-fields", "detail-messages",
-  "detail-transcript-note"
+  "detail-transcript-note",
+  "detail-office-status", "detail-status-meta", "detail-status-save",
+  "detail-status-feedback", "detail-office-note", "detail-note-meta",
+  "detail-note-save", "detail-note-clear", "detail-note-feedback"
 ];
 
 function makeDocument() {
@@ -113,8 +135,10 @@ function makeDocument() {
 /* Scripted fake data layer: every call takes the NEXT queued outcome (or
  * a pending deferred), and records its arguments for assertions. */
 function makeFakeData() {
-  const queues = { getDashboard: [], listLeads: [], getLeadDetail: [] };
-  const calls = { getDashboard: [], listLeads: [], getLeadDetail: [] };
+  const queues = { getDashboard: [], listLeads: [], getLeadDetail: [],
+    putLeadStatus: [], putLeadNote: [] };
+  const calls = { getDashboard: [], listLeads: [], getLeadDetail: [],
+    putLeadStatus: [], putLeadNote: [] };
   function next(name, args) {
     calls[name].push(args);
     if (!queues[name].length) {
@@ -127,6 +151,10 @@ function makeFakeData() {
     getDashboard: () => next("getDashboard", null),
     listLeads: (params) => next("listLeads", params),
     getLeadDetail: (leadId) => next("getLeadDetail", leadId),
+    putLeadStatus: (leadId, status, token) =>
+      next("putLeadStatus", { leadId, status, token }),
+    putLeadNote: (leadId, note, token) =>
+      next("putLeadNote", { leadId, note, token }),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -532,3 +560,493 @@ test("pure helpers: pager arithmetic, badges, timestamps, empty wording", () => 
   const summary = await h.runRegisteredTests("test_portal_pages");
   process.exitCode = summary.failed === 0 ? 0 : 1;
 })();
+
+
+/* ------------------------------------------------------------------ */
+/* P3-B2: office workflow controls on the Lead Detail page              */
+/* ------------------------------------------------------------------ */
+
+function detailBodyFixture(overrides) {
+  return Object.assign(leadFixture(), {
+    messages: [], messages_total: 0, messages_truncated: false,
+    office_status: null, office_status_updated_at: null,
+    office_note: null, office_note_updated_at: null
+  }, overrides || {});
+}
+
+function workflowBodyFixture(overrides) {
+  return Object.assign({
+    lead_id: leadFixture().lead_id,
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T03:00:00Z",
+    office_note: null,
+    office_note_updated_at: null
+  }, overrides || {});
+}
+
+/* Open the detail page the way an office user does: enter, go to Leads,
+ * click the one row (the house row-click technique). */
+async function openDetailWith(env, body) {
+  env.data.queue("getDashboard", { ok: false, state: "unavailable" });
+  env.pages.enter();
+  await flush();
+  env.data.queue("listLeads", { ok: true, data: { total: 1, limit: 25,
+    offset: 0, leads: [leadFixture()] } });
+  env.doc._elements["nav-leads"].trigger("click");
+  await flush();
+  env.data.queue("getLeadDetail", { ok: true, data: body });
+  env.doc._elements["leads-list"].children[0].children[0].trigger("click");
+  await flush();
+}
+
+test("detail renders the office slice and a save sends the observed token", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T02:00:00Z"
+  }));
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "select shows persisted status");
+  env.doc._elements["detail-office-status"].value = "closed";
+  env.data.queue("putLeadStatus", { ok: true,
+    data: workflowBodyFixture({ office_status: "closed",
+      office_status_updated_at: "2026-08-12T03:10:00Z" }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  const sent = env.data.calls.putLeadStatus[0];
+  assertEqual(sent.status, "closed", "requested value sent");
+  assertEqual(sent.token, "2026-08-12T02:00:00Z",
+    "the token last OBSERVED is what travels");
+  assertEqual(env.doc._elements["detail-status-feedback"].textContent,
+    "Status saved.", "validated success only after the response");
+  /* A second save must carry the FRESH token from the response. */
+  env.data.queue("putLeadStatus", { ok: true,
+    data: workflowBodyFixture({ office_status: "closed",
+      office_status_updated_at: "2026-08-12T03:11:00Z" }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadStatus[1].token,
+    "2026-08-12T03:10:00Z", "token advanced client-side after success");
+});
+
+test("duplicate status submits are blocked while one is in flight", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  const deferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-status-save"].trigger("click");
+  env.doc._elements["detail-status-save"].trigger("click"); /* busy */
+  assertEqual(env.data.calls.putLeadStatus.length, 1,
+    "exactly ONE request left the page");
+  assert(env.doc._elements["detail-status-save"].disabled === true,
+    "save button disabled while in flight");
+  deferred.resolve({ ok: true, data: workflowBodyFixture() });
+  await flush();
+  assert(env.doc._elements["detail-status-save"].disabled === false,
+    "button re-enabled after settle");
+});
+
+test("duplicate note submits are blocked while one is in flight", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.doc._elements["detail-office-note"].value = "call back";
+  const deferred = env.data.queueDeferred("putLeadNote");
+  env.doc._elements["detail-note-save"].trigger("click");
+  env.doc._elements["detail-note-save"].trigger("click");   /* busy */
+  env.doc._elements["detail-note-clear"].trigger("click");  /* also busy */
+  assertEqual(env.data.calls.putLeadNote.length, 1,
+    "exactly ONE request left the page");
+  deferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_note: "call back",
+    office_note_updated_at: "2026-08-12T03:20:00Z" }) });
+  await flush();
+  assert(env.doc._elements["detail-note-save"].disabled === false,
+    "note buttons re-enabled after settle");
+});
+
+test("a stale mutation response can never overwrite newer UI state", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  const deferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-status-save"].trigger("click"); /* in flight */
+  env.pages.reset();                        /* session wiped meanwhile */
+  deferred.resolve({ ok: true, data: workflowBodyFixture() });
+  await flush();
+  assertEqual(env.doc._elements["detail-status-feedback"].textContent, "",
+    "superseded response drew NOTHING");
+  assertEqual(env.doc._elements["detail-office-status"].value, "",
+    "wiped select stays wiped");
+});
+
+test("409 shows the conflict message and refreshes authoritative detail", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.data.queue("putLeadStatus", { ok: false, state: "conflict" });
+  env.data.queue("getLeadDetail", { ok: true, data: detailBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T04:00:00Z"
+  }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  assertEqual(env.doc._elements["detail-status-feedback"].textContent,
+    "This lead was updated somewhere else. Showing the latest state.",
+    "conflict wording shown");
+  assertEqual(env.data.calls.getLeadDetail.length, 2,
+    "authoritative re-fetch happened");
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "latest persisted state rendered");
+});
+
+test("a failed mutation never displays success", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.data.queue("putLeadNote", { ok: false, state: "unavailable" });
+  env.doc._elements["detail-office-note"].value = "call back";
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();
+  const feedback = env.doc._elements["detail-note-feedback"].textContent;
+  assert(feedback.indexOf("saved") === -1, "no success wording: " + feedback);
+  assert(feedback.length > 0, "an explicit failure message is shown");
+});
+
+test("whitespace-only note is stopped locally; Clear note sends null", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_note: "old text", office_note_updated_at: "2026-08-12T01:00:00Z"
+  }));
+  env.doc._elements["detail-office-note"].value = "   ";
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadNote.length, 0,
+    "no request for a whitespace-only save");
+  env.data.queue("putLeadNote", { ok: true, data: workflowBodyFixture({
+    office_status: null, office_status_updated_at: null,
+    office_note: null, office_note_updated_at: "2026-08-12T05:00:00Z" }) });
+  env.doc._elements["detail-note-clear"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadNote[0].note, null,
+    "clear sends an explicit null");
+  assertEqual(env.data.calls.putLeadNote[0].token, "2026-08-12T01:00:00Z",
+    "clear carries the observed note token");
+  assertEqual(env.doc._elements["detail-note-feedback"].textContent,
+    "Note cleared.", "clear reported only after the response");
+});
+
+test("reset wipes every office workflow value (tenant-data wipe)", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T02:00:00Z",
+    office_note: "sensitive tenant text",
+    office_note_updated_at: "2026-08-12T02:30:00Z"
+  }));
+  env.pages.reset();
+  assertEqual(env.doc._elements["detail-office-status"].value, "", "select wiped");
+  assertEqual(env.doc._elements["detail-office-note"].value, "", "note wiped");
+  assertEqual(env.doc._elements["detail-status-meta"].textContent, "", "meta wiped");
+  assertEqual(env.doc._elements["detail-note-meta"].textContent, "", "meta wiped");
+});
+
+/* ------------------------------------------------------------------ */
+/* P3-B2 v1.0.1: audit-correction regression proofs                     */
+/* ------------------------------------------------------------------ */
+
+const LEAD_B_ID = "22222222-2222-2222-2222-222222222222";
+
+/* Open the detail page from a TWO-row list (Lead A then Lead B), landing
+ * on Lead A - the cross-lead proof then clicks row B directly. */
+async function openDetailWithTwoLeads(env, bodyA) {
+  env.data.queue("getDashboard", { ok: false, state: "unavailable" });
+  env.pages.enter();
+  await flush();
+  env.data.queue("listLeads", { ok: true, data: { total: 2, limit: 25,
+    offset: 0, leads: [leadFixture(),
+      leadFixture({ lead_id: LEAD_B_ID, lead_name: "Sam Alvarez" })] } });
+  env.doc._elements["nav-leads"].trigger("click");
+  await flush();
+  env.data.queue("getLeadDetail", { ok: true, data: bodyA });
+  env.doc._elements["leads-list"].children[0].children[0].trigger("click");
+  await flush();
+}
+
+test("v1.0.1 F2 bite: a delayed Lead A mutation response never renders into Lead B", async () => {
+  const env = makePages();
+  await openDetailWithTwoLeads(env, detailBodyFixture());
+  const deferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-office-status"].value = "closed";
+  env.doc._elements["detail-status-save"].trigger("click"); /* A in flight */
+  /* Navigate to Lead B before Lead A's response returns. */
+  env.data.queue("getLeadDetail", { ok: true, data: detailBodyFixture({
+    lead_id: LEAD_B_ID, office_status: "booked",
+    office_status_updated_at: "2026-08-12T06:00:00Z" }) });
+  env.doc._elements["leads-list"].children[1].children[0].trigger("click");
+  await flush();
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "Lead B's slice is on screen");
+  assert(env.doc._elements["detail-status-save"].disabled === false,
+    "navigation handed Lead B enabled controls");
+  /* Lead A's delayed response lands AFTER Lead B is authoritative. */
+  deferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: "closed",
+    office_status_updated_at: "2026-08-12T06:05:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "Lead A's response drew NOTHING into Lead B");
+  assertEqual(env.doc._elements["detail-status-feedback"].textContent, "",
+    "no success message from the foreign-lead response");
+  /* The next save must target Lead B with Lead B's observed token,
+   * proving neither the lead nor the token was poisoned. */
+  env.data.queue("putLeadStatus", { ok: true, data: workflowBodyFixture({
+    lead_id: LEAD_B_ID, office_status: "booked",
+    office_status_updated_at: "2026-08-12T06:10:00Z" }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  const sent = env.data.calls.putLeadStatus[1];
+  assertEqual(sent.leadId, LEAD_B_ID, "the save targets Lead B");
+  assertEqual(sent.token, "2026-08-12T06:00:00Z",
+    "the token observed on Lead B is what travels");
+});
+
+test("v1.0.1 F3 bite: status completion never re-enables note controls still in flight", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.doc._elements["detail-office-note"].value = "call back";
+  const noteDeferred = env.data.queueDeferred("putLeadNote");
+  env.doc._elements["detail-note-save"].trigger("click");   /* note in flight */
+  const statusDeferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-office-status"].value = "contacted";
+  env.doc._elements["detail-status-save"].trigger("click"); /* both in flight */
+  assert(env.doc._elements["detail-note-save"].disabled === true &&
+    env.doc._elements["detail-status-save"].disabled === true,
+    "both controls disabled while both requests are in flight");
+  statusDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T07:00:00Z" }) });
+  await flush();
+  assert(env.doc._elements["detail-status-save"].disabled === false,
+    "status control settled and re-enabled itself");
+  assert(env.doc._elements["detail-note-save"].disabled === true,
+    "note save STAYS disabled: its own request is still in flight");
+  assert(env.doc._elements["detail-note-clear"].disabled === true,
+    "note clear STAYS disabled too");
+  noteDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_note: "call back",
+    office_note_updated_at: "2026-08-12T07:05:00Z" }) });
+  await flush();
+  assert(env.doc._elements["detail-note-save"].disabled === false,
+    "note controls re-enabled only by their OWN settle");
+  assertEqual(env.doc._elements["detail-note-feedback"].textContent,
+    "Note saved.", "the pending note reported its own success");
+});
+
+test("v1.0.1 F4 bite: an older status response cannot roll back a newer note result", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_note: "old note",
+    office_note_updated_at: "2026-08-12T01:00:00Z" }));
+  const statusDeferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-office-status"].value = "contacted";
+  env.doc._elements["detail-status-save"].trigger("click"); /* status FIRST */
+  env.doc._elements["detail-office-note"].value = "new note text";
+  env.data.queue("putLeadNote", { ok: true, data: workflowBodyFixture({
+    office_status: null, office_status_updated_at: null,
+    office_note: "new note text",
+    office_note_updated_at: "2026-08-12T04:00:00Z" }) });
+  env.doc._elements["detail-note-save"].trigger("click");   /* note SECOND */
+  await flush();                                     /* note settles first */
+  assertEqual(env.doc._elements["detail-office-note"].value, "new note text",
+    "newer note result on screen");
+  /* The OLDER status response returns afterward carrying the OLD note
+   * snapshot - it must update ONLY the status slice. */
+  statusDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T05:00:00Z",
+    office_note: "old note",
+    office_note_updated_at: "2026-08-12T01:00:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-status"].value, "contacted",
+    "status slice applied from the status response");
+  assertEqual(env.doc._elements["detail-office-note"].value, "new note text",
+    "note value NOT rolled back by the older status response");
+  /* Token proof: the next note save must carry the NEWER note token. */
+  env.data.queue("putLeadNote", { ok: true, data: workflowBodyFixture({
+    office_note: "new note text",
+    office_note_updated_at: "2026-08-12T05:30:00Z" }) });
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadNote[1].token, "2026-08-12T04:00:00Z",
+    "note token NOT rolled back by the older status response");
+});
+
+test("v1.0.1 F4 bite: an older note response cannot roll back a newer status result", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.doc._elements["detail-office-note"].value = "first note";
+  const noteDeferred = env.data.queueDeferred("putLeadNote");
+  env.doc._elements["detail-note-save"].trigger("click");   /* note FIRST */
+  env.data.queue("putLeadStatus", { ok: true, data: workflowBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T06:00:00Z",
+    office_note: null, office_note_updated_at: null }) });
+  env.doc._elements["detail-office-status"].value = "booked";
+  env.doc._elements["detail-status-save"].trigger("click"); /* status SECOND */
+  await flush();                                   /* status settles first */
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "newer status result on screen");
+  noteDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: null, office_status_updated_at: null,
+    office_note: "first note",
+    office_note_updated_at: "2026-08-12T06:30:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-note"].value, "first note",
+    "note slice applied from the note response");
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "status value NOT rolled back by the older note response");
+  env.data.queue("putLeadStatus", { ok: true, data: workflowBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T07:00:00Z" }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadStatus[1].token, "2026-08-12T06:00:00Z",
+    "status token NOT rolled back by the older note response");
+});
+
+test("v1.0.1 F4 bite: conflict refresh never disturbs the sibling's in-flight request", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture());
+  env.doc._elements["detail-office-note"].value = "pending note";
+  const noteDeferred = env.data.queueDeferred("putLeadNote");
+  env.doc._elements["detail-note-save"].trigger("click");   /* note in flight */
+  env.data.queue("putLeadStatus", { ok: false, state: "conflict" });
+  env.data.queue("getLeadDetail", { ok: true, data: detailBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T08:00:00Z",
+    office_note: "server note",
+    office_note_updated_at: "2026-08-12T02:00:00Z" }) });
+  env.doc._elements["detail-office-status"].value = "contacted";
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  assertEqual(env.doc._elements["detail-status-feedback"].textContent,
+    "This lead was updated somewhere else. Showing the latest state.",
+    "conflict wording shown on the conflicted control");
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "refresh applied the authoritative status");
+  assertEqual(env.doc._elements["detail-office-note"].value, "pending note",
+    "refresh did NOT overwrite the note being saved");
+  assert(env.doc._elements["detail-note-save"].disabled === true,
+    "refresh did NOT re-enable the in-flight note controls");
+  noteDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_note: "pending note",
+    office_note_updated_at: "2026-08-12T08:30:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-note-feedback"].textContent,
+    "Note saved.", "the pending note settled normally after the refresh");
+  env.data.queue("putLeadNote", { ok: true, data: workflowBodyFixture({
+    office_note: "pending note",
+    office_note_updated_at: "2026-08-12T09:00:00Z" }) });
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadNote[1].token, "2026-08-12T08:30:00Z",
+    "the note token comes from the note's OWN response, not the refresh");
+});
+
+/* ------------------------------------------------------------------ */
+/* P3-B2 v1.0.2: conflict-refresh residual-race proofs                  */
+/* ------------------------------------------------------------------ */
+
+test("v1.0.2 F4 bite A: a stale conflict refresh cannot roll back a note that settled after the refresh began", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_note: "old note",
+    office_note_updated_at: "2026-08-12T01:00:00Z" }));
+  /* 1. Note mutation begins and stays in flight. */
+  env.doc._elements["detail-office-note"].value = "newer note";
+  const noteDeferred = env.data.queueDeferred("putLeadNote");
+  env.doc._elements["detail-note-save"].trigger("click");
+  /* 2-3. Status mutation returns 409; its conflict refresh GET is itself
+   * deferred so we control when it arrives relative to the note settle. */
+  env.data.queue("putLeadStatus", { ok: false, state: "conflict" });
+  const refreshDeferred = env.data.queueDeferred("getLeadDetail");
+  env.doc._elements["detail-office-status"].value = "contacted";
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();  /* status 409 handled; refresh GET now in flight; note pending */
+  assert(env.doc._elements["detail-note-save"].disabled === true,
+    "note is still in flight when the refresh has begun");
+  /* 4. The note settles with a NEWER value + token, BEFORE the refresh
+   * returns - its busy flag clears here. */
+  noteDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: null, office_status_updated_at: null,
+    office_note: "newer note",
+    office_note_updated_at: "2026-08-12T04:00:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-note"].value, "newer note",
+    "the newer note is applied locally before the refresh returns");
+  assert(env.doc._elements["detail-note-save"].disabled === false,
+    "the note settled - its busy flag is now clear");
+  /* 5-6. The stale refresh arrives carrying the OLD note snapshot. */
+  refreshDeferred.resolve({ ok: true, data: detailBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T08:00:00Z",
+    office_note: "old note",
+    office_note_updated_at: "2026-08-12T01:00:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "the conflicted status control still refreshes to authoritative state");
+  assertEqual(env.doc._elements["detail-office-note"].value, "newer note",
+    "the stale refresh did NOT roll back the newer note value");
+  /* Token proof: the next note save must carry the NEWER note token. */
+  env.data.queue("putLeadNote", { ok: true, data: workflowBodyFixture({
+    office_note: "newer note",
+    office_note_updated_at: "2026-08-12T08:30:00Z" }) });
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadNote[1].token, "2026-08-12T04:00:00Z",
+    "the note token was NOT rolled back by the stale refresh");
+});
+
+test("v1.0.2 F4 bite B: a stale conflict refresh cannot roll back a status that settled after the refresh began", async () => {
+  const env = makePages();
+  await openDetailWith(env, detailBodyFixture({
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T01:00:00Z" }));
+  /* 1. Status mutation begins and stays in flight. */
+  env.doc._elements["detail-office-status"].value = "booked";
+  const statusDeferred = env.data.queueDeferred("putLeadStatus");
+  env.doc._elements["detail-status-save"].trigger("click");
+  /* 2-3. Note mutation returns 409; its refresh GET is deferred. */
+  env.doc._elements["detail-office-note"].value = "note text";
+  env.data.queue("putLeadNote", { ok: false, state: "conflict" });
+  const refreshDeferred = env.data.queueDeferred("getLeadDetail");
+  env.doc._elements["detail-note-save"].trigger("click");
+  await flush();  /* note 409 handled; refresh in flight; status pending */
+  assert(env.doc._elements["detail-status-save"].disabled === true,
+    "status is still in flight when the refresh has begun");
+  /* 4. Status settles with a NEWER value + token before the refresh returns. */
+  statusDeferred.resolve({ ok: true, data: workflowBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T04:00:00Z",
+    office_note: null, office_note_updated_at: null }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "the newer status is applied locally before the refresh returns");
+  assert(env.doc._elements["detail-status-save"].disabled === false,
+    "the status settled - its busy flag is now clear");
+  /* 5-6. Stale refresh arrives carrying the OLD status snapshot. */
+  refreshDeferred.resolve({ ok: true, data: detailBodyFixture({
+    office_status: "contacted",
+    office_status_updated_at: "2026-08-12T01:00:00Z",
+    office_note: "server note",
+    office_note_updated_at: "2026-08-12T08:00:00Z" }) });
+  await flush();
+  assertEqual(env.doc._elements["detail-office-note"].value, "server note",
+    "the conflicted note control still refreshes to authoritative state");
+  assertEqual(env.doc._elements["detail-office-status"].value, "booked",
+    "the stale refresh did NOT roll back the newer status value");
+  /* Token proof: the next status save must carry the NEWER status token. */
+  env.data.queue("putLeadStatus", { ok: true, data: workflowBodyFixture({
+    office_status: "booked",
+    office_status_updated_at: "2026-08-12T08:30:00Z" }) });
+  env.doc._elements["detail-status-save"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.putLeadStatus[1].token, "2026-08-12T04:00:00Z",
+    "the status token was NOT rolled back by the stale refresh");
+});

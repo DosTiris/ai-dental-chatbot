@@ -39,7 +39,13 @@
     invalid_response: "The portal returned an unexpected response. Please try again shortly.",
     lead_not_found: "That lead could not be found. It may have been removed.",
     dashboard_empty: "No leads yet. New leads will appear here as soon as Mia captures them.",
-    value_missing: "Not provided"
+    value_missing: "Not provided",
+    workflow_conflict: "This lead was updated somewhere else. Showing the latest state.",
+    workflow_saved_status: "Status saved.",
+    workflow_saved_note: "Note saved.",
+    workflow_cleared_note: "Note cleared.",
+    workflow_note_empty: "Enter a note before saving, or use Clear note.",
+    workflow_failed: "The change was not saved. Please try again."
   };
 
   /* ------------------------------------------------------------------ */
@@ -140,6 +146,24 @@
 
     /* Stale-response guards: one monotonically increasing id per page. */
     var requestIds = { dashboard: 0, leads: 0, detail: 0 };
+
+    /* P3-B2 office workflow state: the AUTHORITATIVE lead (set the
+     * moment a lead is opened - every mutation response is bound to it
+     * and is discarded once another lead is authoritative, v1.0.1), the
+     * two SERVER concurrency tokens last observed, independent in-flight
+     * flags (duplicate-submit guards; each control's busy lifecycle is
+     * fully independent of its sibling's), and independent sequence
+     * counters so a superseded mutation response can NEVER overwrite
+     * newer UI state (the requestIds pattern, per control). */
+    var workflow = {
+      leadId: null,
+      statusToken: null,
+      noteToken: null,
+      statusBusy: false,
+      noteBusy: false,
+      statusSeq: 0,
+      noteSeq: 0
+    };
 
     function byId(id) {
       return doc.getElementById(id);
@@ -352,7 +376,7 @@
       fields.appendChild(definition);
     }
 
-    function renderDetail(body) {
+    function renderDetail(body, allow) {
       setText("detail-name", body.lead_name || "(no name captured)");
       setText("detail-badges", leadBadges(body).join("  "));
 
@@ -402,15 +426,191 @@
         line.appendChild(text);
         transcript.appendChild(line);
       }
+      renderWorkflow(body, allow);
       byId("detail-body").hidden = false;
+    }
+
+    /* Apply ONE control's authoritative value + token, touching NOTHING
+     * that belongs to the sibling control (v1.0.1: a status response also
+     * carries a note snapshot that may be OLDER than a note result the
+     * office already received, and vice versa - a mutation response may
+     * only ever apply its own control's slice). Values are assigned via
+     * .value / textContent ONLY - office notes are plain text, never HTML
+     * (the task's no-interpretation rule). */
+    function applyStatusSlice(body) {
+      workflow.statusToken = body.office_status_updated_at;
+      byId("detail-office-status").value = body.office_status || "";
+      setText("detail-status-meta", body.office_status_updated_at ?
+        "Updated " + formatTimestamp(body.office_status_updated_at) : "");
+    }
+
+    function applyNoteSlice(body) {
+      workflow.noteToken = body.office_note_updated_at;
+      byId("detail-office-note").value = body.office_note || "";
+      setText("detail-note-meta", body.office_note_updated_at ?
+        "Updated " + formatTimestamp(body.office_note_updated_at) : "");
+    }
+
+    /* Render the office workflow from an authoritative DETAIL body (page
+     * load or conflict refresh). A control whose OWN mutation is still in
+     * flight is SKIPPED entirely: its bound response handler owns its
+     * value, token, feedback and busy lifecycle (v1.0.1 - a refresh must
+     * never re-enable or roll back an in-flight sibling). renderWorkflow
+     * no longer touches ANY busy state: busy is owned solely by the
+     * submit handlers, their bound response handlers, navigation
+     * (openLeadDetail) and the tenant wipe (resetContent). */
+    function renderWorkflow(body, allow) {
+      workflow.leadId = body.lead_id;
+      /* allow.status / allow.note are the caller's per-control verdict.
+       * Navigation passes its arrival-time busy check; a conflict refresh
+       * passes a verdict computed from the state SNAPSHOTTED when the
+       * refresh began (v1.0.2), so a sibling that settled between refresh
+       * start and this response can never be rolled back here. */
+      if (allow.status) {
+        applyStatusSlice(body);
+        setText("detail-status-feedback", "");
+      }
+      if (allow.note) {
+        applyNoteSlice(body);
+        setText("detail-note-feedback", "");
+      }
+    }
+
+    function setWorkflowBusy(kind, busy) {
+      if (kind === "status") {
+        workflow.statusBusy = busy;
+        byId("detail-status-save").disabled = busy;
+      } else {
+        workflow.noteBusy = busy;
+        byId("detail-note-save").disabled = busy;
+        byId("detail-note-clear").disabled = busy;
+      }
+    }
+
+    /* One outcome handler for both mutations. Success is claimed ONLY from
+     * a validated 200 (no optimistic claims); a 409 refreshes authoritative
+     * detail and says the lead changed elsewhere; session loss keeps the
+     * existing wipe behavior via handleFailure. */
+    function handleWorkflowOutcome(kind, outcome, successMessage) {
+      var feedbackId = kind === "status" ?
+        "detail-status-feedback" : "detail-note-feedback";
+      setWorkflowBusy(kind, false);
+      if (outcome.ok) {
+        /* Apply ONLY the mutated control's authoritative value + token.
+         * The response body also carries the sibling control's snapshot,
+         * which may predate a newer sibling result already on screen -
+         * it must never be applied from here (v1.0.1). */
+        if (kind === "status") {
+          applyStatusSlice(outcome.data);
+        } else {
+          applyNoteSlice(outcome.data);
+        }
+        setText(feedbackId, successMessage);
+        return;
+      }
+      if (outcome.state === "conflict") {
+        /* Refresh FIRST (renderWorkflow clears the non-busy feedback
+         * lines), then say the lead changed elsewhere - so the notice
+         * survives the redraw and sits beside the authoritative latest
+         * state. refreshLeadDetail - NOT openLeadDetail - keeps the
+         * sibling control's in-flight request fully protected (v1.0.1). */
+        var refreshedLead = workflow.leadId;
+        refreshLeadDetail().then(function () {
+          if (workflow.leadId === refreshedLead) {
+            setText(feedbackId, MESSAGES.workflow_conflict);
+          }
+        });
+        return;
+      }
+      if (outcome.state === "signed_out" ||
+          outcome.state === "unauthorized") {
+        handleFailure(outcome, feedbackId); /* existing wipe behavior */
+        return;
+      }
+      var message = MESSAGES[outcome.state] || MESSAGES.workflow_failed;
+      if (outcome.state === "bad_request") {
+        message = MESSAGES.workflow_failed;
+      }
+      if (outcome.state === "not_found") {
+        message = MESSAGES.lead_not_found;
+      }
+      setText(feedbackId, message);
+    }
+
+    function onStatusSave() {
+      if (workflow.statusBusy || workflow.leadId === null) {
+        return;                            /* duplicate submit blocked */
+      }
+      var raw = byId("detail-office-status").value;
+      var requested = raw === "" ? null : raw;   /* portal clear = null */
+      setWorkflowBusy("status", true);
+      setText("detail-status-feedback", "");
+      var seq = ++workflow.statusSeq;
+      /* The response is BOUND to the lead that was authoritative when the
+       * request left (v1.0.1): once another lead is opened, this response
+       * must be ignored no matter what the sequence says. */
+      var leadAtRequest = workflow.leadId;
+      data.putLeadStatus(leadAtRequest, requested, workflow.statusToken)
+        .then(function (outcome) {
+          if (seq !== workflow.statusSeq ||
+              workflow.leadId !== leadAtRequest) {
+            return;                        /* superseded - never overwrite */
+          }
+          handleWorkflowOutcome("status", outcome,
+            MESSAGES.workflow_saved_status);
+        });
+    }
+
+    function submitNote(noteValue, successMessage) {
+      if (workflow.noteBusy || workflow.leadId === null) {
+        return;                            /* duplicate submit blocked */
+      }
+      setWorkflowBusy("note", true);
+      setText("detail-note-feedback", "");
+      var seq = ++workflow.noteSeq;
+      /* Same lead binding as the status writer (v1.0.1). */
+      var leadAtRequest = workflow.leadId;
+      data.putLeadNote(leadAtRequest, noteValue, workflow.noteToken)
+        .then(function (outcome) {
+          if (seq !== workflow.noteSeq ||
+              workflow.leadId !== leadAtRequest) {
+            return;                        /* superseded - never overwrite */
+          }
+          handleWorkflowOutcome("note", outcome, successMessage);
+        });
+    }
+
+    function onNoteSave() {
+      var text = byId("detail-office-note").value;
+      if (text.replace(/^\s+|\s+$/g, "") === "") {
+        /* Whitespace-only is not a save; clearing is the explicit button.
+         * The server enforces the same rule authoritatively. */
+        setText("detail-note-feedback", MESSAGES.workflow_note_empty);
+        return;
+      }
+      submitNote(text, MESSAGES.workflow_saved_note);
+    }
+
+    function onNoteClear() {
+      submitNote(null, MESSAGES.workflow_cleared_note);
     }
 
     function openLeadDetail(leadId) {
       showPage("page-lead-detail");
       var requestId = ++requestIds.detail;
+      /* The lead being OPENED is authoritative from this moment (v1.0.1).
+       * Any mutation still in flight belongs to a lead no longer shown:
+       * invalidate its response (sequence bump + the per-request lead
+       * binding) and hand the new lead enabled controls. Navigation - not
+       * renderWorkflow - owns this reset. */
+      workflow.leadId = leadId;
+      workflow.statusSeq += 1;
+      workflow.noteSeq += 1;
+      setWorkflowBusy("status", false);
+      setWorkflowBusy("note", false);
       setText("detail-state", MESSAGES.loading);
       byId("detail-body").hidden = true;
-      data.getLeadDetail(leadId).then(function (outcome) {
+      return data.getLeadDetail(leadId).then(function (outcome) {
         if (requestId !== requestIds.detail) {
           return; /* superseded */
         }
@@ -419,7 +619,58 @@
           return;
         }
         setText("detail-state", "");
-        renderDetail(outcome.data);
+        renderDetail(outcome.data, {
+          status: !workflow.statusBusy,
+          note: !workflow.noteBusy
+        });
+      });
+    }
+
+    /* Re-fetch the authoritative detail for the lead CURRENTLY shown,
+     * after a concurrency conflict (v1.0.1). Unlike navigation this must
+     * not disturb the sibling control's in-flight request: no sequence is
+     * invalidated and no busy flag is touched here - renderWorkflow skips
+     * any control whose own mutation is still pending. */
+    function refreshLeadDetail() {
+      var leadId = workflow.leadId;
+      var requestId = ++requestIds.detail;
+      /* Per-control state SNAPSHOT at refresh initiation (v1.0.2 F4
+       * residual-race fix). The v1.0.1 gate read only the busy flag when
+       * the refresh RESPONSE arrived; a sibling mutation that was in
+       * flight when the refresh STARTED could settle (clearing its busy
+       * flag and applying a newer value + token) before this response
+       * arrived, and then be rolled back by this now-stale snapshot. A
+       * control's refresh slice is applied ONLY when, from refresh start
+       * to response arrival, that control (a) had NO mutation in flight
+       * at the start, (b) did NOT advance - no new mutation was submitted
+       * (its generation counter is unchanged), and (c) has no mutation in
+       * flight now. The conflicted control itself cleared its busy flag
+       * BEFORE this refresh began, so it still refreshes to authoritative
+       * state; only a genuinely newer sibling result is protected. */
+      var statusBusyAtStart = workflow.statusBusy;
+      var noteBusyAtStart = workflow.noteBusy;
+      var statusSeqAtStart = workflow.statusSeq;
+      var noteSeqAtStart = workflow.noteSeq;
+      setText("detail-state", MESSAGES.loading);
+      byId("detail-body").hidden = true;
+      return data.getLeadDetail(leadId).then(function (outcome) {
+        if (requestId !== requestIds.detail ||
+            workflow.leadId !== leadId) {
+          return; /* superseded or another lead became authoritative */
+        }
+        if (!outcome.ok) {
+          handleFailure(outcome, "detail-state");
+          return;
+        }
+        setText("detail-state", "");
+        renderDetail(outcome.data, {
+          status: !statusBusyAtStart &&
+                  workflow.statusSeq === statusSeqAtStart &&
+                  !workflow.statusBusy,
+          note: !noteBusyAtStart &&
+                workflow.noteSeq === noteSeqAtStart &&
+                !workflow.noteBusy
+        });
       });
     }
 
@@ -460,6 +711,22 @@
       setText("detail-transcript-note", "");
       clearChildren(byId("detail-fields"));
       clearChildren(byId("detail-messages"));
+      workflow.leadId = null;              /* P3-B2 tenant-data wipe */
+      workflow.statusToken = null;
+      workflow.noteToken = null;
+      workflow.statusBusy = false;
+      workflow.noteBusy = false;
+      workflow.statusSeq += 1;             /* invalidate in-flight writes */
+      workflow.noteSeq += 1;
+      byId("detail-office-status").value = "";
+      byId("detail-office-note").value = "";
+      setText("detail-status-meta", "");
+      setText("detail-note-meta", "");
+      setText("detail-status-feedback", "");
+      setText("detail-note-feedback", "");
+      byId("detail-status-save").disabled = false;
+      byId("detail-note-save").disabled = false;
+      byId("detail-note-clear").disabled = false;
       byId("detail-body").hidden = true;
     }
 
@@ -484,6 +751,9 @@
       byId("leads-prev").addEventListener("click", onPagerPrev);
       byId("leads-next").addEventListener("click", onPagerNext);
       byId("detail-back").addEventListener("click", onDetailBack);
+      byId("detail-status-save").addEventListener("click", onStatusSave);
+      byId("detail-note-save").addEventListener("click", onNoteSave);
+      byId("detail-note-clear").addEventListener("click", onNoteClear);
     }
 
     wireEvents();

@@ -44,6 +44,7 @@ from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import case, func
+from sqlalchemy import update as sql_update  # P3-B2: the CAS conditional UPDATE
 from sqlalchemy.orm import Query, Session
 
 from app.models import Client, Conversation, Message
@@ -447,3 +448,234 @@ def derive_patient_type(conversation: Conversation) -> Optional[str]:
     if flag is False:
         return "returning"
     return None
+
+
+# ---------------------------------------------------------------------------
+# P3-B2: office workflow WRITE owners (status + note).
+#
+# These are the ONLY portal write paths. Tenant identity arrives as the
+# verified Client row from require_portal_identity - never from any request
+# value. Both writers use one race-safe compare-and-set shape: a SINGLE
+# conditional UPDATE whose WHERE clause carries the tenant scope AND the
+# expected concurrency token, so the mutation succeeds only if the persisted
+# token still equals what the browser last saw. There is deliberately NO
+# select-compare-then-update sequence: between such a compare and its write
+# another request could mutate the row, which is exactly the reversion the
+# task forbids. IS NOT DISTINCT FROM makes the NULL initial token (a lead
+# never touched by the office) participate in the comparison safely.
+# ---------------------------------------------------------------------------
+
+# The closed portal office-status vocabulary (Rule 4/16). None clears.
+# "new" is deliberately NOT here: the portal never writes the legacy reset
+# word - clearing is an explicit NULL.
+PORTAL_OFFICE_STATUS_VALUES = ("contacted", "booked", "closed")
+
+# Office note bounds AFTER trimming (mirrors the migration-008 CHECK).
+OFFICE_NOTE_MAX_CHARS = 2000
+
+# The ONE 409 detail for every stale-token refusal on either writer.
+STALE_TOKEN_DETAIL = "This lead was updated elsewhere. Refresh to load the latest state."
+
+INVALID_STATUS_DETAIL = (
+    "office_status must be one of ['booked', 'closed', 'contacted'] or null."
+)
+INVALID_NOTE_DETAIL = (
+    "office_note must contain 1-2000 characters after trimming, or null to clear."
+)
+
+
+def _stale_conflict() -> HTTPException:
+    """One constructor for every optimistic-concurrency refusal (409)."""
+    return HTTPException(status_code=409, detail=STALE_TOKEN_DETAIL)
+
+
+def _advance_token(expected_token: Optional[datetime]) -> datetime:
+    """
+    Purpose: Generate the server concurrency token for one ACCEPTED
+        mutation such that it is STRICTLY newer than the token it
+        replaces - even when the wall clock reads the same instant again
+        or has moved backward (coarse clock resolution, VM clock steps,
+        NTP corrections). The plain clock alone cannot promise that.
+    Inputs:  the expected token the caller supplied. Under compare-and-set
+        an ACCEPTED write means the persisted token IS NOT DISTINCT FROM
+        this value (see _cas_update_lead), so advancing past the expected
+        token IS advancing past the persisted one.
+    Returns: an aware UTC datetime. Strictly greater than expected_token
+        whenever one exists; the plain current clock for the first-ever
+        office action on the field (expected None - any non-NULL token
+        advances a NULL, and the S1/S2 contract never returns a persisted
+        token to NULL).
+    Database effects: none (pure).
+    Possible failures: none.
+    """
+    now = _now_utc()
+    if expected_token is None:
+        return now
+    # A naive expected token (no tzinfo) can only mean UTC in this system
+    # (every token is server-generated aware UTC); normalize defensively
+    # so the comparison below cannot raise.
+    expected = (expected_token if expected_token.tzinfo is not None
+                else expected_token.replace(tzinfo=timezone.utc))
+    if now > expected:
+        return now
+    # Clock equal to or behind the token being replaced: force strict
+    # advancement by the smallest step both PostgreSQL timestamptz and
+    # Python datetimes represent exactly (1 microsecond).
+    return expected + timedelta(microseconds=1)
+
+
+def _cas_update_lead(
+    db: Session,
+    client: Client,
+    lead_id: uuid.UUID,
+    expected_token_column,
+    expected_token: Optional[datetime],
+    new_values: dict,
+) -> Conversation:
+    """
+    Purpose: The ONE compare-and-set write primitive for portal office
+        workflow fields. Executes a single conditional UPDATE that is
+        simultaneously tenant-scoped and token-guarded, then disambiguates
+        a zero-row result into the existing tenant-opaque 404 or a 409.
+    Inputs:  the request session; the VERIFIED tenant Client row; the lead
+        id; the concurrency-token COLUMN being guarded; the token value the
+        caller last observed (None = "I saw no office value yet"); the dict
+        of column values to write (must already include the server-generated
+        new token).
+    Returns: the freshly re-read Conversation row after a committed write.
+    Database effects: one UPDATE (committed on success, rolled back on a
+        zero-row miss) plus one tenant-scoped SELECT - either the post-
+        commit re-read or the 404/409 disambiguation read.
+    Possible failures: HTTPException 404 LEAD_NOT_FOUND_DETAIL (unknown id,
+        FOREIGN office's lead, or a non-lead conversation - indistinguishable
+        by design, Rule 15); HTTPException 409 STALE_TOKEN_DETAIL when the
+        row exists for this tenant but the persisted token no longer equals
+        the expected one. Database errors propagate (fail closed).
+    """
+    result = db.execute(
+        sql_update(Conversation)
+        .where(
+            # EXACTLY the _lead_query tenant surface (client + is_lead),
+            # restated here because Core UPDATE cannot consume an ORM Query.
+            Conversation.id == lead_id,
+            Conversation.client_id == client.id,
+            Conversation.is_lead == True,  # noqa: E712 - SQL boolean column
+            # The compare half of compare-and-set, NULL-safe: succeeds only
+            # if the persisted token IS NOT DISTINCT FROM the expected one.
+            expected_token_column.is_not_distinct_from(expected_token),
+        )
+        .values(**new_values)
+    )
+
+    if result.rowcount == 1:
+        db.commit()
+        # Re-read through the tenant query so the caller returns exactly
+        # the persisted state (server timestamps included), never an echo.
+        return (
+            _lead_query(db, client.id)
+            .filter(Conversation.id == lead_id)
+            .one()
+        )
+
+    # Zero rows: nothing was written. Roll back the no-op transaction and
+    # say WHY truthfully - without ever revealing a foreign lead's existence.
+    db.rollback()
+    exists_for_tenant = (
+        _lead_query(db, client.id)
+        .filter(Conversation.id == lead_id)
+        .first()
+    )
+    if exists_for_tenant is None:
+        raise HTTPException(status_code=404, detail=LEAD_NOT_FOUND_DETAIL)
+    raise _stale_conflict()
+
+
+def set_office_status(
+    db: Session,
+    client: Client,
+    lead_id: uuid.UUID,
+    requested_status: Optional[str],
+    expected_token: Optional[datetime],
+) -> Conversation:
+    """
+    Purpose: The portal's office_status writer. Stores one of the closed
+        vocabulary values or clears to NULL, under compare-and-set.
+    Inputs:  session; VERIFIED tenant Client; lead id; the requested status
+        (contacted | booked | closed | None-to-clear); the
+        office_status_updated_at value the browser last observed.
+    Returns: the re-read Conversation after a committed write.
+    Database effects: exactly the _cas_update_lead effects on office_status
+        + office_status_updated_at. lead_status, both office note fields,
+        and every other column are untouched by construction.
+    Possible failures: 400 INVALID_STATUS_DETAIL for any word outside the
+        closed vocabulary (including "new" - the portal clears with NULL,
+        never the legacy reset word); 404/409 per _cas_update_lead.
+    """
+    if requested_status is not None and (
+        requested_status not in PORTAL_OFFICE_STATUS_VALUES
+    ):
+        raise _bad_request(INVALID_STATUS_DETAIL)
+
+    return _cas_update_lead(
+        db,
+        client,
+        lead_id,
+        Conversation.office_status_updated_at,
+        expected_token,
+        {
+            "office_status": requested_status,
+            # SERVER-generated UTC token, STRICTLY advancing on EVERY
+            # accepted mutation - including clear-to-NULL and a same-value
+            # save - so the token always names the office's latest action
+            # (the S1/S2 one-directional contract: it never returns to
+            # NULL). _advance_token (v1.0.1) guarantees the advancement
+            # even when the wall clock has not moved or stepped backward.
+            "office_status_updated_at": _advance_token(expected_token),
+        },
+    )
+
+
+def set_office_note(
+    db: Session,
+    client: Client,
+    lead_id: uuid.UUID,
+    note: Optional[str],
+    expected_token: Optional[datetime],
+) -> Conversation:
+    """
+    Purpose: The portal's office_note writer. Stores ONE current trimmed
+        note per lead (V1: no history) or clears to NULL, under
+        compare-and-set.
+    Inputs:  session; VERIFIED tenant Client; lead id; the raw note text
+        (None = explicit clear); the office_note_updated_at value the
+        browser last observed.
+    Returns: the re-read Conversation after a committed write.
+    Database effects: exactly the _cas_update_lead effects on office_note
+        + office_note_updated_at. Status fields untouched by construction.
+    Possible failures: 400 INVALID_NOTE_DETAIL when a non-NULL note is
+        whitespace-only or exceeds OFFICE_NOTE_MAX_CHARS after trimming;
+        404/409 per _cas_update_lead.
+    """
+    stored_note: Optional[str]
+    if note is None:
+        stored_note = None
+    else:
+        # Full-whitespace trim (application duty - the DB CHECK's btrim
+        # only strips spaces, documented in migration 008).
+        stored_note = note.strip()
+        if stored_note == "" or len(stored_note) > OFFICE_NOTE_MAX_CHARS:
+            raise _bad_request(INVALID_NOTE_DETAIL)
+
+    return _cas_update_lead(
+        db,
+        client,
+        lead_id,
+        Conversation.office_note_updated_at,
+        expected_token,
+        {
+            "office_note": stored_note,
+            # Same server-token contract as the status writer: strictly
+            # advancing via _advance_token (v1.0.1).
+            "office_note_updated_at": _advance_token(expected_token),
+        },
+    )

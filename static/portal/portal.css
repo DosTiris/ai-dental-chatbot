@@ -365,3 +365,9 @@ body {
   .portal-lead-meta { margin-left: 0; width: 100%; }
   .portal-detail-fields { grid-template-columns: 1fr; }
 }
+
+/* P3-B2: office workflow controls on the Lead Detail page. */
+.portal-workflow { margin: 0 0 1rem; }
+.portal-workflow .portal-label { display: block; margin: 0.75rem 0 0.25rem; }
+.portal-textarea { resize: vertical; min-height: 5.5rem; }
+.portal-workflow .portal-button { margin-right: 0.5rem; margin-top: 0.25rem; }
