@@ -43,6 +43,15 @@
   var LEADS_URL = "/portal/leads";
   var APPOINTMENTS_URL = "/portal/appointments";
 
+  /* P4-A: the portal schedule surface. One base URL; every action path is
+   * derived from it with URI-encoded segments only. */
+  var SCHEDULE_URL = "/portal/schedule";
+
+  /* Closed vocabulary of schedule query parameter names (Constitution 4.5):
+   * anything not in this list is NEVER serialized, and there is deliberately
+   * NO tenant parameter - tenancy is the verified bearer token alone. */
+  var SCHEDULE_PARAM_NAMES = ["start_day", "end_day"];
+
   /* Closed vocabulary of appointments query parameter names. Like
    * LIST_PARAM_NAMES, anything not in this list is NEVER serialized, so no
    * caller mistake can turn into a new request channel (Constitution 4.5).
@@ -318,6 +327,156 @@
         isValidAppointmentArray(body.appointments);
     }
 
+    /* -------------------------------------------------------------- */
+    /* P4-A schedule shape validators (contract v1.2 SS6 / Corrections */
+    /* C5 + audit F2). EVERY instant is judged by the SAME hardened    */
+    /* isValidUtcInstant the appointments slice uses, and every        */
+    /* response object and nested member must carry EXACTLY its        */
+    /* approved field set - an unexpected property (a tenant id,         */
+    /* hold ownership, patient data, ...) fails the WHOLE body closed as   */
+    /* invalid_response, so a backend drift or tampered proxy response */
+    /* can never leak through the portal render path.                  */
+    /* -------------------------------------------------------------- */
+
+    /* The exact approved field sets (F2). Adding a field here is a
+     * reviewed contract change - the Node bites pin these arrays. */
+    var SCHEDULE_ENVELOPE_KEYS = ["timezone_name", "start_day", "end_day",
+      "slots"];
+    var SCHEDULE_SLOT_KEYS = ["slot_id", "start_datetime", "end_datetime",
+      "status", "provider_name", "service_key"];
+    var SCHEDULE_BULK_KEYS = ["day", "blocked_count", "booked_remaining"];
+    var SCHEDULE_BOOKED_WINDOW_KEYS = ["start_datetime", "end_datetime"];
+    /* The closed SlotStatus vocabulary (mirrors the backend enum). */
+    var SCHEDULE_SLOT_STATUSES = ["available", "held", "booked", "blocked",
+      "cancelled"];
+
+    /*
+     * Purpose: THE exact-key rule (F2): the value must be a plain object
+     * carrying every expected key and NOT ONE property more. Key count
+     * plus per-key presence makes extras and omissions both fail.
+     * Returns: boolean. Pure.
+     */
+    function hasExactKeys(objectValue, expectedKeys) {
+      if (objectValue === null || typeof objectValue !== "object" ||
+          Array.isArray(objectValue)) {
+        return false;
+      }
+      var actualKeys = Object.keys(objectValue);
+      if (actualKeys.length !== expectedKeys.length) {
+        return false;
+      }
+      for (var i = 0; i < expectedKeys.length; i++) {
+        if (!Object.prototype.hasOwnProperty.call(objectValue,
+            expectedKeys[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function isNullOrString(value) {
+      return value === null || typeof value === "string";
+    }
+
+    /* One trustworthy schedule slot: EXACTLY the six approved fields; a
+     * non-empty slot_id; a status from the closed vocabulary ONLY;
+     * provider_name / service_key null-or-string; genuine UTC instants
+     * for both window edges. */
+    function isValidScheduleSlotMember(slot) {
+      return hasExactKeys(slot, SCHEDULE_SLOT_KEYS) &&
+        typeof slot.slot_id === "string" && slot.slot_id !== "" &&
+        typeof slot.status === "string" &&
+        SCHEDULE_SLOT_STATUSES.indexOf(slot.status) !== -1 &&
+        isNullOrString(slot.provider_name) &&
+        isNullOrString(slot.service_key) &&
+        isValidUtcInstant(slot.start_datetime) &&
+        isValidUtcInstant(slot.end_datetime);
+    }
+
+    function isValidScheduleSlotArray(list) {
+      if (!Array.isArray(list)) {
+        return false;
+      }
+      for (var i = 0; i < list.length; i++) {
+        if (!isValidScheduleSlotMember(list[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /* The schedule envelope: EXACTLY the four approved fields, an office
+     * timezone the pages MUST format times in, both echoed REAL local-day
+     * bounds, and a valid slot array. A malformed success fails closed. */
+    function isValidScheduleListBody(body) {
+      return hasExactKeys(body, SCHEDULE_ENVELOPE_KEYS) &&
+        typeof body.timezone_name === "string" &&
+        body.timezone_name !== "" &&
+        isRealCalendarDate(body.start_day) &&
+        isRealCalendarDate(body.end_day) &&
+        isValidScheduleSlotArray(body.slots);
+    }
+
+    /* Publish returns the created SlotView array directly - the SAME
+     * exact SlotView validator judges every member (F2). */
+    function isValidPublishBody(body) {
+      return isValidScheduleSlotArray(body);
+    }
+
+    /* Per-slot block/unblock return ONE SlotView (same exact validator). */
+    function isValidScheduleSlotBody(body) {
+      return isValidScheduleSlotMember(body);
+    }
+
+    /* One still-booked window on a bulk-blocked day: EXACTLY the two time
+     * fields, judged by the SAME strict instant validator. */
+    function isValidBookedWindowMember(window) {
+      return hasExactKeys(window, SCHEDULE_BOOKED_WINDOW_KEYS) &&
+        isValidUtcInstant(window.start_datetime) &&
+        isValidUtcInstant(window.end_datetime);
+    }
+
+    function isValidBlockAllOpenBody(body) {
+      if (!hasExactKeys(body, SCHEDULE_BULK_KEYS) ||
+          !isRealCalendarDate(body.day) ||
+          typeof body.blocked_count !== "number" ||
+          !isFinite(body.blocked_count) ||
+          body.blocked_count < 0 ||
+          Math.floor(body.blocked_count) !== body.blocked_count ||
+          !Array.isArray(body.booked_remaining)) {
+        return false;
+      }
+      for (var i = 0; i < body.booked_remaining.length; i++) {
+        if (!isValidBookedWindowMember(body.booked_remaining[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /*
+     * Purpose: serialize the schedule range query. Business rules: only
+     * SCHEDULE_PARAM_NAMES are serialized, in that fixed order; undefined/
+     * null/empty values are omitted entirely (both-absent requests the
+     * backend default seven-day range); every value is URI-encoded. No
+     * tenant parameter can ever be sent.
+     * Returns: "" or "?start_day=...&end_day=...".
+     */
+    function buildScheduleQuery(params) {
+      var source = params || {};
+      var parts = [];
+      for (var i = 0; i < SCHEDULE_PARAM_NAMES.length; i++) {
+        var name = SCHEDULE_PARAM_NAMES[i];
+        var value = source[name];
+        if (value === undefined || value === null || value === "") {
+          continue;
+        }
+        parts.push(encodeURIComponent(name) + "=" +
+          encodeURIComponent(String(value)));
+      }
+      return parts.length === 0 ? "" : "?" + parts.join("&");
+    }
+
     function isValidLeadDetailBody(body) {
       if (typeof body.lead_id !== "string" || body.lead_id === "" ||
           !isValidMessageArray(body.messages) ||
@@ -536,9 +695,54 @@
           APPOINTMENTS_URL + buildAppointmentsQuery(params),
           isValidAppointmentListBody);
       },
+      /* P4-A - GET /portal/schedule: the office's slot day-grid (all
+       * statuses) for a local-day range. params may carry ONLY the closed
+       * SCHEDULE_PARAM_NAMES vocabulary; both omitted requests the backend
+       * default seven-day range. Tenancy is the verified bearer token. */
+      getSchedule: function (params) {
+        return authorizedGet(
+          SCHEDULE_URL + buildScheduleQuery(params),
+          isValidScheduleListBody);
+      },
+      /* P4-A - POST /portal/schedule/days/<day>/publish: publish one local
+       * day's slots. EXACTLY the three approved body fields are sent (the
+       * backend's strict model rejects anything else). */
+      publishScheduleDay: function (day, openTime, closeTime, slotMinutes) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/days/" + encodeURIComponent(String(day)) +
+            "/publish",
+          { open_time: openTime, close_time: closeTime,
+            slot_minutes: slotMinutes },
+          isValidPublishBody);
+      },
+      /* P4-A - POST /portal/schedule/slots/<id>/block: block ONE slot. */
+      blockScheduleSlot: function (slotId) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/slots/" + encodeURIComponent(String(slotId)) +
+            "/block",
+          undefined, isValidScheduleSlotBody);
+      },
+      /* P4-A - POST /portal/schedule/slots/<id>/unblock: blocked ->
+       * available only; every other state is refused by the backend. */
+      unblockScheduleSlot: function (slotId) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/slots/" + encodeURIComponent(String(slotId)) +
+            "/unblock",
+          undefined, isValidScheduleSlotBody);
+      },
+      /* P4-A - POST /portal/schedule/days/<day>/block-all-open: block every
+       * currently open slot on one local day (a SLOT operation - it does
+       * not prevent later publication). */
+      blockAllOpenSlots: function (day) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/days/" + encodeURIComponent(String(day)) +
+            "/block-all-open",
+          undefined, isValidBlockAllOpenBody);
+      },
       /* Exported for the Node suite (pure functions). */
       buildLeadsQuery: buildLeadsQuery,
-      buildAppointmentsQuery: buildAppointmentsQuery
+      buildAppointmentsQuery: buildAppointmentsQuery,
+      buildScheduleQuery: buildScheduleQuery
     };
   }
 

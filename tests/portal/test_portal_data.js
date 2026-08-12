@@ -472,6 +472,300 @@ test("A3 bite: missing required fields are rejected", async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* P4-A: schedule requests (contract v1.2 SS6 / SS8.14a-b, C5)          */
+/* ------------------------------------------------------------------ */
+
+/* A structurally-valid schedule slot / envelope per the P4-A backend. */
+function validScheduleSlot(overrides) {
+  return Object.assign({
+    slot_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    start_datetime: "2026-08-21T13:00:00Z",
+    end_datetime: "2026-08-21T14:00:00Z",
+    status: "available",
+    provider_name: null,
+    service_key: null
+  }, overrides || {});
+}
+
+function validScheduleBody(overrides) {
+  return Object.assign({
+    timezone_name: "America/New_York",
+    start_day: "2026-08-21",
+    end_day: "2026-08-27",
+    slots: [validScheduleSlot()]
+  }, overrides || {});
+}
+
+test("schedule query serializes ONLY the closed vocabulary, URI-encoded", async () => {
+  const env = makeData();
+  assertEqual(env.data.buildScheduleQuery({}), "", "empty params -> no query");
+  assertEqual(env.data.buildScheduleQuery(null), "", "null params -> no query");
+  assertEqual(
+    env.data.buildScheduleQuery({ start_day: "2026-08-21",
+      end_day: "2026-08-27" }),
+    "?start_day=2026-08-21&end_day=2026-08-27", "both bounds serialized");
+  assertEqual(
+    env.data.buildScheduleQuery({ start_day: "2026-08-21", end_day: "",
+      client_id: "smuggled", limit: 99, anything: "x" }),
+    "?start_day=2026-08-21",
+    "unknown names (incl. client_id) NEVER serialize; empty values omitted");
+  assertEqual(
+    env.data.buildScheduleQuery({ start_day: "a b", end_day: "c&d" }),
+    "?start_day=a%20b&end_day=c%26d", "values are URI-encoded");
+});
+
+test("getSchedule hits the exact endpoint with the Bearer token", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule", method: "GET",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validScheduleBody() }
+  );
+  const outcome = await env.data.getSchedule({});
+  assert(outcome.ok, "valid schedule body accepted");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("publishScheduleDay POSTs EXACTLY the three approved body fields", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-21/publish", method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" },
+      bodyJson: { open_time: "09:00", close_time: "17:00",
+        slot_minutes: 30 } },
+    { status: 200, json: [validScheduleSlot()] }
+  );
+  const outcome = await env.data.publishScheduleDay(
+    "2026-08-21", "09:00", "17:00", 30);
+  assert(outcome.ok, "created slots accepted");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("publish 409 maps to the conflict outcome (never silent success)", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-21/publish", method: "POST" },
+    { status: 409, json: { detail: "One or more requested slots overlap existing slots on that day." } }
+  );
+  const outcome = await env.data.publishScheduleDay(
+    "2026-08-21", "09:00", "17:00", 30);
+  assert(!outcome.ok, "409 is not ok");
+  assertEqual(outcome.state, "conflict", "409 -> conflict");
+});
+
+test("per-slot block/unblock POST to URI-encoded slot paths", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/slots/s%20x/block", method: "POST" },
+    { status: 200, json: validScheduleSlot({ status: "blocked" }) }
+  );
+  assert((await env.data.blockScheduleSlot("s x")).ok,
+    "block: encoded path, valid SlotView accepted");
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/slots/abc/unblock", method: "POST" },
+    { status: 404, json: { detail: "Slot not found." } }
+  );
+  assertEqual((await env.data.unblockScheduleSlot("abc")).state, "not_found",
+    "unblock 404 -> not_found");
+});
+
+test("blockAllOpenSlots POSTs to the day path and validates the result", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-21/block-all-open",
+      method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: { day: "2026-08-21", blocked_count: 3,
+      booked_remaining: [{ start_datetime: "2026-08-21T16:00:00Z",
+        end_datetime: "2026-08-21T17:00:00Z" }] } }
+  );
+  const outcome = await env.data.blockAllOpenSlots("2026-08-21");
+  assert(outcome.ok, "valid bulk body accepted");
+  assertEqual(outcome.data.blocked_count, 3, "count delivered");
+});
+
+test("A3 bite: malformed 200 schedule bodies resolve to invalid_response", async () => {
+  const cases = [
+    /* envelope: missing slots array */
+    { json: { timezone_name: "America/New_York", start_day: "2026-08-21",
+      end_day: "2026-08-27" } },
+    /* envelope: slot missing slot_id */
+    { json: validScheduleBody({ slots: [
+      { start_datetime: "2026-08-21T13:00:00Z",
+        end_datetime: "2026-08-21T14:00:00Z", status: "available" }] }) },
+    /* envelope: instant without the Z designator (device-time hazard) */
+    { json: validScheduleBody({ slots: [
+      validScheduleSlot({ start_datetime: "2026-08-21T13:00:00" })] }) },
+    /* C5 bite: an IMPOSSIBLE date JS Date would silently normalize */
+    { json: validScheduleBody({ slots: [
+      validScheduleSlot({ start_datetime: "2026-02-30T10:00:00Z" })] }) }
+  ];
+  for (const testCase of cases) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule", method: "GET" },
+      { status: 200, json: testCase.json }
+    );
+    const outcome = await env.data.getSchedule({});
+    assert(!outcome.ok, "malformed 200 is never ok");
+    assertEqual(outcome.state, "invalid_response", "fails closed");
+  }
+});
+
+test("A3 bite: malformed bulk result bodies resolve to invalid_response", async () => {
+  const cases = [
+    /* impossible local date for day */
+    { day: "2026-02-30", blocked_count: 1, booked_remaining: [] },
+    /* non-integer count */
+    { day: "2026-08-21", blocked_count: 1.5, booked_remaining: [] },
+    /* negative count */
+    { day: "2026-08-21", blocked_count: -1, booked_remaining: [] },
+    /* booked_remaining with an impossible instant (C5: the SAME strict
+     * validator judges booked_remaining) */
+    { day: "2026-08-21", blocked_count: 0, booked_remaining: [
+      { start_datetime: "2026-02-30T10:00:00Z",
+        end_datetime: "2026-08-21T17:00:00Z" }] }
+  ];
+  for (const body of cases) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule/days/2026-08-21/block-all-open",
+        method: "POST" },
+      { status: 200, json: body }
+    );
+    const outcome = await env.data.blockAllOpenSlots("2026-08-21");
+    assert(!outcome.ok, "malformed bulk 200 is never ok");
+    assertEqual(outcome.state, "invalid_response", "fails closed");
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* F2 bites: EXACT field sets - an otherwise-valid body carrying ANY   */
+/* unexpected property fails closed (leak prevention at the browser).  */
+/* ------------------------------------------------------------------ */
+
+test("F2 bite: an envelope with ANY extra field resolves to invalid_response", async () => {
+  const extras = [
+    { client_id: "11111111-1111-1111-1111-111111111111" },
+    { settings: {} },
+    { total: 1 }
+  ];
+  for (const extra of extras) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule", method: "GET" },
+      { status: 200, json: Object.assign(validScheduleBody(), extra) }
+    );
+    const outcome = await env.data.getSchedule({});
+    assert(!outcome.ok, "extra envelope field is never ok");
+    assertEqual(outcome.state, "invalid_response",
+      "envelope extra " + Object.keys(extra)[0] + " fails closed");
+  }
+});
+
+test("F2 bite: a SlotView with ANY extra field resolves to invalid_response", async () => {
+  const extras = [
+    { held_until: "2026-08-21T13:05:00Z" },
+    { held_by_conversation_id: "22222222-2222-2222-2222-222222222222" },
+    { client_id: "11111111-1111-1111-1111-111111111111" },
+    { patient_name: "Kevin Alvarado" }
+  ];
+  for (const extra of extras) {
+    /* Once through the envelope's slot array... */
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule", method: "GET" },
+      { status: 200, json: validScheduleBody({
+        slots: [Object.assign(validScheduleSlot(), extra)] }) }
+    );
+    const outcome = await env.data.getSchedule({});
+    assertEqual(outcome.state, "invalid_response",
+      "envelope slot extra " + Object.keys(extra)[0] + " fails closed");
+    /* ...and once through the single-SlotView block response. */
+    const env2 = makeData();
+    seedSession(env2);
+    env2.fetch.expect(
+      { urlEquals: "/portal/schedule/slots/abc/block", method: "POST" },
+      { status: 200, json: Object.assign(
+        validScheduleSlot({ status: "blocked" }), extra) }
+    );
+    const blockOutcome = await env2.data.blockScheduleSlot("abc");
+    assertEqual(blockOutcome.state, "invalid_response",
+      "block SlotView extra " + Object.keys(extra)[0] + " fails closed");
+  }
+});
+
+test("F2 bite: a booked_remaining member with ANY extra field fails closed", async () => {
+  const extras = [
+    { patient_name: "Kevin Alvarado" },
+    { slot_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+    { held_until: null }
+  ];
+  for (const extra of extras) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule/days/2026-08-21/block-all-open",
+        method: "POST" },
+      { status: 200, json: { day: "2026-08-21", blocked_count: 1,
+        booked_remaining: [Object.assign({
+          start_datetime: "2026-08-21T16:00:00Z",
+          end_datetime: "2026-08-21T17:00:00Z" }, extra)] } }
+    );
+    const outcome = await env.data.blockAllOpenSlots("2026-08-21");
+    assertEqual(outcome.state, "invalid_response",
+      "booked_remaining extra " + Object.keys(extra)[0] + " fails closed");
+  }
+  /* And the bulk envelope itself. */
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-21/block-all-open",
+      method: "POST" },
+    { status: 200, json: { day: "2026-08-21", blocked_count: 1,
+      booked_remaining: [], client_id: "x" } }
+  );
+  assertEqual((await env.data.blockAllOpenSlots("2026-08-21")).state,
+    "invalid_response", "bulk envelope extra client_id fails closed");
+});
+
+test("F2 bite: status outside the closed vocabulary and non-string provider fail closed", async () => {
+  const badSlots = [
+    validScheduleSlot({ status: "weird" }),
+    validScheduleSlot({ status: "" }),
+    validScheduleSlot({ provider_name: 7 }),
+    validScheduleSlot({ service_key: {} })
+  ];
+  for (const slot of badSlots) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule", method: "GET" },
+      { status: 200, json: validScheduleBody({ slots: [slot] }) }
+    );
+    assertEqual((await env.data.getSchedule({})).state, "invalid_response",
+      "closed vocabulary / typing enforced");
+  }
+});
+
+test("no session means NO schedule request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  const outcome = await env.data.blockAllOpenSlots("2026-08-21");
+  assert(!outcome.ok, "no session -> not ok");
+  assertEqual(outcome.state, "signed_out", "signed_out with zero requests");
+  assertEqual(env.fetch.remaining(), 0, "no request was made");
+});
+
+/* ------------------------------------------------------------------ */
 
 (async () => {
   const summary = await h.runRegisteredTests("test_portal_data");

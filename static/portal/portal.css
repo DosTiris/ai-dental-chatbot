@@ -383,3 +383,33 @@ body {
 .portal-workflow .portal-label { display: block; margin: 0.75rem 0 0.25rem; }
 .portal-textarea { resize: vertical; min-height: 5.5rem; }
 .portal-workflow .portal-button { margin-right: 0.5rem; margin-top: 0.25rem; }
+
+/* P4-A: Schedule page (Portal Slot Schedule Controls v1). */
+.portal-schedule-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 16px;
+  max-width: 420px;
+}
+.portal-schedule-controls .portal-button { width: auto; padding: 8px 14px; }
+.portal-schedule-controls .portal-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.portal-schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+}
+.portal-schedule-when { min-width: 180px; }
+.portal-schedule-status { flex: 1; }
+.portal-schedule-row .portal-button {
+  width: auto;
+  padding: 6px 12px;
+}
+.portal-schedule-row .portal-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

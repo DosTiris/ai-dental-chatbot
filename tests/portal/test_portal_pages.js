@@ -122,7 +122,15 @@ const PAGE_ELEMENT_IDS = [
   "detail-note-save", "detail-note-clear", "detail-note-feedback",
   "nav-appointments", "page-appointments", "appointments-state",
   "appointments-list", "appt-range-label", "appt-timezone-note",
-  "appt-prev", "appt-next"
+  "appt-prev", "appt-next",
+  /* P4-A: the Schedule page element set (index.html provides these). */
+  "nav-schedule", "page-schedule", "schedule-state", "schedule-list",
+  "schedule-range-label", "schedule-timezone-note",
+  "schedule-prev", "schedule-next",
+  "schedule-day", "schedule-open", "schedule-end", "schedule-minutes",
+  "schedule-publish", "schedule-publish-feedback",
+  "schedule-block-all", "schedule-bulk-feedback",
+  "schedule-booked-remaining", "schedule-action-feedback"
 ];
 
 function makeDocument() {
@@ -139,9 +147,13 @@ function makeDocument() {
  * a pending deferred), and records its arguments for assertions. */
 function makeFakeData() {
   const queues = { getDashboard: [], listLeads: [], getLeadDetail: [],
-    putLeadStatus: [], putLeadNote: [], getAppointments: [] };
+    putLeadStatus: [], putLeadNote: [], getAppointments: [],
+    getSchedule: [], publishScheduleDay: [], blockScheduleSlot: [],
+    unblockScheduleSlot: [], blockAllOpenSlots: [] };
   const calls = { getDashboard: [], listLeads: [], getLeadDetail: [],
-    putLeadStatus: [], putLeadNote: [], getAppointments: [] };
+    putLeadStatus: [], putLeadNote: [], getAppointments: [],
+    getSchedule: [], publishScheduleDay: [], blockScheduleSlot: [],
+    unblockScheduleSlot: [], blockAllOpenSlots: [] };
   function next(name, args) {
     calls[name].push(args);
     if (!queues[name].length) {
@@ -159,6 +171,13 @@ function makeFakeData() {
     putLeadNote: (leadId, note, token) =>
       next("putLeadNote", { leadId, note, token }),
     getAppointments: (params) => next("getAppointments", params),
+    /* P4-A schedule surface (same scripted-queue discipline). */
+    getSchedule: (params) => next("getSchedule", params),
+    publishScheduleDay: (day, openTime, closeTime, slotMinutes) =>
+      next("publishScheduleDay", { day, openTime, closeTime, slotMinutes }),
+    blockScheduleSlot: (slotId) => next("blockScheduleSlot", slotId),
+    unblockScheduleSlot: (slotId) => next("unblockScheduleSlot", slotId),
+    blockAllOpenSlots: (day) => next("blockAllOpenSlots", day),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;

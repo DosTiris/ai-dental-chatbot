@@ -35,6 +35,16 @@ from app.routes import portal_leads as portal_leads_routes  # Portal leads (read
 # repository, no migration, and performs no database write.
 from app.routes import portal_appointments as portal_appointments_routes
 
+# P4-A - Portal Slot Schedule Controls v1 (contract v1.2): transport wiring
+# lives in app/routes/portal_schedule.py; the mutation rules live in
+# app/services/portal_schedule_service.py (advisory-lock serialization, DST
+# classification, exact expansion, overlap refusal, bulk block) and
+# app/services/slot_management_service.py (the shared per-slot block/unblock
+# owner the admin route also delegates to). Authentication and tenant
+# binding are REUSED from the P2 owner (portal_auth via portal.py) - this
+# router adds no new auth path and no migration.
+from app.routes import portal_schedule as portal_schedule_routes
+
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -81,6 +91,7 @@ app.include_router(calendar_routes.router)  # PATCH 3: calendar admin routes
 app.include_router(portal_routes.router)  # P2: office portal auth foundation
 app.include_router(portal_leads_routes.router)  # P3-B1: portal read-only dashboard/leads
 app.include_router(portal_appointments_routes.router)  # Portal Appointments v1: read-only
+app.include_router(portal_schedule_routes.router)  # P4-A: portal slot schedule controls
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

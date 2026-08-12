@@ -47,12 +47,49 @@
     workflow_note_empty: "Enter a note before saving, or use Clear note.",
     workflow_failed: "The change was not saved. Please try again.",
     appointments_empty: "No appointments in this range.",
-    appointments_tz_note_prefix: "Times shown in the office timezone: "
+    appointments_tz_note_prefix: "Times shown in the office timezone: ",
+    /* P4-A schedule wording. NEVER the words "close"/"closed"/"closure"
+     * for the bulk action (contract v1.2 SS5-E / D3): it is a SLOT
+     * operation over the rows existing right now - publishing later
+     * reopens the day. */
+    schedule_empty: "No slots in this range.",
+    schedule_day_required: "Choose a day first.",
+    schedule_publish_conflict:
+      "Those hours overlap existing slots on that day. Showing the latest schedule.",
+    schedule_publish_rejected:
+      "Those hours could not be published. Adjust the times or slot length and try again.",
+    schedule_action_conflict:
+      "That slot changed somewhere else. Showing the latest schedule.",
+    schedule_bulk_note:
+      "Blocks every slot that is currently open on this day. Publishing new slots later will reopen the day.",
+    schedule_booked_remaining_prefix: "Booked appointments remain at: ",
+    schedule_slot_gone: "That slot could not be found. Showing the latest schedule."
   };
 
   /* ------------------------------------------------------------------ */
   /* Pure presentation helpers (exported for the Node suite)             */
   /* ------------------------------------------------------------------ */
+
+  /*
+   * Purpose: one office-facing label per slot status (P4-A). The closed
+   * backend vocabulary maps to closed wording; an unknown value renders AS
+   * ITSELF (through textContent - safe) so a vocabulary drift is visible,
+   * never hidden (Constitution 14).
+   */
+  var SCHEDULE_STATUS_LABELS = {
+    available: "Open",
+    held: "On hold",
+    booked: "Booked",
+    blocked: "Blocked",
+    cancelled: "Cancelled"
+  };
+
+  function scheduleSlotStatusLabel(status) {
+    if (Object.prototype.hasOwnProperty.call(SCHEDULE_STATUS_LABELS, status)) {
+      return SCHEDULE_STATUS_LABELS[status];
+    }
+    return String(status || "");
+  }
 
   /*
    * Purpose: turn an ISO timestamp into local display text.
@@ -265,7 +302,40 @@
     var leadsQuery = { status: "", q: "", limit: LIST_PAGE_LIMIT, offset: 0 };
 
     /* Stale-response guards: one monotonically increasing id per page. */
-    var requestIds = { dashboard: 0, leads: 0, detail: 0, appointments: 0 };
+    var requestIds = { dashboard: 0, leads: 0, detail: 0, appointments: 0,
+      schedule: 0 };
+
+    /* P4-A Schedule page state (contract v1.2 SS6 / Correction C4).
+     * The Schedule page MUTATES, so the read-page sequence guard alone is
+     * not enough: generation is a mutation-generation counter, incremented
+     * the moment ANY schedule mutation begins. A window GET response is
+     * applied only when BOTH its request id is still current AND the
+     * generation captured at issue time equals the current generation - a
+     * read issued before a mutation can therefore never roll the rendered
+     * schedule back after the mutation's authoritative refresh.
+     * Busy flags are INDEPENDENT duplicate-submit guards: slotBusy tracks
+     * per-slot in-flight actions by slot_id (one slot's action never
+     * disables another slot's control), publishBusy guards the publish
+     * form, bulkBusy guards the bulk action. Week navigation mirrors the
+     * appointments anchor discipline (F3).
+     * lifecycle (audit F3) is the page/session lifecycle token: bumped by
+     * resetContent (sign-out / independent reset) and by openSchedule
+     * (page re-entry). EVERY mutation captures it at start; a mutation
+     * response whose captured lifecycle is stale may clear its own busy
+     * flag but must not touch the DOM and must not trigger a schedule
+     * GET - so a late-resolving mutation can never repopulate a wiped
+     * page or fire a post-reset request. */
+    var schedule = {
+      weekOffset: 0,
+      defaultStart: null,
+      currentStart: null,
+      currentEnd: null,
+      generation: 0,
+      lifecycle: 0,
+      publishBusy: false,
+      bulkBusy: false,
+      slotBusy: {}
+    };
 
     /* Appointments week-navigation state. weekOffset 0 = the backend
      * DEFAULT seven-day range (both bounds omitted, so the backend anchors
@@ -316,19 +386,22 @@
     /* Show exactly one page section; hide the rest (single-meaning state). */
     function showPage(pageId) {
       var pages = ["page-dashboard", "page-leads", "page-lead-detail",
-        "page-appointments"];
+        "page-appointments", "page-schedule"];
       for (var i = 0; i < pages.length; i++) {
         byId(pages[i]).hidden = pages[i] !== pageId;
       }
       /* The nav highlights the SECTION the visible page belongs to; the
-       * detail page belongs to Leads, and Appointments is its own section. */
+       * detail page belongs to Leads, and Appointments and Schedule are
+       * their own sections. */
       var isAppointments = pageId === "page-appointments";
+      var isSchedule = pageId === "page-schedule";
       var isDashboard = pageId === "page-dashboard";
-      var isLeads = !isAppointments && !isDashboard;
+      var isLeads = !isAppointments && !isSchedule && !isDashboard;
       byId("nav-dashboard").classList.toggle("portal-nav-active", isDashboard);
       byId("nav-leads").classList.toggle("portal-nav-active", isLeads);
       byId("nav-appointments").classList.toggle("portal-nav-active",
         isAppointments);
+      byId("nav-schedule").classList.toggle("portal-nav-active", isSchedule);
     }
 
     /*
@@ -999,6 +1072,352 @@
     }
 
     /* ---------------------------------------------------------------- */
+    /* Schedule (P4-A - Portal Slot Schedule Controls v1)                */
+    /* ---------------------------------------------------------------- */
+
+    /*
+     * Purpose: THE single settling point for every schedule MUTATION
+     * response (audit F3). The caller has already cleared its own busy
+     * flag (always safe). Guard order:
+     *   1. STALE LIFECYCLE (an independent sign-out / reset / page
+     *      re-entry happened while the mutation was in flight): render
+     *      NOTHING, trigger NO schedule GET - the wipe must stand.
+     *   2. Session-loss outcome: wipe and hand control back (the shared
+     *      rule) - the session is genuinely dead regardless of ordering.
+     *   3. STALE GENERATION (a NEWER mutation began after this one): this
+     *      response's BODY and feedback no longer own the UI - no feedback
+     *      is written and nothing renders from the response itself. BUT
+     *      (audit F5) if the older mutation completed SUCCESSFULLY it DID
+     *      change the server truth, and a refresh rendered before it
+     *      committed may now be stale - so one fresh authoritative
+     *      loadSchedule() is triggered at the CURRENT generation, which
+     *      the request-sequence + generation guards allow to supersede any
+     *      earlier read. A still-current older-generation FAILURE changed
+     *      nothing that its own error wording would describe, so it stays
+     *      fully suppressed (no unnecessary behavior).
+     *   4. Failure: honest wording; every non-session failure that may
+     *      reflect a server-side change also triggers the authoritative
+     *      refresh.
+     *   5. Success: the caller's onSuccess renders its feedback, then the
+     *      authoritative refresh - the mutation response body is never
+     *      applied to the grid optimistically.
+     */
+    function settleScheduleMutation(lifecycleAtIssue, generationAtIssue,
+        outcome, feedbackId, messages, onSuccess) {
+      if (lifecycleAtIssue !== schedule.lifecycle) {
+        return; /* F3: reset/logout while in flight - nothing may render */
+      }
+      if (!outcome.ok && (outcome.state === "signed_out" ||
+          outcome.state === "unauthorized")) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (generationAtIssue !== schedule.generation) {
+        /* A newer mutation owns feedback and rows. F5: a SUCCESSFUL older
+         * commit still changed the server, so fetch the current truth. */
+        if (outcome.ok) {
+          loadSchedule();
+        }
+        return;
+      }
+      if (!outcome.ok) {
+        var message;
+        if (outcome.state === "conflict") {
+          message = messages.conflict;
+        } else if (outcome.state === "not_found") {
+          message = MESSAGES.schedule_slot_gone;
+        } else if (outcome.state === "bad_request") {
+          message = messages.bad_request;
+        } else {
+          message = MESSAGES[outcome.state] || MESSAGES.invalid_response;
+        }
+        setText(feedbackId, message);
+        loadSchedule();
+        return;
+      }
+      onSuccess(outcome);
+      loadSchedule(); /* authoritative state only */
+    }
+
+    /* One slot row: the local time range (formatted in the OFFICE timezone
+     * from the envelope - never device time), the status label, and - only
+     * where the backend would accept it - ONE action button (Block for
+     * open/held rows, Unblock for blocked rows; booked and cancelled rows
+     * get no button). Every value goes through textContent. */
+    function buildScheduleRow(slot, timezoneName) {
+      var item = doc.createElement("li");
+      item.className = "portal-lead-item";
+      var row = doc.createElement("div");
+      row.className = "portal-schedule-row";
+
+      var when = doc.createElement("span");
+      when.className = "portal-schedule-when";
+      when.textContent = formatInTimeZone(slot.start_datetime, timezoneName) +
+        " - " + formatInTimeZone(slot.end_datetime, timezoneName);
+      row.appendChild(when);
+
+      var status = doc.createElement("span");
+      status.className = "portal-schedule-status portal-muted";
+      status.textContent = scheduleSlotStatusLabel(slot.status);
+      row.appendChild(status);
+
+      var action = null;
+      if (slot.status === "available" || slot.status === "held") {
+        action = { label: "Block", call: data.blockScheduleSlot };
+      } else if (slot.status === "blocked") {
+        action = { label: "Unblock", call: data.unblockScheduleSlot };
+      }
+      if (action !== null) {
+        var button = doc.createElement("button");
+        button.type = "button";
+        button.className = "portal-button portal-button-secondary";
+        button.textContent = action.label;
+        /* Per-slot duplicate-submit guard: ONLY this slot's control is
+         * disabled while its action is in flight (C4 independence). */
+        button.disabled = schedule.slotBusy[slot.slot_id] === true;
+        button.addEventListener("click", function () {
+          onSlotAction(slot.slot_id, action.call, button);
+        });
+        row.appendChild(button);
+      }
+
+      item.appendChild(row);
+      return item;
+    }
+
+    function renderSchedulePage(body) {
+      schedule.currentStart = body.start_day;
+      schedule.currentEnd = body.end_day;
+      if (schedule.weekOffset === 0) {
+        schedule.defaultStart = body.start_day;
+      }
+      setText("schedule-timezone-note",
+        MESSAGES.appointments_tz_note_prefix + body.timezone_name);
+      setText("schedule-range-label",
+        appointmentsRangeLabel(body.start_day, body.end_day));
+
+      var list = byId("schedule-list");
+      clearChildren(list);
+      if (!body.slots || body.slots.length === 0) {
+        setText("schedule-state", MESSAGES.schedule_empty);
+      } else {
+        setText("schedule-state", "");
+        for (var i = 0; i < body.slots.length; i++) {
+          list.appendChild(buildScheduleRow(body.slots[i],
+            body.timezone_name));
+        }
+      }
+      var haveAnchor = schedule.defaultStart !== null;
+      byId("schedule-prev").disabled = !haveAnchor;
+      byId("schedule-next").disabled = !haveAnchor;
+    }
+
+    /*
+     * Purpose: load the schedule window for the current week offset under
+     * the DUAL guard (Correction C4): the response is applied only when its
+     * request id is still current AND the mutation generation captured at
+     * issue time still equals the current generation. A GET issued before a
+     * mutation began - however late it resolves - is discarded silently, so
+     * rendered state can never roll back behind a mutation's authoritative
+     * refresh. Offset semantics mirror the appointments page (F3 anchor).
+     */
+    function loadSchedule() {
+      var requestId = ++requestIds.schedule;
+      var generationAtIssue = schedule.generation;
+      setText("schedule-state", MESSAGES.loading);
+
+      var params = {};
+      if (schedule.weekOffset !== 0) {
+        if (schedule.defaultStart === null) {
+          schedule.weekOffset = 0;
+        } else {
+          var start = shiftLocalDay(schedule.defaultStart,
+            schedule.weekOffset * 7);
+          var end = shiftLocalDay(start, 6);
+          if (start !== "" && end !== "") {
+            params = { start_day: start, end_day: end };
+          } else {
+            schedule.weekOffset = 0;
+          }
+        }
+      }
+
+      data.getSchedule(params).then(function (outcome) {
+        if (requestId !== requestIds.schedule ||
+            generationAtIssue !== schedule.generation) {
+          return; /* superseded or pre-mutation - never applied (C4) */
+        }
+        if (!outcome.ok) {
+          handleFailure(outcome, "schedule-state");
+          return;
+        }
+        renderSchedulePage(outcome.data);
+      });
+    }
+
+    function onSchedulePrev() {
+      if (schedule.defaultStart === null) {
+        return;
+      }
+      schedule.weekOffset -= 1;
+      loadSchedule();
+    }
+
+    function onScheduleNext() {
+      if (schedule.defaultStart === null) {
+        return;
+      }
+      schedule.weekOffset += 1;
+      loadSchedule();
+    }
+
+    /*
+     * Purpose: one per-slot mutation (Block or Unblock). Marks the mutation
+     * generation FIRST (invalidating every in-flight window read), guards
+     * duplicate submission for THIS slot only, and on completion renders
+     * ONLY the authoritative refresh - the response body is never applied
+     * to the grid optimistically.
+     */
+    function onSlotAction(slotId, call, button) {
+      if (schedule.slotBusy[slotId] === true) {
+        return; /* duplicate submit while in flight */
+      }
+      schedule.slotBusy[slotId] = true;
+      schedule.generation += 1;   /* C4: mutation begins */
+      var lifecycleAtIssue = schedule.lifecycle;      /* F3 capture */
+      var generationAtIssue = schedule.generation;
+      button.disabled = true;
+      setText("schedule-action-feedback", "");
+      call(slotId).then(function (outcome) {
+        delete schedule.slotBusy[slotId];  /* busy clearing is always safe */
+        settleScheduleMutation(lifecycleAtIssue, generationAtIssue, outcome,
+          "schedule-action-feedback", {
+            conflict: MESSAGES.schedule_action_conflict,
+            bad_request: MESSAGES.schedule_action_conflict
+          }, function () { /* nothing beyond the refresh to render */ });
+      });
+    }
+
+    /*
+     * Purpose: publish one local day's hours. Reads the three form values
+     * (slot length defaults to 30 in the markup - the contract's portal
+     * default), refuses an empty day locally, and follows the same
+     * mutation-generation + authoritative-refresh discipline.
+     */
+    function onSchedulePublish() {
+      if (schedule.publishBusy) {
+        return;
+      }
+      var day = byId("schedule-day").value;
+      if (!day) {
+        setText("schedule-publish-feedback", MESSAGES.schedule_day_required);
+        return;
+      }
+      var openTime = byId("schedule-open").value;
+      var closeTime = byId("schedule-end").value;
+      var slotMinutes = parseInt(byId("schedule-minutes").value, 10);
+      if (!isFinite(slotMinutes)) {
+        slotMinutes = 0; /* a non-numeric length is refused by the backend */
+      }
+      schedule.publishBusy = true;
+      schedule.generation += 1;   /* C4: mutation begins */
+      var lifecycleAtIssue = schedule.lifecycle;      /* F3 capture */
+      var generationAtIssue = schedule.generation;
+      byId("schedule-publish").disabled = true;
+      setText("schedule-publish-feedback", "");
+      data.publishScheduleDay(day, openTime, closeTime, slotMinutes)
+        .then(function (outcome) {
+          schedule.publishBusy = false;  /* busy clearing is always safe */
+          if (lifecycleAtIssue === schedule.lifecycle) {
+            byId("schedule-publish").disabled = false;
+          } /* after a reset the control was already reset by the wipe */
+          settleScheduleMutation(lifecycleAtIssue, generationAtIssue,
+            outcome, "schedule-publish-feedback", {
+              conflict: MESSAGES.schedule_publish_conflict,
+              bad_request: MESSAGES.schedule_publish_rejected
+            }, function (settled) {
+              setText("schedule-publish-feedback",
+                "Published " + settled.data.length + " slots.");
+            });
+        });
+    }
+
+    /*
+     * Purpose: block every currently open slot on the selected day (a SLOT
+     * operation - the permanent note beside the control states that
+     * publishing later reopens the day; the words close/closed/closure are
+     * deliberately absent). Renders the blocked count and the still-booked
+     * windows from the response, then the authoritative refresh.
+     */
+    function onScheduleBlockAll() {
+      if (schedule.bulkBusy) {
+        return;
+      }
+      var day = byId("schedule-day").value;
+      if (!day) {
+        setText("schedule-bulk-feedback", MESSAGES.schedule_day_required);
+        return;
+      }
+      schedule.bulkBusy = true;
+      schedule.generation += 1;   /* C4: mutation begins */
+      var lifecycleAtIssue = schedule.lifecycle;      /* F3 capture */
+      var generationAtIssue = schedule.generation;
+      byId("schedule-block-all").disabled = true;
+      setText("schedule-bulk-feedback", "");
+      setText("schedule-booked-remaining", "");
+      data.blockAllOpenSlots(day).then(function (outcome) {
+        schedule.bulkBusy = false;     /* busy clearing is always safe */
+        if (lifecycleAtIssue === schedule.lifecycle) {
+          byId("schedule-block-all").disabled = false;
+        } /* after a reset the control was already reset by the wipe */
+        settleScheduleMutation(lifecycleAtIssue, generationAtIssue, outcome,
+          "schedule-bulk-feedback", {
+            conflict: MESSAGES.schedule_action_conflict,
+            bad_request: MESSAGES.schedule_action_conflict
+          }, function (settled) {
+            setText("schedule-bulk-feedback",
+              "Blocked " + settled.data.blocked_count + " slots.");
+            var remaining = settled.data.booked_remaining;
+            if (remaining.length > 0) {
+              var tz = byId("schedule-timezone-note").textContent
+                .slice(MESSAGES.appointments_tz_note_prefix.length) || "UTC";
+              var windows = [];
+              for (var i = 0; i < remaining.length; i++) {
+                windows.push(
+                  formatInTimeZone(remaining[i].start_datetime, tz));
+              }
+              setText("schedule-booked-remaining",
+                MESSAGES.schedule_booked_remaining_prefix +
+                windows.join("; "));
+            }
+          });
+      });
+    }
+
+    function openSchedule() {
+      /* Re-enter at the default week AND clear the previous visit's anchor
+       * (the frozen appointments discipline), so navigation is impossible
+       * from a stale anchor while the fresh default GET is in flight.
+       * Audit F3: re-entry is a page reset - bump the lifecycle so any
+       * mutation still in flight from the PREVIOUS visit can no longer
+       * render feedback or trigger a schedule GET when it resolves. */
+      schedule.lifecycle += 1;
+      schedule.weekOffset = 0;
+      schedule.defaultStart = null;
+      schedule.currentStart = null;
+      schedule.currentEnd = null;
+      byId("schedule-prev").disabled = true;
+      byId("schedule-next").disabled = true;
+      setText("schedule-publish-feedback", "");
+      setText("schedule-action-feedback", "");
+      setText("schedule-bulk-feedback", "");
+      setText("schedule-booked-remaining", "");
+      showPage("page-schedule");
+      loadSchedule();
+    }
+
+    /* ---------------------------------------------------------------- */
     /* Entry, reset, wiring                                              */
     /* ---------------------------------------------------------------- */
 
@@ -1013,6 +1432,35 @@
       requestIds.leads += 1;
       requestIds.detail += 1;
       requestIds.appointments += 1;
+      /* P4-A (C4): session loss invalidates BOTH schedule counters - no
+       * in-flight window read NOR any in-flight mutation result may apply
+       * afterwards - and wipes every rendered schedule value. */
+      requestIds.schedule += 1;
+      schedule.generation += 1;
+      schedule.lifecycle += 1;   /* F3: in-flight mutations may not render */
+      schedule.weekOffset = 0;
+      schedule.defaultStart = null;
+      schedule.currentStart = null;
+      schedule.currentEnd = null;
+      schedule.publishBusy = false;
+      schedule.bulkBusy = false;
+      schedule.slotBusy = {};
+      setText("schedule-timezone-note", "");
+      setText("schedule-range-label", "");
+      setText("schedule-state", "");
+      setText("schedule-publish-feedback", "");
+      setText("schedule-action-feedback", "");
+      setText("schedule-bulk-feedback", "");
+      setText("schedule-booked-remaining", "");
+      clearChildren(byId("schedule-list"));
+      byId("schedule-day").value = "";
+      byId("schedule-open").value = "";
+      byId("schedule-end").value = "";
+      byId("schedule-minutes").value = "30";
+      byId("schedule-publish").disabled = false;
+      byId("schedule-block-all").disabled = false;
+      byId("schedule-prev").disabled = true;
+      byId("schedule-next").disabled = true;
       leadsQuery = { status: "", q: "", limit: LIST_PAGE_LIMIT, offset: 0 };
       /* Appointments week-navigation state and rendered content wipe: no
        * office's appointment times or patient contact may linger behind the
@@ -1082,8 +1530,16 @@
       byId("nav-appointments").addEventListener("click", function () {
         openAppointments();
       });
+      byId("nav-schedule").addEventListener("click", function () {
+        openSchedule();
+      });
       byId("appt-prev").addEventListener("click", onApptPrev);
       byId("appt-next").addEventListener("click", onApptNext);
+      byId("schedule-prev").addEventListener("click", onSchedulePrev);
+      byId("schedule-next").addEventListener("click", onScheduleNext);
+      byId("schedule-publish").addEventListener("click", onSchedulePublish);
+      byId("schedule-block-all").addEventListener("click",
+        onScheduleBlockAll);
       byId("leads-filter-form").addEventListener("submit", onFiltersSubmit);
       byId("leads-prev").addEventListener("click", onPagerPrev);
       byId("leads-next").addEventListener("click", onPagerNext);
@@ -1112,7 +1568,8 @@
     notificationOutcomeLabel: notificationOutcomeLabel,
     formatInTimeZone: formatInTimeZone,
     shiftLocalDay: shiftLocalDay,
-    appointmentsRangeLabel: appointmentsRangeLabel
+    appointmentsRangeLabel: appointmentsRangeLabel,
+    scheduleSlotStatusLabel: scheduleSlotStatusLabel
   };
 
   /* Export for both the browser (window) and the Node test harness. */

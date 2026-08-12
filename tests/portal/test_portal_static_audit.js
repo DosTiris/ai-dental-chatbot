@@ -163,8 +163,12 @@ test("audit: portal JS references no operator or Calendar admin routes", () => {
 test("audit: portal-data calls only the allow-listed read endpoints", () => {
   const content = read("portal-data.js");
   const portalCalls = content.match(/"\/portal\/[a-z-]*"/g) || [];
+  /* P4-A: "/portal/schedule" added DELIBERATELY (the closed-list growth
+   * mechanism this audit documents) for the approved schedule surface;
+   * every derived action path is built from that one literal with
+   * URI-encoded segments, so no second literal may appear. */
   const allowed = ['"/portal/dashboard"', '"/portal/leads"',
-    '"/portal/appointments"'];
+    '"/portal/appointments"', '"/portal/schedule"'];
   for (const call of portalCalls) {
     assert(allowed.indexOf(call) !== -1,
       call + " is not an allowed portal data endpoint");
@@ -175,6 +179,52 @@ test("audit: portal-data calls only the allow-listed read endpoints", () => {
     "leads endpoint literal must exist");
   assert(portalCalls.indexOf('"/portal/appointments"') !== -1,
     "appointments endpoint literal must exist");
+  assert(portalCalls.indexOf('"/portal/schedule"') !== -1,
+    "schedule endpoint literal must exist (P4-A)");
+});
+
+/* ------------------------------------------------------------------ */
+/* P4-A: schedule surface audits                                       */
+/* ------------------------------------------------------------------ */
+
+/* Contract v1.2 SS5-E / D3: the bulk action is a SLOT operation. The
+ * shipped schedule MARKUP (the page-schedule section of index.html) must
+ * never word it as shutting the day. */
+test("audit: schedule markup never uses day-shutting vocabulary", () => {
+  const content = read("index.html");
+  const start = content.indexOf('id="page-schedule"');
+  assert(start !== -1, "index.html must contain the page-schedule section");
+  const end = content.indexOf("</section>", start);
+  assert(end !== -1, "page-schedule section must be closed");
+  const section = content.slice(start, end).toLowerCase();
+  for (const word of ["close", "closed", "closure"]) {
+    assert(section.indexOf(word) === -1,
+      "page-schedule markup must not contain '" + word + "'");
+  }
+  assert(section.indexOf("block all open slots") !== -1,
+    "the bulk control must be worded 'Block all open slots'");
+});
+
+/* The schedule USER-FACING WORDING in portal-pages.js (the schedule_*
+ * MESSAGES values and the rendered button labels) must not use the
+ * day-shutting vocabulary either. String literals only - code comments
+ * legitimately DISCUSS the rule by quoting the words. */
+test("audit: schedule wording in portal-pages.js never shuts the day", () => {
+  const content = read("portal-pages.js");
+  const pattern = /schedule_[a-z_]+:\s*\r?\n?\s*"([^"]*)"/g;
+  const values = [];
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    values.push(match[1]);
+  }
+  assert(values.length >= 5, "the schedule MESSAGES entries must exist");
+  for (const value of values) {
+    const lowered = value.toLowerCase();
+    for (const word of ["close", "closed", "closure"]) {
+      assert(lowered.indexOf(word) === -1,
+        "schedule message wording must not contain '" + word + "': " + value);
+    }
+  }
 });
 
 /* P3-B1: portal-pages is DOM glue ONLY - it owns no network surface at

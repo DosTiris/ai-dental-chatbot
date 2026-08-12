@@ -87,6 +87,8 @@
                 type="button">Leads</button>
         <button id="nav-appointments" class="portal-nav-button"
                 type="button">Appointments</button>
+        <button id="nav-schedule" class="portal-nav-button"
+                type="button">Schedule</button>
       </nav>
       <p id="shell-status" class="portal-status" aria-live="polite"></p>
 
@@ -152,6 +154,56 @@
         <p id="appointments-state" class="portal-muted portal-page-state"
            aria-live="polite"></p>
         <ul id="appointments-list" class="portal-lead-list"></ul>
+      </section>
+
+      <!-- P4-A: Portal Slot Schedule Controls v1. The bulk action is a
+           SLOT operation ("Block all open slots") and is deliberately
+           never worded as shutting the day (contract SS5-E / D3). -->
+      <section id="page-schedule" hidden>
+        <div class="portal-appt-range">
+          <button id="schedule-prev" class="portal-button portal-button-secondary"
+                  type="button">Previous week</button>
+          <span id="schedule-range-label" class="portal-muted"></span>
+          <button id="schedule-next" class="portal-button portal-button-secondary"
+                  type="button">Next week</button>
+        </div>
+        <p id="schedule-timezone-note" class="portal-muted"></p>
+
+        <div class="portal-schedule-controls">
+          <label class="portal-label" for="schedule-day">Day</label>
+          <input id="schedule-day" class="portal-input" type="date">
+
+          <label class="portal-label" for="schedule-open">Open (HH:MM)</label>
+          <input id="schedule-open" class="portal-input" type="text"
+                 inputmode="numeric" placeholder="09:00" maxlength="5">
+          <label class="portal-label" for="schedule-end">End (HH:MM)</label>
+          <input id="schedule-end" class="portal-input" type="text"
+                 inputmode="numeric" placeholder="17:00" maxlength="5">
+          <label class="portal-label" for="schedule-minutes">Slot length
+            (minutes)</label>
+          <input id="schedule-minutes" class="portal-input" type="number"
+                 min="10" max="240" step="5" value="30">
+          <button id="schedule-publish" class="portal-button"
+                  type="button">Publish slots</button>
+          <p id="schedule-publish-feedback" class="portal-muted"
+             aria-live="polite"></p>
+
+          <button id="schedule-block-all"
+                  class="portal-button portal-button-secondary"
+                  type="button">Block all open slots</button>
+          <p class="portal-muted">Blocks every slot that is currently open on
+            this day. Publishing new slots later will reopen the day.</p>
+          <p id="schedule-bulk-feedback" class="portal-muted"
+             aria-live="polite"></p>
+          <p id="schedule-booked-remaining" class="portal-muted"
+             aria-live="polite"></p>
+        </div>
+
+        <p id="schedule-action-feedback" class="portal-muted"
+           aria-live="polite"></p>
+        <p id="schedule-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <ul id="schedule-list" class="portal-lead-list"></ul>
       </section>
 
       <section id="page-lead-detail" hidden>

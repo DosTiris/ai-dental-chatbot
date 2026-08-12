@@ -59,6 +59,9 @@ from app.services.service_policy_mapping import (
     calendar_policy_value_for_master_service,
 )
 from app.services import booking_service
+# P4-A (Correction B): the single shared owner of the per-slot block
+# mutation rule - this route delegates to it and maps outcomes only.
+from app.services import slot_management_service
 from app.services.calendar_settings_service import (
     client_now,
     ensure_utc,
@@ -306,29 +309,29 @@ def block_slot(
     authenticated_client: Client = Depends(require_calendar_admin),
 ):
     """
-    Purpose: Staff removes a slot from booking (meeting, lunch, closure).
+    Purpose: Staff removes a slot from booking (meeting, lunch, blocked
+        period).
     Database effects: one locked transaction; the slot becomes 'blocked'.
+        P4-A (contract v1.2, Correction B): the mutation rule itself moved
+        to its single shared owner, slot_management_service.block_slot, so
+        the admin surface and the portal apply ONE rule text. This route's
+        observable behavior is byte-equivalent to before the extraction
+        (pinned by calendar_tests/test_slot_management_owner.py).
     Failures: 404 tenant mismatch (Patch 5) or unknown slot for this client;
         409 when the slot is already BOOKED — staff must cancel the
         appointment instead, so a patient's booking can never silently
         vanish (Rule 4 / Rule 16).
     """
     client = require_tenant_match(client_id, authenticated_client)
-    slot = appointment_repository.get_slot_for_update(db, client.id, slot_id)
-    if slot is None:
-        db.rollback()
+    result = slot_management_service.block_slot(db, client.id, slot_id)
+    if result.reason == slot_management_service.REASON_SLOT_MISSING:
         raise HTTPException(status_code=404, detail="Slot not found.")
-    if slot.status == SlotStatus.BOOKED:
-        db.rollback()
+    if result.reason == slot_management_service.REASON_SLOT_BOOKED:
         raise HTTPException(
             status_code=409,
             detail="Slot has a booked appointment. Cancel the appointment first.",
         )
-    slot.status = SlotStatus.BLOCKED
-    slot.held_until = None
-    slot.held_by_conversation_id = None
-    db.commit()
-    return _slot_view(slot)
+    return _slot_view(result.slot)
 
 
 @router.get("/appointments", response_model=List[AppointmentView])

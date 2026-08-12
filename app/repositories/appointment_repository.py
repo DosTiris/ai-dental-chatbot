@@ -155,6 +155,43 @@ def get_slot_for_update(
     )
 
 
+def get_slots_for_update_between(
+    db: Session,
+    client_id: uuid.UUID,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> List[AppointmentSlot]:
+    """
+    Purpose: Load EVERY slot for one client in a UTC window WITH row locks -
+             the locked sibling of list_slots_between (P4-A, contract v1.2:
+             the portal's bulk "block all open slots" sweep must judge and
+             mutate each row under the same serialization the single-slot
+             services use). Same filter, same start-ASC order.
+    Returns: the locked rows (any status) for THIS client only.
+    Database effects: SELECT ... FOR UPDATE (locks released at
+             commit/rollback).
+    Note: SQLite (used by the local test suite) ignores FOR UPDATE; its
+          whole-database write lock provides equivalent serialization there.
+    V4.2 discipline: .populate_existing() for exactly the reason documented
+          on get_slot_for_update - the locked read must hand the caller the
+          LATEST committed row values even when this session's identity map
+          already holds an earlier copy, so the sweep's status decisions are
+          never judged on stale attributes.
+    """
+    return (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.client_id == client_id,
+            AppointmentSlot.start_datetime >= start_utc,
+            AppointmentSlot.start_datetime < end_utc,
+        )
+        .order_by(AppointmentSlot.start_datetime.asc())
+        .with_for_update()
+        .populate_existing()
+        .all()
+    )
+
+
 def get_appointment_by_conversation(
     db: Session,
     client_id: uuid.UUID,
