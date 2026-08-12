@@ -579,3 +579,401 @@ test("detail validator REJECTS a body missing the office workflow slice", async 
   assert(!outcome.ok, "detail without the office slice must fail closed");
   assertEqual(outcome.state, "invalid_response", "fail closed");
 });
+
+/* ------------------------------------------------------------------ */
+/* Portal Appointments v1: read-only appointments data access          */
+/* ------------------------------------------------------------------ */
+
+function validAppointmentsBody(overrides) {
+  return Object.assign({
+    timezone_name: "America/New_York",
+    start_day: "2026-07-16",
+    end_day: "2026-07-22",
+    appointments: []
+  }, overrides || {});
+}
+
+function validAppointmentMember(overrides) {
+  return Object.assign({
+    appointment_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    patient_name: "Kevin Alvarado",
+    patient_phone: "516-555-1234",
+    patient_email: null,
+    new_or_returning: "new",
+    reason: "cleaning",
+    urgency: "routine",
+    start_datetime: "2026-07-16T14:00:00Z",
+    end_datetime: "2026-07-16T14:45:00Z",
+    status: "pending",
+    confirmed_at: null,
+    source: "mia_widget",
+    notification_outcome: "pending"
+  }, overrides || {});
+}
+
+test("appointments default request sends NO bounds to the exact endpoint", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validAppointmentsBody() }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "expected ok outcome");
+  assertEqual(outcome.data.timezone_name, "America/New_York", "tz passthrough");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("appointments query serializes ONLY start_day/end_day, encoded", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments?start_day=2026-07-16&end_day=2026-07-22",
+      method: "GET" },
+    { status: 200, json: validAppointmentsBody() }
+  );
+  const outcome = await env.data.getAppointments({
+    start_day: "2026-07-16", end_day: "2026-07-22",
+    client_id: "smuggled", evil: "1"   /* not in the vocabulary: never sent */
+  });
+  assert(outcome.ok, "expected ok outcome");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request, no smuggled params");
+});
+
+test("buildAppointmentsQuery omits empty values and unknown names (pure)", () => {
+  const env = makeData();
+  assertEqual(env.data.buildAppointmentsQuery({}), "", "no params -> no query");
+  assertEqual(env.data.buildAppointmentsQuery(
+    { start_day: "", end_day: null, client_id: "x" }), "",
+    "empty and unknown omitted");
+  assertEqual(env.data.buildAppointmentsQuery(
+    { start_day: "2026-07-16", end_day: "2026-07-22" }),
+    "?start_day=2026-07-16&end_day=2026-07-22", "fixed order, both present");
+});
+
+test("appointments 200 with a valid member is ok and passes through", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody(
+        { appointments: [validAppointmentMember()] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "expected ok outcome");
+  assertEqual(outcome.data.appointments.length, 1, "member passthrough");
+  assertEqual(outcome.data.appointments[0].notification_outcome, "pending",
+    "outcome passthrough");
+});
+
+test("appointments validator fails closed on a missing timezone_name", async () => {
+  const env = makeData();
+  seedSession(env);
+  const body = validAppointmentsBody();
+  delete body.timezone_name;
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: body }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "missing timezone must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("F2 bite: appointments validator fails closed on a missing start_day", async () => {
+  const env = makeData();
+  seedSession(env);
+  const body = validAppointmentsBody();
+  delete body.start_day;
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: body }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "missing start_day must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("F2 bite: appointments validator fails closed on a malformed end_day", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ end_day: "not-a-date" }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "malformed end_day must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("F2 bite: appointments validator fails closed on a member missing start_datetime", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember();
+  delete bad.start_datetime;   /* the appointment TIME the page formats */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "member without a usable time must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("F2 bite: appointments validator fails closed on a member with empty start_datetime", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember({ start_datetime: "" });
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "empty start_datetime must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: impossible start_day (2026-99-12) fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ start_day: "2026-99-12" }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "impossible month must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: impossible end_day (2026-02-99) fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ end_day: "2026-02-99" }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "impossible day must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: non-leap invalid end_day (2027-02-29) fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  /* 2027 is not a leap year, so Feb 29 does not exist. */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ end_day: "2027-02-29" }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "non-leap Feb 29 must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: a real leap date (2028-02-29) is accepted", async () => {
+  const env = makeData();
+  seedSession(env);
+  /* 2028 IS a leap year - proving the check rejects impossibility, not all
+   * Feb 29 dates (no false positives). */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody(
+        { start_day: "2028-02-29", end_day: "2028-03-06" }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "a real leap-day date must be accepted");
+});
+
+test("R1 bite: unparseable start_datetime (not-a-date) fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember({ start_datetime: "not-a-date" });
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "unparseable start_datetime must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: member missing end_datetime fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember();
+  delete bad.end_datetime;   /* required appointment-window field */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "missing end_datetime must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("R1 bite: member with unparseable end_datetime fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember({ end_datetime: "nope" });
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "unparseable end_datetime must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+/* R1-R: start_datetime / end_datetime must be semantically-valid UTC ISO-8601
+ * instants in the exact form the backend emits (Z designator). These bites
+ * fail against v1.0.2 (which accepted any Date-parseable string) and pass
+ * under v1.0.3. */
+async function _expectMemberRejected(env, member, why) {
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [member] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, why + " must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+}
+
+test("R1-R bite: start_datetime with NO timezone designator fails closed", async () => {
+  /* "2026-08-12T10:00:00" parses in DEVICE time - device-dependent, rejected. */
+  await _expectMemberRejected(makeData(),
+    validAppointmentMember({ start_datetime: "2026-08-12T10:00:00" }),
+    "a naive (no-designator) start_datetime");
+});
+
+test("R1-R bite: date-only start_datetime (no time) fails closed", async () => {
+  /* "2026-08-12" is a date, not an instant. */
+  await _expectMemberRejected(makeData(),
+    validAppointmentMember({ start_datetime: "2026-08-12" }),
+    "a date-only start_datetime");
+});
+
+test("R1-R bite: JS-normalized impossible instant (2026-02-30T10:00:00Z) fails closed", async () => {
+  /* new Date() silently normalizes Feb 30 to Mar 2; the component round-trip
+   * rejects it. */
+  await _expectMemberRejected(makeData(),
+    validAppointmentMember({ start_datetime: "2026-02-30T10:00:00Z" }),
+    "a JS-normalized impossible instant");
+});
+
+test("R1-R bite: end_datetime with a numeric offset (not Z) fails closed", async () => {
+  /* The backend on this baseline emits Z, never +00:00; an offset form is
+   * outside the actual wire contract and is rejected (not broadened). */
+  await _expectMemberRejected(makeData(),
+    validAppointmentMember({ end_datetime: "2026-08-12T10:00:00+00:00" }),
+    "an offset-form end_datetime outside the wire contract");
+});
+
+test("R1-R bite: out-of-range time field (25:00:00Z) fails closed", async () => {
+  await _expectMemberRejected(makeData(),
+    validAppointmentMember({ start_datetime: "2026-08-12T25:00:00Z" }),
+    "an out-of-range hour");
+});
+
+test("R1-R positive: whole-second Z instant is accepted (real backend form)", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [
+      validAppointmentMember({
+        start_datetime: "2026-07-16T14:00:00Z",
+        end_datetime: "2026-07-16T14:45:00Z" }) ] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "the real whole-second Z form must be accepted");
+});
+
+test("R1-R positive: fractional-second Z instant is accepted (real backend form)", async () => {
+  const env = makeData();
+  seedSession(env);
+  /* Postgres timestamptz can carry microseconds; Pydantic renders .ffffffZ. */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [
+      validAppointmentMember({
+        start_datetime: "2026-07-16T14:00:00.123456Z",
+        end_datetime: "2026-07-16T14:45:00.007000Z" }) ] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "the real fractional-second Z form must be accepted");
+});
+
+test("R1-R positive: a real leap-day instant (2028-02-29T00:00:00Z) is accepted", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [
+      validAppointmentMember({
+        start_datetime: "2028-02-29T00:00:00Z",
+        end_datetime: "2028-02-29T00:30:00Z" }) ] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(outcome.ok, "a real leap-day instant must be accepted (no false positive)");
+});
+
+test("appointments validator fails closed on a malformed member", async () => {
+  const env = makeData();
+  seedSession(env);
+  const bad = validAppointmentMember();
+  delete bad.notification_outcome;   /* a field the page dereferences */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: [bad] }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "malformed member must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("appointments validator fails closed when appointments is not an array", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: validAppointmentsBody({ appointments: null }) }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "non-array appointments must fail closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed");
+});
+
+test("appointments 401 refresh-and-retry, then final unauthorized", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments", method: "GET" },
+    { status: 401, json: {} });
+  h.expectConfigLoad(env.fetch);
+  env.fetch.expect(
+    { urlIncludes: "grant_type=refresh_token", method: "POST" },
+    { status: 401, json: {} }
+  );
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "a failed refresh after 401 is not ok");
+  assertEqual(outcome.state, "unauthorized", "final unauthorized");
+});
+
+test("appointments 5xx maps to unavailable", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments", method: "GET" },
+    { status: 503, json: {} });
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "5xx not ok");
+  assertEqual(outcome.state, "unavailable", "5xx -> unavailable");
+});
+
+test("no session means NO appointments request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  const outcome = await env.data.getAppointments({});
+  assert(!outcome.ok, "no session -> not ok");
+  assertEqual(outcome.state, "signed_out", "signed_out with zero requests");
+  assertEqual(env.fetch.remaining(), 0, "no request was made");
+});

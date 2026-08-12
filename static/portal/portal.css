@@ -318,6 +318,18 @@ body {
 
 .portal-pager .portal-button:disabled { opacity: 0.5; cursor: default; }
 
+/* Portal Appointments v1: the week range navigation bar (prev / label /
+ * next), matching the pager layout. */
+.portal-appt-range {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.portal-appt-range .portal-button { width: auto; padding: 8px 14px; }
+.portal-appt-range .portal-button:disabled { opacity: 0.5; cursor: default; }
+
 .portal-detail-fields {
   display: grid;
   grid-template-columns: minmax(120px, max-content) 1fr;

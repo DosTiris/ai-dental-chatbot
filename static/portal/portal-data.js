@@ -41,6 +41,14 @@
    * app, so calls are same-origin by design - the P3-A convention). */
   var DASHBOARD_URL = "/portal/dashboard";
   var LEADS_URL = "/portal/leads";
+  var APPOINTMENTS_URL = "/portal/appointments";
+
+  /* Closed vocabulary of appointments query parameter names. Like
+   * LIST_PARAM_NAMES, anything not in this list is NEVER serialized, so no
+   * caller mistake can turn into a new request channel (Constitution 4.5).
+   * There is deliberately NO tenant parameter: tenancy is the verified
+   * bearer token alone. */
+  var APPOINTMENTS_PARAM_NAMES = ["start_day", "end_day"];
 
   /* Closed vocabulary of list query parameter names. Anything not in this
    * list is NEVER serialized onto a request, so no caller mistake can turn
@@ -70,6 +78,29 @@
       var parts = [];
       for (var i = 0; i < LIST_PARAM_NAMES.length; i++) {
         var name = LIST_PARAM_NAMES[i];
+        var value = params[name];
+        if (value === undefined || value === null || value === "") {
+          continue;
+        }
+        parts.push(name + "=" + encodeURIComponent(String(value)));
+      }
+      return parts.length === 0 ? "" : "?" + parts.join("&");
+    }
+
+    /*
+     * Purpose: build the query string for the appointments list from the
+     * closed appointments parameter vocabulary (start_day, end_day only).
+     * Business rules: only APPOINTMENTS_PARAM_NAMES are serialized, in that
+     * fixed order; undefined/null/empty values are omitted entirely (the
+     * backend treats both-absent as "the default seven-day range"); every
+     * value is URI-encoded. No tenant parameter can ever be sent.
+     * Returns: "" or "?start_day=...&end_day=...".
+     */
+    function buildAppointmentsQuery(params) {
+      params = params || {};
+      var parts = [];
+      for (var i = 0; i < APPOINTMENTS_PARAM_NAMES.length; i++) {
+        var name = APPOINTMENTS_PARAM_NAMES[i];
         var value = params[name];
         if (value === undefined || value === null || value === "") {
           continue;
@@ -154,6 +185,137 @@
         isCount(body.limit) &&
         isCount(body.offset) &&
         isValidLeadArray(body.leads);
+    }
+
+    /* A REAL calendar date in YYYY-MM-DD form (the backend's start_day /
+     * end_day wire form). Structural shape is necessary but NOT sufficient:
+     * "2026-99-12" and "2026-02-99" are regex-shaped but impossible, and
+     * accepting them would let week navigation compute from a nonsense
+     * anchor (R1). Validation is timezone-INDEPENDENT: the components are
+     * parsed as integers and round-tripped through Date.UTC (UTC only, never
+     * device time); a real date's UTC Y/M/D come back exactly equal, while
+     * an out-of-range month or day overflows to a different date and is
+     * rejected. */
+    function isRealCalendarDate(value) {
+      if (typeof value !== "string" ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return false;
+      }
+      var parts = value.split("-");
+      var y = Number(parts[0]);
+      var m = Number(parts[1]);
+      var d = Number(parts[2]);
+      /* Date.UTC normalizes overflow (month 99 -> a later year, day 99 ->
+       * a later month), so a genuine date is the ONLY input whose UTC
+       * components match the parsed numbers exactly. */
+      var probe = new Date(Date.UTC(y, m - 1, d));
+      return probe.getUTCFullYear() === y &&
+        probe.getUTCMonth() === m - 1 &&
+        probe.getUTCDate() === d;
+    }
+
+    /* A genuinely valid UTC ISO-8601 instant in EXACTLY the form this
+     * frozen backend emits. Determined by inspecting the actual
+     * FastAPI/Pydantic v2 serialization on baseline 0316b36c: every
+     * datetime field passes through ensure_utc (aware UTC) and Pydantic
+     * renders it as YYYY-MM-DDTHH:MM:SS[.ffffff]Z - always the 'T'
+     * separator, always the 'Z' designator (never '+00:00'), with optional
+     * fractional seconds. Two independent gates, neither depending on the
+     * device timezone:
+     *   1) STRICT GRAMMAR: the string must match that exact shape. This
+     *      alone rejects "2026-08-12T10:00:00" (no designator, which would
+     *      otherwise be parsed in DEVICE time), "2026-08-12" (date only),
+     *      and "not-a-date".
+     *   2) REAL CALENDAR INSTANT: the Y/M/D/h/m/s components are
+     *      round-tripped through Date.UTC and must come back exactly equal,
+     *      so an impossible date like "2026-02-30T10:00:00Z" - which
+     *      JavaScript's Date parser silently NORMALIZES to March 2 - is
+     *      rejected instead of accepted.
+     * Fractional seconds are validated for shape only (any run of digits);
+     * their magnitude cannot make an instant invalid. */
+    var UTC_INSTANT_RE =
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
+
+    function isValidUtcInstant(value) {
+      if (typeof value !== "string") {
+        return false;
+      }
+      var match = UTC_INSTANT_RE.exec(value);
+      if (!match) {
+        return false;
+      }
+      var y = Number(match[1]);
+      var mo = Number(match[2]);
+      var d = Number(match[3]);
+      var h = Number(match[4]);
+      var mi = Number(match[5]);
+      var s = Number(match[6]);
+      /* Reject the obvious out-of-range field values up front (Date.UTC
+       * would happily roll 24:00 or 13 months over into the next unit). */
+      if (mo < 1 || mo > 12 || d < 1 || d > 31 ||
+          h > 23 || mi > 59 || s > 59) {
+        return false;
+      }
+      /* Date.UTC normalizes overflow (Feb 30 -> Mar 2, etc.), so a genuine
+       * instant is the ONLY input whose UTC components come back equal. All
+       * arithmetic is in UTC: no device-time dependence. */
+      var probe = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+      return probe.getUTCFullYear() === y &&
+        probe.getUTCMonth() === mo - 1 &&
+        probe.getUTCDate() === d &&
+        probe.getUTCHours() === h &&
+        probe.getUTCMinutes() === mi &&
+        probe.getUTCSeconds() === s;
+    }
+
+    /* Minimum TRUSTWORTHY appointment member: a real object carrying a
+     * non-empty string appointment_id (the pages key every row off it), a
+     * non-empty string status and notification_outcome (both drive a
+     * rendered label), AND a genuinely parseable start_datetime AND
+     * end_datetime - the appointment window. start_datetime is the TIME the
+     * page formats in the office timezone; end_datetime is part of the
+     * backend's required appointment wire contract, so both are pinned here
+     * even though the current list UI renders only the start (R1). A member
+     * without usable timing is not trustworthy to render, so it fails
+     * closed. Genuinely-nullable display fields (patient_email, reason,
+     * confirmed_at, ...) stay permissive, the same rule isValidLeadMember
+     * follows. */
+    function isValidAppointmentMember(appointment) {
+      return appointment !== null && typeof appointment === "object" &&
+        typeof appointment.appointment_id === "string" &&
+        appointment.appointment_id !== "" &&
+        typeof appointment.status === "string" &&
+        appointment.status !== "" &&
+        typeof appointment.notification_outcome === "string" &&
+        appointment.notification_outcome !== "" &&
+        isValidUtcInstant(appointment.start_datetime) &&
+        isValidUtcInstant(appointment.end_datetime);
+    }
+
+    function isValidAppointmentArray(list) {
+      if (!Array.isArray(list)) {
+        return false;
+      }
+      for (var i = 0; i < list.length; i++) {
+        if (!isValidAppointmentMember(list[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /* The appointments envelope: a non-empty string office timezone the
+     * pages MUST format times in, the echoed local-day bounds start_day and
+     * end_day (BOTH required and BOTH REAL calendar dates - the pages render
+     * the range label and derive week navigation from them, so a nonsense
+     * bound must fail closed, R1), and a valid appointment array. A
+     * malformed success is a failure (fail closed) - never rendered. */
+    function isValidAppointmentListBody(body) {
+      return typeof body.timezone_name === "string" &&
+        body.timezone_name !== "" &&
+        isRealCalendarDate(body.start_day) &&
+        isRealCalendarDate(body.end_day) &&
+        isValidAppointmentArray(body.appointments);
     }
 
     function isValidLeadDetailBody(body) {
@@ -365,8 +527,18 @@
             expected_office_note_updated_at: expectedToken },
           isValidWorkflowBody);
       },
-      /* Exported for the Node suite (pure function). */
-      buildLeadsQuery: buildLeadsQuery
+      /* GET /portal/appointments - the office's appointments for a local-day
+       * range. params may carry ONLY the closed APPOINTMENTS_PARAM_NAMES
+       * vocabulary; both omitted requests the backend default seven-day
+       * range. Tenancy is the verified bearer token alone. */
+      getAppointments: function (params) {
+        return authorizedGet(
+          APPOINTMENTS_URL + buildAppointmentsQuery(params),
+          isValidAppointmentListBody);
+      },
+      /* Exported for the Node suite (pure functions). */
+      buildLeadsQuery: buildLeadsQuery,
+      buildAppointmentsQuery: buildAppointmentsQuery
     };
   }
 

@@ -45,7 +45,9 @@
     workflow_saved_note: "Note saved.",
     workflow_cleared_note: "Note cleared.",
     workflow_note_empty: "Enter a note before saving, or use Clear note.",
-    workflow_failed: "The change was not saved. Please try again."
+    workflow_failed: "The change was not saved. Please try again.",
+    appointments_empty: "No appointments in this range.",
+    appointments_tz_note_prefix: "Times shown in the office timezone: "
   };
 
   /* ------------------------------------------------------------------ */
@@ -125,6 +127,124 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Appointments pure presentation helpers (exported for the Node suite)*/
+  /* ------------------------------------------------------------------ */
+
+  /* Appointment lifecycle labels (the backend AppointmentStatus vocabulary).
+   * An unknown value renders as itself rather than being hidden. */
+  var APPOINTMENT_STATUS_LABELS = {
+    "pending": "Pending",
+    "confirmed": "Confirmed",
+    "cancelled": "Cancelled",
+    "completed": "Completed",
+    "no_show": "No-show"
+  };
+
+  function appointmentStatusLabel(status) {
+    if (typeof status !== "string" || status === "") {
+      return "";
+    }
+    return APPOINTMENT_STATUS_LABELS[status] || status;
+  }
+
+  /* The safe derived notification outcome (backend closed vocabulary:
+   * sent | failed | pending). Office-facing wording; an unknown value
+   * renders as itself so nothing is silently dropped. */
+  var NOTIFICATION_OUTCOME_LABELS = {
+    "sent": "Office notified",
+    "failed": "Notification failed",
+    "pending": "Notification pending"
+  };
+
+  function notificationOutcomeLabel(outcome) {
+    if (typeof outcome !== "string" || outcome === "") {
+      return "";
+    }
+    return NOTIFICATION_OUTCOME_LABELS[outcome] || outcome;
+  }
+
+  /*
+   * Purpose: format a UTC ISO instant in a SPECIFIC IANA timezone - the
+   * office timezone the backend returns, NEVER the browser/device timezone.
+   * This is the single reason appointment times are trustworthy for staff
+   * in another timezone.
+   * Inputs: isoText (a UTC instant string) and timeZone (an IANA name).
+   * Returns: a formatted local-to-the-office string, or "" for missing or
+   * unparseable input (an absent time renders as absent, never as
+   * "Invalid Date"). If the timezone is unsupported by the runtime, falls
+   * back to a UTC-suffixed render rather than silently using device time -
+   * a wrong-timezone time would mislead staff about when to expect a
+   * patient (Constitution 4/16: failure is visible, never hidden).
+   */
+  function formatInTimeZone(isoText, timeZone) {
+    if (typeof isoText !== "string" || isoText === "") {
+      return "";
+    }
+    var parsed = new Date(isoText);
+    if (isNaN(parsed.getTime())) {
+      return "";
+    }
+    var options = {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "numeric", minute: "2-digit"
+    };
+    if (typeof timeZone === "string" && timeZone !== "") {
+      try {
+        return new Intl.DateTimeFormat(undefined,
+          Object.assign({ timeZone: timeZone }, options)).format(parsed) +
+          " (" + timeZone + ")";
+      } catch (err) {
+        /* Unsupported timezone name: fall back to an explicit UTC render so
+         * the value is never silently shown in device time. */
+        return new Intl.DateTimeFormat(undefined,
+          Object.assign({ timeZone: "UTC" }, options)).format(parsed) +
+          " (UTC)";
+      }
+    }
+    /* No timezone supplied: explicit UTC, never implicit device time. */
+    return new Intl.DateTimeFormat(undefined,
+      Object.assign({ timeZone: "UTC" }, options)).format(parsed) + " (UTC)";
+  }
+
+  /*
+   * Purpose: shift an ISO local-day string (YYYY-MM-DD) by a whole number
+   * of days, purely (no timezone math - these are calendar-date labels the
+   * office navigates by, and the backend re-derives DST-safe UTC windows
+   * from them). Returns a YYYY-MM-DD string, or "" for malformed input.
+   */
+  function shiftLocalDay(dayText, deltaDays) {
+    if (typeof dayText !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(dayText)) {
+      return "";
+    }
+    /* Anchor at UTC noon so a +/- day shift can never cross a day boundary
+     * through the Date object's own timezone handling. */
+    var base = new Date(dayText + "T12:00:00Z");
+    if (isNaN(base.getTime())) {
+      return "";
+    }
+    base.setUTCDate(base.getUTCDate() + deltaDays);
+    var y = base.getUTCFullYear();
+    var m = String(base.getUTCMonth() + 1).padStart(2, "0");
+    var d = String(base.getUTCDate()).padStart(2, "0");
+    return y + "-" + m + "-" + d;
+  }
+
+  /*
+   * Purpose: the range label for the appointments week view, in one
+   * testable place.
+   * Returns: e.g. "Jul 16 - Jul 22, 2026", or "" when either bound is
+   * missing.
+   */
+  function appointmentsRangeLabel(startDay, endDay) {
+    if (typeof startDay !== "string" || startDay === "" ||
+        typeof endDay !== "string" || endDay === "") {
+      return "";
+    }
+    return startDay + "  \u2192  " + endDay;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Factory                                                             */
   /* ------------------------------------------------------------------ */
 
@@ -145,7 +265,21 @@
     var leadsQuery = { status: "", q: "", limit: LIST_PAGE_LIMIT, offset: 0 };
 
     /* Stale-response guards: one monotonically increasing id per page. */
-    var requestIds = { dashboard: 0, leads: 0, detail: 0 };
+    var requestIds = { dashboard: 0, leads: 0, detail: 0, appointments: 0 };
+
+    /* Appointments week-navigation state. weekOffset 0 = the backend
+     * DEFAULT seven-day range (both bounds omitted, so the backend anchors
+     * "today" in the OFFICE timezone). A non-zero offset navigates whole
+     * seven-day windows relative to the last-known default start returned by
+     * the backend; explicit bounds are then sent. currentRange holds the
+     * bounds the backend actually echoed, so navigation is always relative
+     * to real, DST-safe local dates (never a browser-computed "today"). */
+    var appointments = {
+      weekOffset: 0,
+      defaultStart: null,   /* the office-local "today" the backend anchored */
+      currentStart: null,   /* the start_day the backend echoed for this view */
+      currentEnd: null      /* the end_day the backend echoed for this view */
+    };
 
     /* P3-B2 office workflow state: the AUTHORITATIVE lead (set the
      * moment a lead is opened - every mutation response is bound to it
@@ -181,15 +315,20 @@
 
     /* Show exactly one page section; hide the rest (single-meaning state). */
     function showPage(pageId) {
-      var pages = ["page-dashboard", "page-leads", "page-lead-detail"];
+      var pages = ["page-dashboard", "page-leads", "page-lead-detail",
+        "page-appointments"];
       for (var i = 0; i < pages.length; i++) {
         byId(pages[i]).hidden = pages[i] !== pageId;
       }
       /* The nav highlights the SECTION the visible page belongs to; the
-       * detail page belongs to Leads. */
-      var leadsSection = pageId !== "page-dashboard";
-      byId("nav-dashboard").classList.toggle("portal-nav-active", !leadsSection);
-      byId("nav-leads").classList.toggle("portal-nav-active", leadsSection);
+       * detail page belongs to Leads, and Appointments is its own section. */
+      var isAppointments = pageId === "page-appointments";
+      var isDashboard = pageId === "page-dashboard";
+      var isLeads = !isAppointments && !isDashboard;
+      byId("nav-dashboard").classList.toggle("portal-nav-active", isDashboard);
+      byId("nav-leads").classList.toggle("portal-nav-active", isLeads);
+      byId("nav-appointments").classList.toggle("portal-nav-active",
+        isAppointments);
     }
 
     /*
@@ -679,6 +818,187 @@
     }
 
     /* ---------------------------------------------------------------- */
+    /* Appointments (read-only)                                          */
+    /* ---------------------------------------------------------------- */
+
+    /*
+     * Purpose: build ONE appointment list row via textContent only (never
+     * markup), so captured patient text can never inject HTML into the
+     * office's browser (the buildLeadRow convention). Times are formatted in
+     * the office timezone the backend returned, NOT the device timezone.
+     */
+    function buildAppointmentRow(appointment, timezoneName) {
+      var item = doc.createElement("li");
+      item.className = "portal-lead-item";
+      var row = doc.createElement("div");
+      row.className = "portal-lead-row";
+
+      var name = doc.createElement("span");
+      name.className = "portal-lead-name";
+      name.textContent = appointment.patient_name || "(no name)";
+      row.appendChild(name);
+
+      /* When (start) in the OFFICE timezone. */
+      var when = doc.createElement("span");
+      when.className = "portal-lead-meta";
+      when.textContent = formatInTimeZone(appointment.start_datetime,
+        timezoneName);
+      row.appendChild(when);
+
+      /* Contact (phone, optional email). */
+      var contact = doc.createElement("span");
+      contact.className = "portal-lead-contact";
+      contact.textContent = [appointment.patient_phone,
+        appointment.patient_email]
+        .filter(function (value) { return !!value; }).join("  ");
+      row.appendChild(contact);
+
+      /* Status + patient type + urgency + notification outcome badges. */
+      var badges = [
+        appointmentStatusLabel(appointment.status),
+        appointment.new_or_returning || "",
+        appointment.urgency || "",
+        notificationOutcomeLabel(appointment.notification_outcome)
+      ].filter(function (value) { return !!value; });
+      for (var i = 0; i < badges.length; i++) {
+        var badge = doc.createElement("span");
+        badge.className = "portal-badge";
+        badge.textContent = badges[i];
+        row.appendChild(badge);
+      }
+
+      /* Reason/service context, when present. */
+      if (appointment.reason) {
+        var reason = doc.createElement("span");
+        reason.className = "portal-lead-contact";
+        reason.textContent = appointment.reason;
+        row.appendChild(reason);
+      }
+
+      item.appendChild(row);
+      return item;
+    }
+
+    function renderAppointmentsPage(body) {
+      /* Record the bounds the backend actually used, so week navigation is
+       * always relative to real DST-safe local dates. On the default view
+       * (weekOffset 0) the echoed start_day IS the office-local "today". */
+      appointments.currentStart = body.start_day;
+      appointments.currentEnd = body.end_day;
+      if (appointments.weekOffset === 0) {
+        appointments.defaultStart = body.start_day;
+      }
+
+      setText("appt-timezone-note",
+        MESSAGES.appointments_tz_note_prefix + body.timezone_name);
+      setText("appt-range-label",
+        appointmentsRangeLabel(body.start_day, body.end_day));
+
+      var list = byId("appointments-list");
+      clearChildren(list);
+      if (!body.appointments || body.appointments.length === 0) {
+        setText("appointments-state", MESSAGES.appointments_empty);
+      } else {
+        setText("appointments-state", "");
+        for (var i = 0; i < body.appointments.length; i++) {
+          list.appendChild(
+            buildAppointmentRow(body.appointments[i], body.timezone_name));
+        }
+      }
+      /* F3: navigation is only safe once an AUTHORITATIVE default start is
+       * established by a resolved default (weekOffset 0) response. Both
+       * controls stay disabled until then, so a Next/Previous click can
+       * never compute an explicit range from a stale or absent anchor. Once
+       * an anchor exists they are enabled (the office may look back or
+       * ahead). Re-entry clears the anchor (openAppointments), so a fresh
+       * visit re-disables until its own default resolves. */
+      var haveAnchor = appointments.defaultStart !== null;
+      byId("appt-prev").disabled = !haveAnchor;
+      byId("appt-next").disabled = !haveAnchor;
+    }
+
+    /*
+     * Purpose: load the appointments for the current week offset. Offset 0
+     * sends NO bounds (the backend default, office-anchored). A non-zero
+     * offset sends explicit start_day/end_day computed by shifting the
+     * known default start by whole weeks - so navigation never depends on a
+     * browser-computed "today".
+     * Stale-response guard: a superseded response is dropped.
+     */
+    function loadAppointments() {
+      var requestId = ++requestIds.appointments;
+      setText("appointments-state", MESSAGES.loading);
+
+      var params = {};
+      if (appointments.weekOffset !== 0) {
+        /* F3: a non-zero offset REQUIRES an authoritative anchor. If none is
+         * established (should be unreachable - the controls are disabled and
+         * the handlers guard - but defended here too), fall back to the
+         * default week rather than computing a range from a null anchor. */
+        if (appointments.defaultStart === null) {
+          appointments.weekOffset = 0;
+        } else {
+          var start = shiftLocalDay(appointments.defaultStart,
+            appointments.weekOffset * 7);
+          var end = shiftLocalDay(start, 6);
+          if (start !== "" && end !== "") {
+            params = { start_day: start, end_day: end };
+          } else {
+            /* A malformed anchor can never drive a request. */
+            appointments.weekOffset = 0;
+          }
+        }
+      }
+
+      data.getAppointments(params).then(function (outcome) {
+        if (requestId !== requestIds.appointments) {
+          return; /* superseded - a stale page must never render */
+        }
+        if (!outcome.ok) {
+          handleFailure(outcome, "appointments-state");
+          return;
+        }
+        renderAppointmentsPage(outcome.data);
+      });
+    }
+
+    function onApptPrev() {
+      /* F3 guard: refuse to navigate from a stale/absent anchor. The
+       * control is disabled until an anchor exists, and this guard makes the
+       * handler itself safe even if a click races the disable. */
+      if (appointments.defaultStart === null) {
+        return;
+      }
+      appointments.weekOffset -= 1;
+      loadAppointments();
+    }
+
+    function onApptNext() {
+      if (appointments.defaultStart === null) {
+        return;
+      }
+      appointments.weekOffset += 1;
+      loadAppointments();
+    }
+
+    function openAppointments() {
+      /* F3: re-enter at the default week AND clear the previous visit's
+       * anchor and echoed bounds, so navigation is impossible from a stale
+       * defaultStart while the fresh default GET is still in flight. The
+       * bumped request id (in loadAppointments) plus the disabled controls
+       * (rendered only once the fresh default resolves) close the ordering
+       * hole ChatGPT reproduced. */
+      appointments.weekOffset = 0;
+      appointments.defaultStart = null;
+      appointments.currentStart = null;
+      appointments.currentEnd = null;
+      byId("appt-prev").disabled = true;
+      byId("appt-next").disabled = true;
+      showPage("page-appointments");
+      loadAppointments();
+    }
+
+    /* ---------------------------------------------------------------- */
     /* Entry, reset, wiring                                              */
     /* ---------------------------------------------------------------- */
 
@@ -692,7 +1012,19 @@
       requestIds.dashboard += 1;   /* invalidate any in-flight responses */
       requestIds.leads += 1;
       requestIds.detail += 1;
+      requestIds.appointments += 1;
       leadsQuery = { status: "", q: "", limit: LIST_PAGE_LIMIT, offset: 0 };
+      /* Appointments week-navigation state and rendered content wipe: no
+       * office's appointment times or patient contact may linger behind the
+       * login view on a shared front-desk computer. */
+      appointments.weekOffset = 0;
+      appointments.defaultStart = null;
+      appointments.currentStart = null;
+      appointments.currentEnd = null;
+      setText("appointments-state", "");
+      setText("appt-range-label", "");
+      setText("appt-timezone-note", "");
+      clearChildren(byId("appointments-list"));
       setText("dashboard-state", "");
       byId("dashboard-counts").hidden = true;
       setText("count-conversations", "");
@@ -747,6 +1079,11 @@
         showPage("page-leads");
         loadLeads();
       });
+      byId("nav-appointments").addEventListener("click", function () {
+        openAppointments();
+      });
+      byId("appt-prev").addEventListener("click", onApptPrev);
+      byId("appt-next").addEventListener("click", onApptNext);
       byId("leads-filter-form").addEventListener("submit", onFiltersSubmit);
       byId("leads-prev").addEventListener("click", onPagerPrev);
       byId("leads-next").addEventListener("click", onPagerNext);
@@ -770,7 +1107,12 @@
     leadBadges: leadBadges,
     statusLabel: statusLabel,
     pagerModel: pagerModel,
-    emptyLeadsMessage: emptyLeadsMessage
+    emptyLeadsMessage: emptyLeadsMessage,
+    appointmentStatusLabel: appointmentStatusLabel,
+    notificationOutcomeLabel: notificationOutcomeLabel,
+    formatInTimeZone: formatInTimeZone,
+    shiftLocalDay: shiftLocalDay,
+    appointmentsRangeLabel: appointmentsRangeLabel
   };
 
   /* Export for both the browser (window) and the Node test harness. */

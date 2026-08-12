@@ -27,6 +27,13 @@ from app.routes import portal as portal_routes  # Office Portal endpoints
 # binding are REUSED from the P2 owner (portal_auth via portal.py) - this
 # router adds no new auth path and performs no database write.
 from app.routes import portal_leads as portal_leads_routes  # Portal leads (read-only)
+# Portal Appointments v1 (Office Portal read-only appointments slice):
+# transport wiring lives in app/routes/portal_appointments.py; the query is
+# the existing tenant-scoped appointment_repository read and DST-safe window
+# owner. Authentication and tenant binding are REUSED from the P2 owner
+# (portal_auth via portal.py) - this router adds no new auth path, no
+# repository, no migration, and performs no database write.
+from app.routes import portal_appointments as portal_appointments_routes
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -73,6 +80,7 @@ app.include_router(demo_router)
 app.include_router(calendar_routes.router)  # PATCH 3: calendar admin routes
 app.include_router(portal_routes.router)  # P2: office portal auth foundation
 app.include_router(portal_leads_routes.router)  # P3-B1: portal read-only dashboard/leads
+app.include_router(portal_appointments_routes.router)  # Portal Appointments v1: read-only
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

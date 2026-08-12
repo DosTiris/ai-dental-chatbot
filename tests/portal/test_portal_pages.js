@@ -119,7 +119,10 @@ const PAGE_ELEMENT_IDS = [
   "detail-transcript-note",
   "detail-office-status", "detail-status-meta", "detail-status-save",
   "detail-status-feedback", "detail-office-note", "detail-note-meta",
-  "detail-note-save", "detail-note-clear", "detail-note-feedback"
+  "detail-note-save", "detail-note-clear", "detail-note-feedback",
+  "nav-appointments", "page-appointments", "appointments-state",
+  "appointments-list", "appt-range-label", "appt-timezone-note",
+  "appt-prev", "appt-next"
 ];
 
 function makeDocument() {
@@ -136,9 +139,9 @@ function makeDocument() {
  * a pending deferred), and records its arguments for assertions. */
 function makeFakeData() {
   const queues = { getDashboard: [], listLeads: [], getLeadDetail: [],
-    putLeadStatus: [], putLeadNote: [] };
+    putLeadStatus: [], putLeadNote: [], getAppointments: [] };
   const calls = { getDashboard: [], listLeads: [], getLeadDetail: [],
-    putLeadStatus: [], putLeadNote: [] };
+    putLeadStatus: [], putLeadNote: [], getAppointments: [] };
   function next(name, args) {
     calls[name].push(args);
     if (!queues[name].length) {
@@ -155,6 +158,7 @@ function makeFakeData() {
       next("putLeadStatus", { leadId, status, token }),
     putLeadNote: (leadId, note, token) =>
       next("putLeadNote", { leadId, note, token }),
+    getAppointments: (params) => next("getAppointments", params),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -1049,4 +1053,346 @@ test("v1.0.2 F4 bite B: a stale conflict refresh cannot roll back a status that 
   await flush();
   assertEqual(env.data.calls.putLeadStatus[1].token, "2026-08-12T04:00:00Z",
     "the status token was NOT rolled back by the stale refresh");
+});
+
+/* ------------------------------------------------------------------ */
+/* Portal Appointments v1: read-only appointments page                  */
+/* ------------------------------------------------------------------ */
+
+function appointmentFixture(overrides) {
+  return Object.assign({
+    appointment_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    patient_name: "Kevin Alvarado",
+    patient_phone: "516-555-1234",
+    patient_email: null,
+    new_or_returning: "new",
+    reason: "cleaning",
+    urgency: "routine",
+    start_datetime: "2026-07-16T14:00:00+00:00",
+    end_datetime: "2026-07-16T14:45:00+00:00",
+    status: "pending",
+    confirmed_at: null,
+    source: "mia_widget",
+    notification_outcome: "pending"
+  }, overrides || {});
+}
+
+function appointmentsBodyFixture(overrides) {
+  return Object.assign({
+    timezone_name: "America/New_York",
+    start_day: "2026-07-16",
+    end_day: "2026-07-22",
+    appointments: [appointmentFixture()]
+  }, overrides || {});
+}
+
+test("clicking Appointments loads and renders rows with a loading state first", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "Test Dental", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  assertEqual(env.doc._elements["page-appointments"].hidden, false,
+    "appointments page shown");
+  assertEqual(env.doc._elements["page-dashboard"].hidden, true,
+    "dashboard hidden");
+  assertEqual(env.doc._elements["appointments-state"].textContent, "Loading...",
+    "loading state visible first");
+  await flush();
+  assertEqual(env.doc._elements["appointments-state"].textContent, "",
+    "loading cleared on success");
+  assertEqual(env.doc._elements["appointments-list"].children.length, 1,
+    "one appointment row rendered");
+});
+
+test("the default appointments request sends NO bounds (backend default)", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  const params = env.data.calls.getAppointments[0];
+  assertEqual(params.start_day, undefined, "no start_day on default view");
+  assertEqual(params.end_day, undefined, "no end_day on default view");
+});
+
+test("an empty appointments range says so explicitly", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture({ appointments: [] }) });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  assert(env.doc._elements["appointments-state"].textContent
+    .indexOf("No appointments") === 0, "explicit empty message");
+  assertEqual(env.doc._elements["appointments-list"].children.length, 0,
+    "no rows");
+});
+
+test("an unavailable appointments load shows the honest error, no rows", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: false, state: "unavailable" });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  assert(env.doc._elements["appointments-state"].textContent
+    .indexOf("temporarily unavailable") !== -1, "honest error message");
+  assertEqual(env.doc._elements["appointments-list"].children.length, 0,
+    "no rows on error");
+});
+
+test("a session-loss appointments outcome hands back through onSessionLost", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: false, state: "unauthorized" });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  assertEqual(env.sessionLost[env.sessionLost.length - 1], "unauthorized",
+    "session loss routed to onSessionLost");
+});
+
+test("Next week sends explicit +7 bounds relative to the default start", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  /* Default view establishes defaultStart = 2026-07-16. */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  /* Next week: start = default + 7, end = start + 6. */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture({ start_day: "2026-07-23",
+      end_day: "2026-07-29", appointments: [] }) });
+  env.doc._elements["appt-next"].trigger("click");
+  await flush();
+  const params = env.data.calls.getAppointments[1];
+  assertEqual(params.start_day, "2026-07-23", "next start = default + 7");
+  assertEqual(params.end_day, "2026-07-29", "next end = start + 6");
+});
+
+test("Previous then Next returns to the default (offset arithmetic)", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  /* Previous week: offset -1 -> start = default - 7. */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture({ start_day: "2026-07-09",
+      end_day: "2026-07-15", appointments: [] }) });
+  env.doc._elements["appt-prev"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.getAppointments[1].start_day, "2026-07-09",
+    "previous start = default - 7");
+  /* Next week: offset back to 0 -> NO bounds (default). */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["appt-next"].trigger("click");
+  await flush();
+  assertEqual(env.data.calls.getAppointments[2].start_day, undefined,
+    "returning to offset 0 sends no bounds");
+});
+
+test("a stale appointments response never overwrites a newer one", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  /* First load is deferred (in-flight); a second click supersedes it. */
+  const slow = env.data.queueDeferred("getAppointments");
+  env.doc._elements["nav-appointments"].trigger("click");
+  /* nav re-entry resets to offset 0 and reloads; queue the fresh result. */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture({ appointments: [
+      appointmentFixture({ appointment_id: "newer", patient_name: "Newer" })
+    ] }) });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  /* Now resolve the STALE first request with different content. */
+  slow.resolve({ ok: true, data: appointmentsBodyFixture({ appointments: [
+    appointmentFixture({ appointment_id: "stale", patient_name: "Stale" })
+  ] }) });
+  await flush();
+  /* The rendered row must be the NEWER one, not the late stale response. */
+  const list = env.doc._elements["appointments-list"];
+  assertEqual(list.children.length, 1, "one row");
+  /* The row's name span is the first child of the row div. */
+  const row = list.children[0].children[0];
+  assertEqual(row.children[0].textContent, "Newer",
+    "the newer response won; the stale one was dropped");
+});
+
+test("session-loss wipe clears rendered appointment content", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  assertEqual(env.doc._elements["appointments-list"].children.length, 1,
+    "a row is present before reset");
+  env.pages.reset();
+  assertEqual(env.doc._elements["appointments-list"].children.length, 0,
+    "appointment rows wiped on reset");
+  assertEqual(env.doc._elements["appt-range-label"].textContent, "",
+    "range label wiped");
+  assertEqual(env.doc._elements["appt-timezone-note"].textContent, "",
+    "timezone note wiped");
+});
+
+test("F3 regression: re-entry with a pending default GET blocks stale-anchor navigation", async () => {
+  const env = makePages();
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.pages.enter();
+  await flush();
+
+  /* First visit: establish the OLD anchor (defaultStart = 2026-07-16). */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture() });
+  env.doc._elements["nav-appointments"].trigger("click");
+  await flush();
+  assertEqual(env.doc._elements["appt-next"].disabled, false,
+    "nav enabled once the first default resolved");
+
+  /* Navigate away (Dashboard). */
+  env.data.queue("getDashboard", { ok: true, data: {
+    practice_name: "T", total_conversations: 0, total_leads: 0,
+    urgent_leads: 0, leads_last_7_days: 0, recent_leads: [] } });
+  env.doc._elements["nav-dashboard"].trigger("click");
+  await flush();
+
+  /* Re-enter Appointments; hold the fresh default GET PENDING (unresolved). */
+  const pending = env.data.queueDeferred("getAppointments");
+  env.doc._elements["nav-appointments"].trigger("click");
+  /* At this instant the fresh default has NOT resolved: nav must be disabled
+   * and the old anchor cleared. */
+  assertEqual(env.doc._elements["appt-next"].disabled, true,
+    "Next disabled while the fresh default is in flight");
+  assertEqual(env.doc._elements["appt-prev"].disabled, true,
+    "Previous disabled while the fresh default is in flight");
+
+  /* Click Next NOW (the reproduction step). It must be a no-op: no new
+   * getAppointments call, and certainly none computed from the old anchor. */
+  const callsBefore = env.data.calls.getAppointments.length;
+  env.doc._elements["appt-next"].trigger("click");
+  assertEqual(env.data.calls.getAppointments.length, callsBefore,
+    "a Next click before the fresh anchor resolves triggers NO request");
+
+  /* Resolve the fresh default with a DIFFERENT anchor than the old visit. */
+  pending.resolve({ ok: true, data: appointmentsBodyFixture({
+    start_day: "2026-09-14", end_day: "2026-09-20", appointments: [] }) });
+  await flush();
+  assertEqual(env.doc._elements["appt-next"].disabled, false,
+    "nav re-enabled after the fresh default resolved");
+
+  /* Now Next computes from the NEW anchor (2026-09-14), never the old one. */
+  env.data.queue("getAppointments", { ok: true,
+    data: appointmentsBodyFixture({ start_day: "2026-09-21",
+      end_day: "2026-09-27", appointments: [] }) });
+  env.doc._elements["appt-next"].trigger("click");
+  await flush();
+  const last = env.data.calls.getAppointments[
+    env.data.calls.getAppointments.length - 1];
+  assertEqual(last.start_day, "2026-09-21",
+    "Next is computed from the FRESH anchor (+7), never the stale 2026-07-16");
+  assert(last.start_day !== "2026-07-23",
+    "the stale anchor's next week (2026-07-23) is never produced");
+});
+
+/* ------------------------------------------------------------------ */
+/* Appointments pure helpers                                            */
+/* ------------------------------------------------------------------ */
+
+test("formatInTimeZone renders in the OFFICE timezone, not device time", () => {
+  const env = makePages();
+  const helpers = env.helpers;
+  /* 2026-07-16T14:00:00Z is 10:00 AM in America/New_York (EDT, -4). */
+  const ny = helpers.formatInTimeZone("2026-07-16T14:00:00+00:00",
+    "America/New_York");
+  assert(ny.indexOf("America/New_York") !== -1,
+    "the office timezone is named in the output");
+  assert(ny.indexOf("10:00") !== -1, "10:00 AM local to New York");
+});
+
+test("formatInTimeZone falls back to explicit UTC, never device time", () => {
+  const env = makePages();
+  const helpers = env.helpers;
+  const bad = helpers.formatInTimeZone("2026-07-16T14:00:00+00:00",
+    "Not/AZone");
+  assert(bad.indexOf("UTC") !== -1,
+    "an unsupported timezone falls back to explicit UTC");
+});
+
+test("formatInTimeZone returns empty for missing/unparseable input", () => {
+  const env = makePages();
+  const helpers = env.helpers;
+  assertEqual(helpers.formatInTimeZone("", "America/New_York"), "",
+    "empty input -> empty");
+  assertEqual(helpers.formatInTimeZone("not-a-date", "America/New_York"), "",
+    "unparseable input -> empty, never Invalid Date");
+});
+
+test("shiftLocalDay shifts calendar dates purely and validates input", () => {
+  const env = makePages();
+  const helpers = env.helpers;
+  assertEqual(helpers.shiftLocalDay("2026-07-16", 7), "2026-07-23", "+7");
+  assertEqual(helpers.shiftLocalDay("2026-07-16", -7), "2026-07-09", "-7");
+  assertEqual(helpers.shiftLocalDay("2026-07-16", 6), "2026-07-22", "+6");
+  assertEqual(helpers.shiftLocalDay("2026-03-08", 1), "2026-03-09",
+    "crosses a DST date without slipping");
+  assertEqual(helpers.shiftLocalDay("bad", 1), "", "malformed -> empty");
+});
+
+test("appointmentStatusLabel and notificationOutcomeLabel map the vocabularies", () => {
+  const env = makePages();
+  const helpers = env.helpers;
+  assertEqual(helpers.appointmentStatusLabel("pending"), "Pending", "status");
+  assertEqual(helpers.appointmentStatusLabel("no_show"), "No-show", "status");
+  assertEqual(helpers.appointmentStatusLabel("weird"), "weird",
+    "unknown status renders as itself");
+  assertEqual(helpers.notificationOutcomeLabel("sent"), "Office notified",
+    "outcome sent");
+  assertEqual(helpers.notificationOutcomeLabel("failed"),
+    "Notification failed", "outcome failed");
+  assertEqual(helpers.notificationOutcomeLabel("pending"),
+    "Notification pending", "outcome pending");
 });

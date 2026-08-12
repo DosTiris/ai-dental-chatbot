@@ -85,6 +85,8 @@
                 type="button">Dashboard</button>
         <button id="nav-leads" class="portal-nav-button"
                 type="button">Leads</button>
+        <button id="nav-appointments" class="portal-nav-button"
+                type="button">Appointments</button>
       </nav>
       <p id="shell-status" class="portal-status" aria-live="polite"></p>
 
@@ -136,6 +138,20 @@
           <button id="leads-next" class="portal-button portal-button-secondary"
                   type="button">Next</button>
         </div>
+      </section>
+
+      <section id="page-appointments" hidden>
+        <div class="portal-appt-range">
+          <button id="appt-prev" class="portal-button portal-button-secondary"
+                  type="button">Previous week</button>
+          <span id="appt-range-label" class="portal-muted"></span>
+          <button id="appt-next" class="portal-button portal-button-secondary"
+                  type="button">Next week</button>
+        </div>
+        <p id="appt-timezone-note" class="portal-muted"></p>
+        <p id="appointments-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <ul id="appointments-list" class="portal-lead-list"></ul>
       </section>
 
       <section id="page-lead-detail" hidden>

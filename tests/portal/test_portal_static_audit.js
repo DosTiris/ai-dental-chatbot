@@ -157,12 +157,14 @@ test("audit: portal JS references no operator or Calendar admin routes", () => {
   }
 });
 
-/* P3-B1: the data layer's OWN backend allow-list - exactly the two
- * read-only endpoint literals, nothing else, and both must exist. */
-test("audit: portal-data calls only the two allow-listed read endpoints", () => {
+/* P3-B1 + Portal Appointments v1: the data layer's OWN backend allow-list -
+ * exactly the read-only endpoint literals, nothing else, and the required
+ * ones must exist. Appointments is a READ-ONLY GET like dashboard/leads. */
+test("audit: portal-data calls only the allow-listed read endpoints", () => {
   const content = read("portal-data.js");
   const portalCalls = content.match(/"\/portal\/[a-z-]*"/g) || [];
-  const allowed = ['"/portal/dashboard"', '"/portal/leads"'];
+  const allowed = ['"/portal/dashboard"', '"/portal/leads"',
+    '"/portal/appointments"'];
   for (const call of portalCalls) {
     assert(allowed.indexOf(call) !== -1,
       call + " is not an allowed portal data endpoint");
@@ -171,6 +173,8 @@ test("audit: portal-data calls only the two allow-listed read endpoints", () => 
     "dashboard endpoint literal must exist");
   assert(portalCalls.indexOf('"/portal/leads"') !== -1,
     "leads endpoint literal must exist");
+  assert(portalCalls.indexOf('"/portal/appointments"') !== -1,
+    "appointments endpoint literal must exist");
 });
 
 /* P3-B1: portal-pages is DOM glue ONLY - it owns no network surface at
