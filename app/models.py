@@ -66,6 +66,31 @@ class Conversation(Base):
     final_closed = Column(Boolean, nullable=False, server_default="false", default=False)
     booking_link_sent = Column(Boolean, nullable=False, server_default="false", default=False)
     # -----------------------------
+    # OFFICE WORKFLOW FIELDS (P3-B2-S1, migration 008)
+    # -----------------------------
+    # Office-OWNED workflow state, kept STRICTLY SEPARATE from the
+    # system-owned lead_status above. Mia never reads or writes these four
+    # columns, so a manual office status can never be clobbered by intake
+    # completion and can never make a completed intake look incomplete to
+    # routing (approved Outcome C recon finding against parent 34dcd1a6).
+    # Closed vocabulary 'contacted'/'booked'/'closed'; NULL = no current
+    # office status ('new' is deliberately NOT an office value - clearing
+    # back to NULL replaces it, so 'new' keeps its single intake meaning).
+    # The *_updated_at columns are server-owned concurrency/version
+    # tokens: the application layer must advance them on EVERY mutation,
+    # including a clear back to NULL, and never reset them to NULL - which
+    # is why the migration-008 CHECKs are one-directional (present value
+    # requires its token; a cleared value keeps its last token).
+    # Migration 008 is the SOLE schema authority for existing databases:
+    # create_all() cannot ALTER an existing table, so production must
+    # migrate FIRST and deploy this mapping second (see the 008 header;
+    # rollback order is the reverse).
+    office_status = Column(String, nullable=True)  # 'contacted'|'booked'|'closed'|NULL
+    office_status_updated_at = Column(DateTime(timezone=True), nullable=True)
+    office_note = Column(Text, nullable=True)  # one current note; trimmed; <= 2000 chars
+    office_note_updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    # -----------------------------
     # CALENDAR BOOKING STATE (Calendar MVP)
     # Owned exclusively by app/services/booking_conversation.py.
     # Valid booking_state values are defined in app/calendar_models.py.

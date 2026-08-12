@@ -1213,3 +1213,341 @@ def test_007_down_removes_table_and_preserves_others(migrated_connection):
     definitions = _index_definitions(migrated_connection)
     for index_name in (CONVERSATION_INDEX, SLOT_INDEX):
         assert index_name in definitions
+
+
+# ---------------------------------------------------------------------------
+# P3-B2-S1 - migration 008 (office workflow columns on conversations). Same
+# standard as the 005/006/007 sections: each test applies 008 itself from
+# the fixture-guaranteed baseline (001+002 plus the minimal stand-in
+# conversations table) and removes 008 in cleanup. 008's DOWN uses
+# DROP COLUMN IF EXISTS, so cleanup is safe even after a partial failure.
+#
+# The stand-in conversations table deliberately has only an id column: 008
+# must apply cleanly against ANY conversations shape because it is purely
+# additive (no existing column is read, rewritten, or constrained).
+# ---------------------------------------------------------------------------
+
+UP_008 = "008_office_lead_workflow_up.sql"
+DOWN_008 = "008_office_lead_workflow_down.sql"
+
+OFFICE_STATUS_VOCAB_CK = "ck_conversations_office_status_vocab"
+OFFICE_STATUS_TS_CK = "ck_conversations_office_status_has_ts"
+OFFICE_NOTE_SHAPE_CK = "ck_conversations_office_note_shape"
+OFFICE_NOTE_TS_CK = "ck_conversations_office_note_has_ts"
+
+OFFICE_WORKFLOW_COLUMNS = (
+    "office_status",
+    "office_status_updated_at",
+    "office_note",
+    "office_note_updated_at",
+)
+
+OFFICE_WORKFLOW_CHECKS = (
+    OFFICE_STATUS_VOCAB_CK,
+    OFFICE_STATUS_TS_CK,
+    OFFICE_NOTE_SHAPE_CK,
+    OFFICE_NOTE_TS_CK,
+)
+
+# One reusable non-NULL token value for raw INSERTs below.
+_TOKEN = "2026-08-11 12:00:00+00"
+
+
+def _conversations_columns(connection) -> dict:
+    """Read {column_name: {data_type, is_nullable, default}} for the
+    stand-in conversations table inside the throwaway schema."""
+    rows = connection.exec_driver_sql(
+        "SELECT column_name, data_type, is_nullable, column_default"
+        " FROM information_schema.columns"
+        " WHERE table_schema = %s AND table_name = 'conversations'",
+        (SCHEMA,),
+    ).fetchall()
+    return {
+        name: {"data_type": data_type, "is_nullable": is_nullable,
+               "default": default}
+        for name, data_type, is_nullable, default in rows
+    }
+
+
+def _conversations_check_names(connection) -> set:
+    """The set of CHECK constraint names on the throwaway conversations
+    table (pg_constraint contype 'c')."""
+    rows = connection.exec_driver_sql(
+        "SELECT con.conname FROM pg_constraint con"
+        " JOIN pg_class rel ON rel.oid = con.conrelid"
+        " JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace"
+        " WHERE nsp.nspname = %s AND rel.relname = 'conversations'"
+        " AND con.contype = 'c'",
+        (SCHEMA,),
+    ).fetchall()
+    return {row[0] for row in rows}
+
+
+def _assert_check_violation(excinfo, expected_constraint: str) -> None:
+    """The refusal must be SQLSTATE 23514 naming exactly our constraint."""
+    driver_error = excinfo.value.orig
+    assert getattr(driver_error, "pgcode", None) == "23514"
+    assert getattr(driver_error.diag, "constraint_name", None) == expected_constraint
+
+
+def _insert_conversation(connection, **office_fields):
+    """Raw INSERT into the stand-in conversations table - deliberately below
+    every application layer, so only the database's own 008 constraints are
+    being tested. Returns the new row id (caller deletes it in cleanup)."""
+    row_id = uuid.uuid4()
+    columns = ["id"] + list(office_fields.keys())
+    placeholders = ", ".join(["%s"] * len(columns))
+    values = [str(row_id)] + list(office_fields.values())
+    connection.exec_driver_sql(
+        "INSERT INTO conversations (" + ", ".join(columns) + ")"
+        " VALUES (" + placeholders + ")",
+        tuple(values),
+    )
+    return row_id
+
+
+def _delete_conversations(connection, row_ids) -> None:
+    """Remove exactly the rows a test created (module-scoped fixture: rows
+    would otherwise leak across tests)."""
+    for row_id in row_ids:
+        connection.exec_driver_sql(
+            "DELETE FROM conversations WHERE id = %s", (str(row_id),)
+        )
+
+
+def test_008_adds_nullable_default_free_columns(migrated_connection):
+    """008 adds EXACTLY the four approved columns - TEXT/TIMESTAMPTZ, all
+    nullable, all default-free - plus the four named CHECKs, and a row that
+    existed BEFORE the migration ends up all-NULL (no default may make an
+    existing row appear office-modified)."""
+    conn = migrated_connection
+    before = _conversations_columns(conn)
+    for column in OFFICE_WORKFLOW_COLUMNS:
+        assert column not in before, f"{column} must not pre-exist"
+
+    pre_existing = _insert_conversation(conn)
+    applied = False
+    try:
+        _run_migration_file(conn, UP_008)
+        applied = True
+
+        columns = _conversations_columns(conn)
+        expected_types = {
+            "office_status": "text",
+            "office_status_updated_at": "timestamp with time zone",
+            "office_note": "text",
+            "office_note_updated_at": "timestamp with time zone",
+        }
+        for column, expected_type in expected_types.items():
+            assert column in columns, columns.keys()
+            assert columns[column]["data_type"] == expected_type
+            assert columns[column]["is_nullable"] == "YES"
+            assert columns[column]["default"] is None
+
+        checks = _conversations_check_names(conn)
+        for check_name in OFFICE_WORKFLOW_CHECKS:
+            assert check_name in checks, checks
+
+        row = conn.exec_driver_sql(
+            "SELECT office_status, office_status_updated_at,"
+            " office_note, office_note_updated_at"
+            " FROM conversations WHERE id = %s", (str(pre_existing),)
+        ).fetchone()
+        assert row == (None, None, None, None)
+    finally:
+        if applied:
+            _run_migration_file(conn, DOWN_008)
+        _delete_conversations(conn, [pre_existing])
+
+
+def test_008_status_constraints_bite(migrated_connection):
+    """Raw INSERTs against the MIGRATED schema: every approved status value
+    (with its token) is accepted; an unknown status is refused by name; a
+    status without its token is refused by name; and the approved cleared
+    shape (NULL status + non-NULL token) is legal."""
+    from sqlalchemy.exc import IntegrityError
+
+    conn = migrated_connection
+    created = []
+    applied = False
+    try:
+        _run_migration_file(conn, UP_008)
+        applied = True
+
+        # Every approved value, WITH its token, is accepted.
+        for status in ("contacted", "booked", "closed"):
+            created.append(_insert_conversation(
+                conn, office_status=status,
+                office_status_updated_at=_TOKEN))
+
+        # 'new' is NOT an office value (clearing to NULL replaces it), and
+        # arbitrary strings are refused the same way. Token present so only
+        # the vocabulary CHECK can be the refusing constraint.
+        for bad_status in ("new", "completed", "followup", "CONTACTED"):
+            with pytest.raises(IntegrityError) as excinfo:
+                _insert_conversation(
+                    conn, office_status=bad_status,
+                    office_status_updated_at=_TOKEN)
+            _assert_check_violation(excinfo, OFFICE_STATUS_VOCAB_CK)
+            conn.exec_driver_sql("ROLLBACK")
+
+        # A present status without its version token is refused by name.
+        with pytest.raises(IntegrityError) as excinfo:
+            _insert_conversation(conn, office_status="contacted")
+        _assert_check_violation(excinfo, OFFICE_STATUS_TS_CK)
+        conn.exec_driver_sql("ROLLBACK")
+
+        # Cleared shape: NULL status keeping its last token is LEGAL (the
+        # one-directional CHECK is the approved timestamp contract).
+        created.append(_insert_conversation(
+            conn, office_status_updated_at=_TOKEN))
+    finally:
+        if applied:
+            _delete_conversations(conn, created)
+            _run_migration_file(conn, DOWN_008)
+
+
+def test_008_note_constraints_bite(migrated_connection):
+    """Raw INSERTs against the MIGRATED schema: a trimmed non-empty note of
+    at most 2000 characters (with its token) is accepted; empty,
+    space-only, and over-length notes are refused by name (btrim's
+    default trims spaces; broader whitespace is the application
+    layer's duty in P3-B2); a note
+    without its token is refused by name; and NULL note + non-NULL token
+    (cleared shape) is legal."""
+    from sqlalchemy.exc import IntegrityError
+
+    conn = migrated_connection
+    created = []
+    applied = False
+    try:
+        _run_migration_file(conn, UP_008)
+        applied = True
+
+        # Valid note, and the exact 2000-character boundary, are accepted.
+        created.append(_insert_conversation(
+            conn, office_note="Called patient, left voicemail.",
+            office_note_updated_at=_TOKEN))
+        created.append(_insert_conversation(
+            conn, office_note="x" * 2000,
+            office_note_updated_at=_TOKEN))
+
+        # Empty, whitespace-only, and 2001-character notes are refused by
+        # the shape CHECK by name (token present so only shape can refuse).
+        for bad_note in ("", "   ", "x" * 2001):
+            with pytest.raises(IntegrityError) as excinfo:
+                _insert_conversation(
+                    conn, office_note=bad_note,
+                    office_note_updated_at=_TOKEN)
+            _assert_check_violation(excinfo, OFFICE_NOTE_SHAPE_CK)
+            conn.exec_driver_sql("ROLLBACK")
+
+        # A present note without its version token is refused by name.
+        with pytest.raises(IntegrityError) as excinfo:
+            _insert_conversation(conn, office_note="valid note")
+        _assert_check_violation(excinfo, OFFICE_NOTE_TS_CK)
+        conn.exec_driver_sql("ROLLBACK")
+
+        # Cleared shape: NULL note keeping its last token is LEGAL.
+        created.append(_insert_conversation(
+            conn, office_note_updated_at=_TOKEN))
+    finally:
+        if applied:
+            _delete_conversations(conn, created)
+            _run_migration_file(conn, DOWN_008)
+
+
+def test_008_orm_parity(migrated_connection):
+    """Migration/ORM parity (the drift test 008 must not escape): the live
+    008 schema and app.models.Conversation agree on the four office
+    workflow columns - name, nullability, and type family."""
+    import sqlalchemy as sa
+
+    from app.models import Conversation
+
+    conn = migrated_connection
+    applied = False
+    try:
+        _run_migration_file(conn, UP_008)
+        applied = True
+        db_columns = _conversations_columns(conn)
+        orm_columns = Conversation.__table__.columns
+
+        for column in OFFICE_WORKFLOW_COLUMNS:
+            assert column in orm_columns, f"ORM missing {column}"
+            assert column in db_columns, f"migration missing {column}"
+            orm_column = orm_columns[column]
+            assert orm_column.nullable is True
+            db_type = db_columns[column]["data_type"]
+            if column.endswith("_updated_at"):
+                assert isinstance(orm_column.type, sa.DateTime)
+                assert orm_column.type.timezone is True
+                assert db_type == "timestamp with time zone"
+            else:
+                assert isinstance(orm_column.type, (sa.String, sa.Text)), (
+                    f"{column}: ORM type {orm_column.type!r} is not in the "
+                    f"migration-008 type family - TEXT/VARCHAR drift")
+                assert db_type == "text"
+            # No server default on either side: an existing row must never
+            # appear office-modified after the migration.
+            assert orm_column.server_default is None
+            assert db_columns[column]["default"] is None
+    finally:
+        if applied:
+            _run_migration_file(conn, DOWN_008)
+
+
+def test_reapplying_008_fails_loudly(migrated_connection):
+    """008 has NO 'IF NOT EXISTS' on purpose (002..007 convention): the
+    second application must fail loudly (duplicate column), and the
+    connection must remain usable afterwards."""
+    from sqlalchemy.exc import ProgrammingError
+
+    _run_migration_file(migrated_connection, UP_008)
+    try:
+        try:
+            with pytest.raises(ProgrammingError):
+                _run_migration_file(migrated_connection, UP_008)
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
+    finally:
+        _run_migration_file(migrated_connection, DOWN_008)
+
+
+def test_008_down_removes_only_new_columns_and_up_reapplies(migrated_connection):
+    """Round trip up -> down -> down -> up: the down removes EXACTLY the
+    four 008 columns and their CHECKs (IF EXISTS: repeat run is a no-op),
+    every pre-008 conversations column survives byte-for-byte, the 001/002
+    tables and indexes are untouched, and the up applies cleanly again."""
+    conn = migrated_connection
+    conversations_before = _conversations_columns(conn)
+    appointments_before = _table_columns(conn, "appointments")
+    slots_before = _table_columns(conn, "appointment_slots")
+
+    _run_migration_file(conn, UP_008)
+    _run_migration_file(conn, DOWN_008)
+    assert _conversations_columns(conn) == conversations_before
+    remaining_checks = _conversations_check_names(conn)
+    for check_name in OFFICE_WORKFLOW_CHECKS:
+        assert check_name not in remaining_checks
+
+    _run_migration_file(conn, DOWN_008)     # no-op repeat (IF EXISTS)
+    assert _conversations_columns(conn) == conversations_before
+
+    _run_migration_file(conn, UP_008)
+    try:
+        columns = _conversations_columns(conn)
+        for column in OFFICE_WORKFLOW_COLUMNS:
+            assert column in columns
+        checks = _conversations_check_names(conn)
+        for check_name in OFFICE_WORKFLOW_CHECKS:
+            assert check_name in checks
+    finally:
+        _run_migration_file(conn, DOWN_008)
+
+    assert _table_columns(conn, "appointments") == appointments_before
+    assert _table_columns(conn, "appointment_slots") == slots_before
+    definitions = _index_definitions(conn)
+    for index_name in (CONVERSATION_INDEX, SLOT_INDEX):
+        assert index_name in definitions
