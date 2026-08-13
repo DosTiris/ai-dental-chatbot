@@ -48,6 +48,16 @@
     workflow_failed: "The change was not saved. Please try again.",
     appointments_empty: "No appointments in this range.",
     appointments_tz_note_prefix: "Times shown in the office timezone: ",
+    /* P5-A appointment action wording. Office-facing, closed set. */
+    appointment_confirmed: "Appointment confirmed.",
+    appointment_cancelled: "Appointment cancelled.",
+    appointment_cancel_arm: "Click Cancel again to confirm.",
+    appointment_action_conflict:
+      "That appointment changed somewhere else. Showing the latest appointments.",
+    appointment_action_failed:
+      "The change was not saved. Showing the latest appointments.",
+    appointment_gone:
+      "That appointment could not be found. Showing the latest appointments.",
     /* P4-A schedule wording. NEVER the words "close"/"closed"/"closure"
      * for the bulk action (contract v1.2 SS5-E / D3): it is a SLOT
      * operation over the rows existing right now - publishing later
@@ -89,6 +99,21 @@
       return SCHEDULE_STATUS_LABELS[status];
     }
     return String(status || "");
+  }
+
+  /*
+   * Purpose (P5-A): the office actions offered for one appointment status.
+   * The SERVER (booking_service) is authoritative; these are UI hints that
+   * mirror the lifecycle owner's allow-lists so a control never appears
+   * where the backend would only refuse it: pending offers Confirm and
+   * Cancel, a confirmed appointment offers only Cancel, and every terminal
+   * status (cancelled/completed/no_show) offers none. An unknown status
+   * offers none - fail safe, never a speculative button. Pure.
+   */
+  function appointmentActionsFor(status) {
+    if (status === "pending") { return ["confirm", "cancel"]; }
+    if (status === "confirmed") { return ["cancel"]; }
+    return [];
   }
 
   /*
@@ -348,7 +373,29 @@
       weekOffset: 0,
       defaultStart: null,   /* the office-local "today" the backend anchored */
       currentStart: null,   /* the start_day the backend echoed for this view */
-      currentEnd: null      /* the end_day the backend echoed for this view */
+      currentEnd: null,     /* the end_day the backend echoed for this view */
+      /* P5-A: the Appointments page now MUTATES, so it mirrors the P4-A
+       * schedule discipline. generation is a mutation-generation counter
+       * (a window GET is applied only when its captured generation still
+       * equals the current one, so a read issued before a mutation can
+       * never roll the list back behind the mutation's authoritative
+       * refresh). lifecycle is the page/session token bumped by resetContent
+       * and openAppointments; a mutation whose captured lifecycle is stale
+       * may clear its own busy flag but must not touch the DOM or trigger a
+       * GET. actionBusy is the per-appointment duplicate-submit guard: it
+       * maps an appointment id to the UNIQUE token of the mutation that owns
+       * it (F4). Presence of a token means busy - BOTH that row's controls
+       * are disabled - and a completing mutation clears the entry ONLY when
+       * it still owns the token, so a stale mutation resolving after a reset
+       * can never clear a NEWER same-appointment mutation's ownership.
+       * actionSeq is the monotonic token source (NEVER reset, so tokens can
+       * never collide across page re-entries). armed holds the C4 inline
+       * two-click Cancel confirmation state per appointment. */
+      generation: 0,
+      lifecycle: 0,
+      actionSeq: 0,
+      actionBusy: {},
+      armed: {}
     };
 
     /* P3-B2 office workflow state: the AUTHORITATIVE lead (set the
@@ -948,11 +995,59 @@
         row.appendChild(reason);
       }
 
+      /* P5-A: per-appointment action controls, only where the lifecycle
+       * owner would accept them. Both this row's controls share ONE
+       * rowButtons list so a mutation in flight disables BOTH (C5), never
+       * another row's. Cancel is a deliberate inline two-click (C4): the
+       * first click arms THIS appointment, the second performs it. */
+      var apptId = appointment.appointment_id;
+      var actions = appointmentActionsFor(appointment.status);
+      if (actions.length > 0) {
+        var busy = appointments.actionBusy[apptId] !== undefined;
+        var group = doc.createElement("span");
+        group.className = "portal-appt-actions";
+        var rowButtons = [];
+        if (actions.indexOf("confirm") !== -1) {
+          var confirmBtn = doc.createElement("button");
+          confirmBtn.type = "button";
+          confirmBtn.className = "portal-button portal-button-secondary";
+          confirmBtn.textContent = "Confirm";
+          confirmBtn.disabled = busy;
+          confirmBtn.addEventListener("click", function () {
+            onAppointmentAction(apptId, data.confirmAppointment, rowButtons,
+              MESSAGES.appointment_confirmed);
+          });
+          rowButtons.push(confirmBtn);
+          group.appendChild(confirmBtn);
+        }
+        if (actions.indexOf("cancel") !== -1) {
+          var armed = appointments.armed[apptId] === true;
+          var cancelBtn = doc.createElement("button");
+          cancelBtn.type = "button";
+          cancelBtn.className = "portal-button portal-button-secondary";
+          cancelBtn.textContent = armed ? "Confirm cancel" : "Cancel";
+          cancelBtn.disabled = busy;
+          cancelBtn.addEventListener("click", function () {
+            onAppointmentCancelClick(apptId, cancelBtn, rowButtons);
+          });
+          rowButtons.push(cancelBtn);
+          group.appendChild(cancelBtn);
+        }
+        row.appendChild(group);
+      }
+
       item.appendChild(row);
       return item;
     }
 
     function renderAppointmentsPage(body) {
+      /* P5-A: an authoritative refresh (this render) DISARMS every row's
+       * inline Cancel confirmation - stale two-click state must never
+       * survive a reload (C4). actionBusy is NOT cleared here: a mutation in
+       * flight during a concurrent refresh keeps its per-row controls
+       * disabled (their disabled state is read from actionBusy at build). */
+      appointments.armed = {};
+
       /* Record the bounds the backend actually used, so week navigation is
        * always relative to real DST-safe local dates. On the default view
        * (weekOffset 0) the echoed start_day IS the office-local "today". */
@@ -996,10 +1091,14 @@
      * offset sends explicit start_day/end_day computed by shifting the
      * known default start by whole weeks - so navigation never depends on a
      * browser-computed "today".
-     * Stale-response guard: a superseded response is dropped.
+     * Stale-response guard (C4): a superseded response, OR a read issued
+     * BEFORE a mutation began (mutation-generation mismatch), is dropped -
+     * so a stale read can never roll the list back behind a mutation's
+     * authoritative refresh.
      */
     function loadAppointments() {
       var requestId = ++requestIds.appointments;
+      var generationAtIssue = appointments.generation;
       setText("appointments-state", MESSAGES.loading);
 
       var params = {};
@@ -1024,8 +1123,9 @@
       }
 
       data.getAppointments(params).then(function (outcome) {
-        if (requestId !== requestIds.appointments) {
-          return; /* superseded - a stale page must never render */
+        if (requestId !== requestIds.appointments ||
+            generationAtIssue !== appointments.generation) {
+          return; /* superseded or pre-mutation - never applied (C4) */
         }
         if (!outcome.ok) {
           handleFailure(outcome, "appointments-state");
@@ -1033,6 +1133,114 @@
         }
         renderAppointmentsPage(outcome.data);
       });
+    }
+
+    /*
+     * Purpose (P5-A): the FIRST click of Cancel arms THIS appointment
+     * (no network, no window.confirm); the SECOND explicit click performs
+     * it. A mutation already in flight for the same appointment suppresses
+     * both arming and performing (C5). Arming is per-appointment, so one
+     * row's armed state never affects another's.
+     */
+    function onAppointmentCancelClick(appointmentId, cancelButton, rowButtons) {
+      if (appointments.actionBusy[appointmentId] !== undefined) {
+        return; /* a mutation is in flight for this appointment (C5) */
+      }
+      if (appointments.armed[appointmentId] !== true) {
+        appointments.armed[appointmentId] = true;
+        cancelButton.textContent = "Confirm cancel";
+        setText("appt-action-feedback", MESSAGES.appointment_cancel_arm);
+        return;
+      }
+      onAppointmentAction(appointmentId, data.cancelAppointment, rowButtons,
+        MESSAGES.appointment_cancelled);
+    }
+
+    /*
+     * Purpose (P5-A): perform ONE appointment mutation (Confirm or the
+     * armed Cancel) and settle it authoritatively. Guards: a duplicate
+     * submit while this appointment is in flight is suppressed (C5); BOTH
+     * of this row's controls are disabled for the duration; a new mutation
+     * generation is opened so any window read issued before now is
+     * discarded (C4). Optimistic state is NEVER rendered - only the
+     * authoritative re-GET the settler triggers.
+     * External effects: one POST via the data layer; then one GET on settle.
+     */
+    function onAppointmentAction(appointmentId, call, rowButtons, successMessage) {
+      if (appointments.actionBusy[appointmentId] !== undefined) {
+        return; /* duplicate submit while in flight (C5) */
+      }
+      /* F4: this mutation OWNS the row via a unique token, not an unowned
+       * boolean. A later same-appointment mutation stores a different token,
+       * so this mutation's late completion can only clear ITS OWN ownership. */
+      var token = ++appointments.actionSeq;
+      appointments.actionBusy[appointmentId] = token;
+      appointments.generation += 1;   /* C4: a mutation begins */
+      var lifecycleAtIssue = appointments.lifecycle;
+      var generationAtIssue = appointments.generation;
+      for (var i = 0; i < rowButtons.length; i++) {
+        rowButtons[i].disabled = true;   /* C5: both row controls disabled */
+      }
+      setText("appt-action-feedback", "");
+      call(appointmentId).then(function (outcome) {
+        /* Release ownership ONLY if this mutation still owns the row (F4).
+         * If a reset cleared it and a newer mutation took the row, its token
+         * differs and we must NOT delete the newer owner's entry. */
+        if (appointments.actionBusy[appointmentId] === token) {
+          delete appointments.actionBusy[appointmentId];
+        }
+        settleAppointmentMutation(lifecycleAtIssue, generationAtIssue,
+          outcome, successMessage);
+      });
+    }
+
+    /*
+     * Purpose (P5-A): THE single settling point for an appointment mutation
+     * response (the P4-A settleScheduleMutation discipline). Guard order:
+     *   1. STALE LIFECYCLE (sign-out / reset / page re-entry happened while
+     *      in flight): render NOTHING and trigger NO GET - the wipe stands.
+     *   2. Session-loss outcome: wipe rendered tenant content and hand back
+     *      to the sign-in flow.
+     *   3. STALE GENERATION (a newer mutation already owns the surface): a
+     *      SUCCESSFUL older commit still changed the server, so fetch the
+     *      current truth; a failed older attempt is simply dropped.
+     *   4. Current: show the honest message and ALWAYS re-GET authoritative
+     *      state (never optimistic) - on success AND on every failure, so a
+     *      conflict/not_found/unavailable refreshes to the real list.
+     */
+    function settleAppointmentMutation(lifecycleAtIssue, generationAtIssue,
+        outcome, successMessage) {
+      if (lifecycleAtIssue !== appointments.lifecycle) {
+        return; /* an independent reset/logout/re-entry won - stay wiped */
+      }
+      if (!outcome.ok && (outcome.state === "signed_out" ||
+          outcome.state === "unauthorized")) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (generationAtIssue !== appointments.generation) {
+        /* A newer mutation owns feedback and rows now. */
+        if (outcome.ok) {
+          loadAppointments(); /* the older commit changed the server */
+        }
+        return;
+      }
+      if (!outcome.ok) {
+        var message;
+        if (outcome.state === "conflict") {
+          message = MESSAGES.appointment_action_conflict;
+        } else if (outcome.state === "not_found") {
+          message = MESSAGES.appointment_gone;
+        } else {
+          message = MESSAGES[outcome.state] || MESSAGES.appointment_action_failed;
+        }
+        setText("appt-action-feedback", message);
+        loadAppointments(); /* refresh to authoritative state */
+        return;
+      }
+      setText("appt-action-feedback", successMessage);
+      loadAppointments(); /* authoritative state only - never optimistic */
     }
 
     function onApptPrev() {
@@ -1061,10 +1269,16 @@
        * bumped request id (in loadAppointments) plus the disabled controls
        * (rendered only once the fresh default resolves) close the ordering
        * hole ChatGPT reproduced. */
+      appointments.lifecycle += 1;   /* P5-A: page re-entry - a mutation
+       * still in flight from the PREVIOUS visit may no longer render
+       * feedback or trigger a GET when it resolves. */
       appointments.weekOffset = 0;
       appointments.defaultStart = null;
       appointments.currentStart = null;
       appointments.currentEnd = null;
+      appointments.actionBusy = {};
+      appointments.armed = {};
+      setText("appt-action-feedback", "");
       byId("appt-prev").disabled = true;
       byId("appt-next").disabled = true;
       showPage("page-appointments");
@@ -1432,6 +1646,13 @@
       requestIds.leads += 1;
       requestIds.detail += 1;
       requestIds.appointments += 1;
+      /* P5-A (C4): session loss invalidates BOTH appointment counters and
+       * clears every in-flight per-row guard/armed state, so no in-flight
+       * window read NOR mutation result may apply afterwards. */
+      appointments.generation += 1;
+      appointments.lifecycle += 1;
+      appointments.actionBusy = {};
+      appointments.armed = {};
       /* P4-A (C4): session loss invalidates BOTH schedule counters - no
        * in-flight window read NOR any in-flight mutation result may apply
        * afterwards - and wipes every rendered schedule value. */
@@ -1473,6 +1694,7 @@
       setText("appt-range-label", "");
       setText("appt-timezone-note", "");
       clearChildren(byId("appointments-list"));
+      setText("appt-action-feedback", "");
       setText("dashboard-state", "");
       byId("dashboard-counts").hidden = true;
       setText("count-conversations", "");
@@ -1569,7 +1791,8 @@
     formatInTimeZone: formatInTimeZone,
     shiftLocalDay: shiftLocalDay,
     appointmentsRangeLabel: appointmentsRangeLabel,
-    scheduleSlotStatusLabel: scheduleSlotStatusLabel
+    scheduleSlotStatusLabel: scheduleSlotStatusLabel,
+    appointmentActionsFor: appointmentActionsFor
   };
 
   /* Export for both the browser (window) and the Node test harness. */

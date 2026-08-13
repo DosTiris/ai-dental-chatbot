@@ -122,7 +122,7 @@ const PAGE_ELEMENT_IDS = [
   "detail-note-save", "detail-note-clear", "detail-note-feedback",
   "nav-appointments", "page-appointments", "appointments-state",
   "appointments-list", "appt-range-label", "appt-timezone-note",
-  "appt-prev", "appt-next",
+  "appt-prev", "appt-next", "appt-action-feedback",
   /* P4-A: the Schedule page element set (index.html provides these). */
   "nav-schedule", "page-schedule", "schedule-state", "schedule-list",
   "schedule-range-label", "schedule-timezone-note",

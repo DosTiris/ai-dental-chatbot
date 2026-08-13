@@ -1271,3 +1271,136 @@ test("no session means NO appointments request at all", async () => {
   assertEqual(outcome.state, "signed_out", "signed_out with zero requests");
   assertEqual(env.fetch.remaining(), 0, "no request was made");
 });
+
+/* ==================================================================== */
+/* P5-A - Portal Appointment Actions v1: confirmAppointment /            */
+/* cancelAppointment data-layer proofs. Each mutation is one authorized  */
+/* POST to a path DERIVED from the single appointments literal with a    */
+/* URI-encoded id segment, sends NO request body (no tenant selector -   */
+/* tenancy is the bearer token alone), and validates the success body to */
+/* EXACTLY the approved appointment field set (C6). Every bite below     */
+/* FAILS against untouched fd967de: confirmAppointment/cancelAppointment */
+/* do not exist there.                                                   */
+/* ==================================================================== */
+
+test("confirmAppointment POSTs the encoded action path with the Bearer token and NO body", async () => {
+  const env = makeData();
+  seedSession(env);
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/" + id + "/confirm", method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validAppointmentMember({ status: "confirmed",
+      confirmed_at: "2026-07-16T14:01:00Z" }) }
+  );
+  const outcome = await env.data.confirmAppointment(id);
+  assert(outcome.ok, "a valid 200 confirm body is ok");
+  assertEqual(outcome.data.status, "confirmed", "the confirmed member is returned");
+  const seen = env.fetch.seen();
+  assertEqual(seen[seen.length - 1].method, "POST", "confirm is a POST");
+  assertEqual(seen[seen.length - 1].body, undefined,
+    "confirm sends NO request body (no tenant selector)");
+});
+
+test("confirmAppointment URI-encodes the id into ONE path segment", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/a%2Fb%20c/confirm", method: "POST" },
+    { status: 200, json: validAppointmentMember({ status: "confirmed",
+      confirmed_at: "2026-07-16T14:01:00Z" }) }
+  );
+  const outcome = await env.data.confirmAppointment("a/b c");
+  assert(outcome.ok, "encoded id path is used verbatim");
+});
+
+test("cancelAppointment POSTs the encoded cancel path with NO body", async () => {
+  const env = makeData();
+  seedSession(env);
+  const id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/" + id + "/cancel", method: "POST" },
+    { status: 200, json: validAppointmentMember({ appointment_id: id,
+      status: "cancelled" }) }
+  );
+  const outcome = await env.data.cancelAppointment(id);
+  assert(outcome.ok, "a valid 200 cancel body is ok");
+  assertEqual(outcome.data.status, "cancelled", "the cancelled member is returned");
+  const seen = env.fetch.seen();
+  assertEqual(seen[seen.length - 1].body, undefined, "cancel sends NO request body");
+});
+
+test("action success body with an EXTRA field fails closed (exact-key C6)", async () => {
+  const env = makeData();
+  seedSession(env);
+  const leaky = validAppointmentMember({ status: "confirmed",
+    confirmed_at: "2026-07-16T14:01:00Z" });
+  leaky.slot_id = "should-never-be-here";  /* one extra key */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/x/confirm", method: "POST" },
+    { status: 200, json: leaky }
+  );
+  const outcome = await env.data.confirmAppointment("x");
+  assert(!outcome.ok, "an extra field must fail the whole body closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed on extra key");
+});
+
+test("action success body MISSING a field fails closed (exact-key C6)", async () => {
+  const env = makeData();
+  seedSession(env);
+  const partial = validAppointmentMember({ status: "confirmed",
+    confirmed_at: "2026-07-16T14:01:00Z" });
+  delete partial.notification_outcome;  /* one missing key */
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/x/confirm", method: "POST" },
+    { status: 200, json: partial }
+  );
+  const outcome = await env.data.confirmAppointment("x");
+  assert(!outcome.ok, "a missing field must fail the whole body closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed on missing key");
+});
+
+test("confirm 409 maps to conflict", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/confirm", method: "POST" },
+    { status: 409, json: {} });
+  const outcome = await env.data.confirmAppointment("x");
+  assert(!outcome.ok, "409 not ok");
+  assertEqual(outcome.state, "conflict", "409 -> conflict");
+});
+
+test("confirm 404 maps to not_found", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/confirm", method: "POST" },
+    { status: 404, json: {} });
+  const outcome = await env.data.confirmAppointment("x");
+  assertEqual(outcome.state, "not_found", "404 -> not_found");
+});
+
+test("confirm 500 (fail-closed backend guardrail) maps to unavailable", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/confirm", method: "POST" },
+    { status: 500, json: {} });
+  const outcome = await env.data.confirmAppointment("x");
+  assertEqual(outcome.state, "unavailable", "500 -> unavailable (honest failure)");
+});
+
+test("cancel 409 (already cancelled) maps to conflict", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/cancel", method: "POST" },
+    { status: 409, json: {} });
+  const outcome = await env.data.cancelAppointment("x");
+  assertEqual(outcome.state, "conflict", "409 -> conflict");
+});
+
+test("no session means NO confirm request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  const outcome = await env.data.confirmAppointment("x");
+  assert(!outcome.ok, "no session -> not ok");
+  assertEqual(outcome.state, "signed_out", "signed_out with zero requests");
+  assertEqual(env.fetch.remaining(), 0, "no request was made");
+});

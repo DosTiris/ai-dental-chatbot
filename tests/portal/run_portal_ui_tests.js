@@ -15,7 +15,8 @@ const suites = [
   "test_portal_static_audit.js",
   "test_portal_data.js",    /* P3-B1 */
   "test_portal_pages.js",   /* P3-B1 */
-  "test_portal_schedule_page.js"  /* P4-A */
+  "test_portal_schedule_page.js",  /* P4-A */
+  "test_portal_appointment_actions_page.js"  /* P5-A */
 ];
 
 let failed = 0;

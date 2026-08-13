@@ -327,6 +327,27 @@
         isValidAppointmentArray(body.appointments);
     }
 
+    /* P5-A action-response contract (C6): a Confirm/Cancel success returns
+     * ONE appointment object carrying EXACTLY the approved appointment field
+     * set - not one property more. The exact-key rule (hasExactKeys) makes
+     * any extra field (a slot, conversation, or tenant id, a raw notify_error,
+     * a per-channel send boolean, a timestamp) fail the whole body closed as
+     * invalid_response, so a backend drift or tampered proxy response can
+     * never leak through the action render path. The member itself is judged
+     * by the SAME hardened isValidAppointmentMember the read list uses, whose
+     * instants go through the strict isValidUtcInstant validator (never
+     * Date.parse). Adding a key here is a reviewed contract change - the Node
+     * bites pin this array. */
+    var APPOINTMENT_MEMBER_KEYS = ["appointment_id", "patient_name",
+      "patient_phone", "patient_email", "new_or_returning", "reason",
+      "urgency", "start_datetime", "end_datetime", "status",
+      "confirmed_at", "source", "notification_outcome"];
+
+    function isValidAppointmentActionBody(body) {
+      return hasExactKeys(body, APPOINTMENT_MEMBER_KEYS) &&
+        isValidAppointmentMember(body);
+    }
+
     /* -------------------------------------------------------------- */
     /* P4-A schedule shape validators (contract v1.2 SS6 / Corrections */
     /* C5 + audit F2). EVERY instant is judged by the SAME hardened    */
@@ -694,6 +715,27 @@
         return authorizedGet(
           APPOINTMENTS_URL + buildAppointmentsQuery(params),
           isValidAppointmentListBody);
+      },
+      /* P5-A - POST /portal/appointments/<id>/confirm: confirm ONE of the
+       * office's own appointments. No body is sent; the action path is
+       * derived from the ONE appointments literal with a URI-encoded id
+       * segment (no second /portal/ literal). The success body is validated
+       * to EXACTLY the approved appointment field set (C6). Tenancy is the
+       * verified bearer token alone. */
+      confirmAppointment: function (appointmentId) {
+        return authorizedSend("POST",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/confirm",
+          undefined, isValidAppointmentActionBody);
+      },
+      /* P5-A - POST /portal/appointments/<id>/cancel: cancel ONE of the
+       * office's own appointments (frozen lifecycle: idempotent repeat is the
+       * backend 409). Same derived path + exact-key success validation. */
+      cancelAppointment: function (appointmentId) {
+        return authorizedSend("POST",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/cancel",
+          undefined, isValidAppointmentActionBody);
       },
       /* P4-A - GET /portal/schedule: the office's slot day-grid (all
        * statuses) for a local-day range. params may carry ONLY the closed

@@ -189,10 +189,13 @@ def derive_notification_outcome(sanitized_notify_error: Optional[str],
     return OUTCOME_PENDING
 
 
-def _appointment_view(a) -> PortalAppointmentView:
+def build_portal_appointment_view(a) -> PortalAppointmentView:
     """
-    Purpose: The ONE mapping from an Appointment ORM row to the approved
-        portal appointment surface. Explicit field-by-field construction so a
+    Purpose: The ONE public mapping from an Appointment ORM row to the
+        approved portal appointment surface, SHARED (Rule 3) by the read GET
+        below and the P5-A Confirm/Cancel action routes
+        (app/routes/portal_appointment_actions.py) so the two surfaces can
+        never drift. Explicit field-by-field construction so a
         new model column can never leak into a portal response by accident
         (the portal_leads _summary_view convention). The notify_error column
         is sanitized at the single output boundary and then reduced to the
@@ -289,5 +292,5 @@ def portal_list_appointments(
         timezone_name=settings.timezone_name,
         start_day=start_day,
         end_day=end_day,
-        appointments=[_appointment_view(a) for a in rows],
+        appointments=[build_portal_appointment_view(a) for a in rows],
     )

@@ -44,6 +44,12 @@ from app.routes import portal_appointments as portal_appointments_routes
 # binding are REUSED from the P2 owner (portal_auth via portal.py) - this
 # router adds no new auth path and no migration.
 from app.routes import portal_schedule as portal_schedule_routes
+# P5-A (Portal Appointment Actions v1): transport/auth wiring lives in
+# app/routes/portal_appointment_actions.py; the lifecycle rule is REUSED,
+# unchanged, from the frozen single owner app/services/booking_service.py -
+# this router adds no new auth path, no new tenant selector, and no new
+# appointment state machine.
+from app.routes import portal_appointment_actions as portal_appointment_actions_routes
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -92,6 +98,7 @@ app.include_router(portal_routes.router)  # P2: office portal auth foundation
 app.include_router(portal_leads_routes.router)  # P3-B1: portal read-only dashboard/leads
 app.include_router(portal_appointments_routes.router)  # Portal Appointments v1: read-only
 app.include_router(portal_schedule_routes.router)  # P4-A: portal slot schedule controls
+app.include_router(portal_appointment_actions_routes.router)  # P5-A: portal appointment Confirm/Cancel
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)
