@@ -50,6 +50,14 @@ from app.routes import portal_schedule as portal_schedule_routes
 # this router adds no new auth path, no new tenant selector, and no new
 # appointment state machine.
 from app.routes import portal_appointment_actions as portal_appointment_actions_routes
+# P6-A (Portal Notification Settings v1): transport wiring lives in
+# app/routes/portal_notification_settings.py; every rule (office_admin guard,
+# validation, the atomic compare-and-set, the authoritative re-read) is owned
+# by app/services/portal_notification_settings_service.py. Authentication and
+# tenant binding are REUSED from the P2 owner (portal_auth via portal.py) -
+# this router adds no new auth path and no new tenant selector. Migration 009
+# adds the one concurrency-token column and MUST run before this code deploys.
+from app.routes import portal_notification_settings as portal_notification_settings_routes
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -99,6 +107,7 @@ app.include_router(portal_leads_routes.router)  # P3-B1: portal read-only dashbo
 app.include_router(portal_appointments_routes.router)  # Portal Appointments v1: read-only
 app.include_router(portal_schedule_routes.router)  # P4-A: portal slot schedule controls
 app.include_router(portal_appointment_actions_routes.router)  # P5-A: portal appointment Confirm/Cancel
+app.include_router(portal_notification_settings_routes.router)  # P6-A: portal notification destination settings
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

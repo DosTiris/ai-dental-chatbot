@@ -130,7 +130,10 @@ const PAGE_ELEMENT_IDS = [
   "schedule-day", "schedule-open", "schedule-end", "schedule-minutes",
   "schedule-publish", "schedule-publish-feedback",
   "schedule-block-all", "schedule-bulk-feedback",
-  "schedule-booked-remaining", "schedule-action-feedback"
+  "schedule-booked-remaining", "schedule-action-feedback",
+  "nav-settings", "page-settings", "settings-state",
+  "settings-email", "settings-phone", "settings-save",
+  "settings-feedback", "settings-email-status", "settings-sms-status"
 ];
 
 function makeDocument() {

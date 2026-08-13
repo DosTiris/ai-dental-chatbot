@@ -89,6 +89,8 @@
                 type="button">Appointments</button>
         <button id="nav-schedule" class="portal-nav-button"
                 type="button">Schedule</button>
+        <button id="nav-settings" class="portal-nav-button"
+                type="button">Settings</button>
       </nav>
       <p id="shell-status" class="portal-status" aria-live="polite"></p>
 
@@ -250,6 +252,32 @@
           <p id="detail-transcript-note"
              class="portal-muted portal-transcript-note"></p>
           <ul id="detail-messages" class="portal-messages"></ul>
+        </div>
+      </section>
+
+      <!-- P6-A: Office notification DESTINATION settings. Destinations only
+           (email + phone); the source of truth stays the existing clients
+           columns. No channel enable/disable toggles (owner decision D1);
+           the *-status lines are DERIVED read-only helper text only. -->
+      <section id="page-settings" hidden>
+        <h3 class="portal-section-title">Notification settings</h3>
+        <p id="settings-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <div class="portal-workflow">
+          <label class="portal-label" for="settings-email">Notification email</label>
+          <input class="portal-input" id="settings-email" type="text"
+                 maxlength="254" autocomplete="off" />
+          <p id="settings-email-status" class="portal-muted"></p>
+
+          <label class="portal-label" for="settings-phone">Notification phone</label>
+          <input class="portal-input" id="settings-phone" type="text"
+                 maxlength="32" autocomplete="off" />
+          <p id="settings-sms-status" class="portal-muted"></p>
+
+          <button id="settings-save" class="portal-button" type="button">
+            Save notification settings</button>
+          <p id="settings-feedback" class="portal-muted"
+             aria-live="polite"></p>
         </div>
       </section>
     </section>

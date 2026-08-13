@@ -168,7 +168,8 @@ test("audit: portal-data calls only the allow-listed read endpoints", () => {
    * every derived action path is built from that one literal with
    * URI-encoded segments, so no second literal may appear. */
   const allowed = ['"/portal/dashboard"', '"/portal/leads"',
-    '"/portal/appointments"', '"/portal/schedule"'];
+    '"/portal/appointments"', '"/portal/schedule"',
+    '"/portal/notification-settings"'];
   for (const call of portalCalls) {
     assert(allowed.indexOf(call) !== -1,
       call + " is not an allowed portal data endpoint");
@@ -181,6 +182,8 @@ test("audit: portal-data calls only the allow-listed read endpoints", () => {
     "appointments endpoint literal must exist");
   assert(portalCalls.indexOf('"/portal/schedule"') !== -1,
     "schedule endpoint literal must exist (P4-A)");
+  assert(portalCalls.indexOf('"/portal/notification-settings"') !== -1,
+    "notification-settings endpoint literal must exist (P6-A)");
 });
 
 /* ------------------------------------------------------------------ */

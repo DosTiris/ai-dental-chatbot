@@ -1551,3 +1551,141 @@ def test_008_down_removes_only_new_columns_and_up_reapplies(migrated_connection)
     definitions = _index_definitions(conn)
     for index_name in (CONVERSATION_INDEX, SLOT_INDEX):
         assert index_name in definitions
+
+
+# ---------------------------------------------------------------------------
+# Migration 009 - P6-A notification-settings concurrency token (clients)
+# ---------------------------------------------------------------------------
+
+UP_009 = "009_notification_settings_token_up.sql"
+DOWN_009 = "009_notification_settings_token_down.sql"
+
+NOTIFICATION_TOKEN_COLUMN = "notification_settings_updated_at"
+
+
+def _clients_columns(connection) -> dict:
+    """{column_name: (data_type, is_nullable)} for the throwaway schema's
+    clients table."""
+    rows = connection.exec_driver_sql(
+        "SELECT column_name, data_type, is_nullable"
+        " FROM information_schema.columns"
+        " WHERE table_schema = %s AND table_name = 'clients'",
+        (SCHEMA,),
+    ).fetchall()
+    return {name: (data_type, nullable) for name, data_type, nullable in rows}
+
+
+def test_009_adds_exactly_the_nullable_token_column(migrated_connection):
+    """009 adds EXACTLY one nullable timestamptz token column to clients and
+    nothing else; down removes exactly it."""
+    before = _clients_columns(migrated_connection)
+    assert NOTIFICATION_TOKEN_COLUMN not in before      # clean baseline
+    try:
+        _run_migration_file(migrated_connection, UP_009)
+        after = _clients_columns(migrated_connection)
+        added = set(after) - set(before)
+        assert added == {NOTIFICATION_TOKEN_COLUMN}
+        assert after[NOTIFICATION_TOKEN_COLUMN] == (
+            "timestamp with time zone", "YES")
+    finally:
+        _run_migration_file(migrated_connection, DOWN_009)
+        assert _clients_columns(migrated_connection) == before
+
+
+def test_reapplying_009_fails_loudly(migrated_connection):
+    """009 up has NO 'IF NOT EXISTS' on purpose: a second application must
+    fail loudly. This test applies it once itself, proves the second attempt
+    raises, rolls back the aborted transaction, proves the shared connection
+    is still usable, and removes its own application in cleanup."""
+    from sqlalchemy.exc import ProgrammingError
+
+    _run_migration_file(migrated_connection, UP_009)
+    try:
+        try:
+            with pytest.raises(ProgrammingError):
+                _run_migration_file(migrated_connection, UP_009)
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
+    finally:
+        _run_migration_file(migrated_connection, DOWN_009)
+
+
+def test_009_down_removes_only_token_and_preserves_prior(migrated_connection):
+    """009 down removes exactly its one column and NOTHING else: the clients
+    column set returns to this test's own pre-009 snapshot and the 001 tables'
+    column sets are unchanged. Down is also safe to run when 009 was never
+    applied (IF EXISTS)."""
+    clients_before = _clients_columns(migrated_connection)
+    appointments_before = _table_columns(migrated_connection, "appointments")
+    slots_before = _table_columns(migrated_connection, "appointment_slots")
+
+    _run_migration_file(migrated_connection, UP_009)
+    _run_migration_file(migrated_connection, DOWN_009)
+
+    assert _clients_columns(migrated_connection) == clients_before
+    assert _table_columns(migrated_connection, "appointments") == \
+        appointments_before
+    assert _table_columns(migrated_connection, "appointment_slots") == \
+        slots_before
+
+    # Down is idempotent when the column is already gone (IF EXISTS).
+    _run_migration_file(migrated_connection, DOWN_009)
+    assert _clients_columns(migrated_connection) == clients_before
+
+
+def test_009_preserves_existing_destination_bytes(migrated_connection):
+    """The destination columns are the SOURCE OF TRUTH (owner decisions
+    D2/D3): 009 must not move, rename, or disturb them. This models the real
+    clients row by adding the two destination columns to the throwaway clients
+    table, seeds a row with known values, and proves those values survive both
+    up and down unchanged while the token column arrives NULL and then
+    departs. It restores the throwaway clients table to its (id) shape in
+    cleanup so no other migration test sees the modeled columns."""
+    seed_id = uuid.uuid4()
+    migrated_connection.exec_driver_sql(
+        "ALTER TABLE clients ADD COLUMN notification_email TEXT;"
+        "ALTER TABLE clients ADD COLUMN notification_phone TEXT;"
+    )
+
+    def _destinations():
+        """The two destination values only (always present in this test)."""
+        return migrated_connection.exec_driver_sql(
+            "SELECT notification_email, notification_phone"
+            " FROM clients WHERE id = %s",
+            (str(seed_id),),
+        ).fetchone()
+
+    def _token_value():
+        return migrated_connection.exec_driver_sql(
+            f"SELECT {NOTIFICATION_TOKEN_COLUMN} FROM clients WHERE id = %s",
+            (str(seed_id),),
+        ).fetchone()[0]
+
+    try:
+        migrated_connection.exec_driver_sql(
+            "INSERT INTO clients"
+            " (id, notification_email, notification_phone)"
+            " VALUES (%s, %s, %s)",
+            (str(seed_id), "front-desk@example.com", "516-555-7777"),
+        )
+
+        _run_migration_file(migrated_connection, UP_009)
+        assert NOTIFICATION_TOKEN_COLUMN in _clients_columns(
+            migrated_connection)
+        assert _destinations() == ("front-desk@example.com", "516-555-7777")
+        assert _token_value() is None                # new token starts NULL
+
+        _run_migration_file(migrated_connection, DOWN_009)
+        assert NOTIFICATION_TOKEN_COLUMN not in _clients_columns(
+            migrated_connection)
+        assert _destinations() == ("front-desk@example.com", "516-555-7777")
+    finally:
+        # Restore the throwaway clients table to its (id) shape so no other
+        # migration test sees the modeled destination or token columns.
+        migrated_connection.exec_driver_sql(
+            "ALTER TABLE clients DROP COLUMN IF EXISTS "
+            + NOTIFICATION_TOKEN_COLUMN + ";"
+            "ALTER TABLE clients DROP COLUMN IF EXISTS notification_email;"
+            "ALTER TABLE clients DROP COLUMN IF EXISTS notification_phone;"
+        )

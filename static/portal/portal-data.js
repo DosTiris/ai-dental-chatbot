@@ -47,6 +47,11 @@
    * derived from it with URI-encoded segments only. */
   var SCHEDULE_URL = "/portal/schedule";
 
+  /* P6-A: the office notification DESTINATION settings surface (GET read +
+   * PUT full replacement under the concurrency token). No query parameters
+   * are ever sent; tenancy is the verified bearer token alone. */
+  var NOTIFICATION_SETTINGS_URL = "/portal/notification-settings";
+
   /* Closed vocabulary of schedule query parameter names (Constitution 4.5):
    * anything not in this list is NEVER serialized, and there is deliberately
    * NO tenant parameter - tenancy is the verified bearer token alone. */
@@ -559,6 +564,28 @@
         hasValidWorkflowFields(body);
     }
 
+    /* P6-A: GET/PUT /portal/notification-settings response. EXACTLY the three
+     * approved keys and nothing else (hasExactKeys fails closed on extra,
+     * missing, or renamed fields). Each destination is null-or-string; the
+     * concurrency token is null-or-a-valid-UTC-instant STRING - it is treated
+     * as an OPAQUE token here (validated with isValidUtcInstant, never parsed
+     * through Date), so its fractional precision survives verbatim into the
+     * next PUT (contract C4). */
+    var NOTIFICATION_SETTINGS_KEYS = ["notification_email",
+      "notification_phone", "notification_settings_updated_at"];
+
+    function isValidNotificationSettingsBody(body) {
+      if (!hasExactKeys(body, NOTIFICATION_SETTINGS_KEYS)) {
+        return false;
+      }
+      if (!isNullOrString(body.notification_email) ||
+          !isNullOrString(body.notification_phone)) {
+        return false;
+      }
+      var token = body.notification_settings_updated_at;
+      return token === null || isValidUtcInstant(token);
+    }
+
     /* One raw authenticated GET. Network failure resolves to status 0 so
      * callers can distinguish "could not reach the portal" from a
      * rejection (the portal-core requestPortalMeOnce convention). */
@@ -780,6 +807,27 @@
           SCHEDULE_URL + "/days/" + encodeURIComponent(String(day)) +
             "/block-all-open",
           undefined, isValidBlockAllOpenBody);
+      },
+      /* P6-A - GET /portal/notification-settings: the office's own two
+       * notification destinations + the concurrency token. No parameters,
+       * no body; tenancy is the verified bearer token alone. */
+      getNotificationSettings: function () {
+        return authorizedGet(NOTIFICATION_SETTINGS_URL,
+          isValidNotificationSettingsBody);
+      },
+      /* P6-A - PUT /portal/notification-settings: FULL replacement of both
+       * destinations under the expected concurrency token. EXACTLY the three
+       * approved body keys are sent (the backend's extra="forbid" model
+       * rejects anything else). expectedToken is sent VERBATIM - it is the
+       * opaque server token string, never reserialized/parsed (contract
+       * C4). null email/phone clears that channel; the backend refuses a
+       * result that would leave both empty. */
+      putNotificationSettings: function (email, phone, expectedToken) {
+        return authorizedSend("PUT", NOTIFICATION_SETTINGS_URL,
+          { notification_email: email,
+            notification_phone: phone,
+            expected_notification_settings_updated_at: expectedToken },
+          isValidNotificationSettingsBody);
       },
       /* Exported for the Node suite (pure functions). */
       buildLeadsQuery: buildLeadsQuery,

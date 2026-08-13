@@ -23,6 +23,15 @@ class Client(Base):
     notification_email = Column(String, nullable=True)
     notification_phone = Column(String, nullable=True)
 
+    # P6-A: optimistic-concurrency token for the portal notification-settings
+    # writer (migration 009). Server-owned, strictly advancing on every
+    # accepted portal write, NULL until the first portal save. NOT a business
+    # value and never exposed except as the settings token. Migration 009 is
+    # the sole schema authority for existing databases (create_all cannot
+    # ALTER an existing clients table); production must migrate FIRST and
+    # deploy this mapping SECOND (see the 009 header; rollback order reverse).
+    notification_settings_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     conversations = relationship("Conversation", back_populates="client")  # Client -> many conversations
     faqs = relationship("ClientFAQ", back_populates="client")  # Client -> many FAQs

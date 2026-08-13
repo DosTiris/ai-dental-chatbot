@@ -1404,3 +1404,131 @@ test("no session means NO confirm request at all", async () => {
   assertEqual(outcome.state, "signed_out", "signed_out with zero requests");
   assertEqual(env.fetch.remaining(), 0, "no request was made");
 });
+
+/* ------------------------------------------------------------------ */
+/* P6-A: notification-settings data layer                              */
+/* ------------------------------------------------------------------ */
+
+function validSettingsBody(overrides) {
+  return Object.assign({
+    notification_email: "office@example.com",
+    notification_phone: "+15550001111",
+    notification_settings_updated_at: "2026-08-13T12:00:00.123456Z"
+  }, overrides || {});
+}
+
+test("P6-A: GET carries the Bearer token to the settings endpoint", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/notification-settings", method: "GET",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validSettingsBody() }
+  );
+  const outcome = await env.data.getNotificationSettings();
+  assert(outcome.ok, "GET ok");
+  assertEqual(outcome.data.notification_email, "office@example.com",
+    "email surfaced");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("P6-A: PUT sends exactly the three keys and echoes the token verbatim",
+  async () => {
+    const env = makeData();
+    seedSession(env);
+    /* A fractional-second token: it must survive byte-for-byte (contract C4 -
+     * the data layer treats it as an opaque string, never Date/parse). */
+    const token = "2026-08-13T12:00:00.123456Z";
+    env.fetch.expect(
+      { urlEquals: "/portal/notification-settings", method: "PUT",
+        headerEquals: { "Authorization": "Bearer tok-a" },
+        bodyJson: { notification_email: "office@example.com",
+          notification_phone: "+15550001111",
+          expected_notification_settings_updated_at: token } },
+      { status: 200, json: validSettingsBody() }
+    );
+    const outcome = await env.data.putNotificationSettings(
+      "office@example.com", "+15550001111", token);
+    assert(outcome.ok, "PUT ok");
+    assertEqual(env.fetch.remaining(), 0, "exactly one request");
+    const raw = env.fetch.seen()[0].body;
+    assert(raw.indexOf(
+      '"expected_notification_settings_updated_at":"' + token + '"') !== -1,
+      "the fractional token is present verbatim in the PUT body");
+  });
+
+test("P6-A: PUT round-trips a null token as JSON null and clears via null",
+  async () => {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/notification-settings", method: "PUT",
+        bodyJson: { notification_email: null,
+          notification_phone: "516-555-7777",
+          expected_notification_settings_updated_at: null } },
+      { status: 200, json: validSettingsBody(
+        { notification_email: null, notification_phone: "516-555-7777" }) }
+    );
+    const outcome = await env.data.putNotificationSettings(
+      null, "516-555-7777", null);
+    assert(outcome.ok, "PUT ok");
+    const raw = env.fetch.seen()[0].body;
+    assert(raw.indexOf(
+      '"expected_notification_settings_updated_at":null') !== -1,
+      "a null token is serialized as JSON null");
+  });
+
+test("P6-A: a settings 200 with extra/missing/wrong/bad-token fields fails closed",
+  async () => {
+    const badBodies = [
+      { notification_email: "a@b.com", notification_phone: null,
+        notification_settings_updated_at: "2026-08-13T12:00:00Z",
+        extra: 1 },                                     /* extra key */
+      { notification_email: "a@b.com", notification_phone: null },  /* missing token */
+      { notification_email: 5, notification_phone: null,
+        notification_settings_updated_at: null },       /* wrong type */
+      { notification_email: "a@b.com", notification_phone: null,
+        notification_settings_updated_at: "not-a-timestamp" }  /* bad token */
+    ];
+    for (const body of badBodies) {
+      const env = makeData();
+      seedSession(env);
+      env.fetch.expect(
+        { urlEquals: "/portal/notification-settings", method: "GET" },
+        { status: 200, json: body });
+      const outcome = await env.data.getNotificationSettings();
+      assert(!outcome.ok, "unusable body rejected");
+      assertEqual(outcome.state, "invalid_response", "fail closed");
+    }
+  });
+
+test("P6-A: settings PUT maps 409 -> conflict and 422 -> bad_request",
+  async () => {
+    let env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/notification-settings", method: "PUT" },
+      { status: 409, json: {} });
+    let outcome = await env.data.putNotificationSettings(
+      "a@b.com", "+15550001111", "2026-08-13T12:00:00Z");
+    assertEqual(outcome.state, "conflict", "409 -> conflict");
+
+    env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/notification-settings", method: "PUT" },
+      { status: 422, json: { detail: "bad" } });
+    outcome = await env.data.putNotificationSettings(
+      "a@b.com", "+15550001111", null);
+    assertEqual(outcome.state, "bad_request", "422 -> bad_request");
+  });
+
+test("P6-A: no session means NO settings request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  const getOutcome = await env.data.getNotificationSettings();
+  assertEqual(getOutcome.state, "signed_out", "GET signed_out");
+  const putOutcome = await env.data.putNotificationSettings(
+    "a@b.com", null, null);
+  assertEqual(putOutcome.state, "signed_out", "PUT signed_out");
+  assertEqual(env.fetch.seen().length, 0, "no request was made");
+});

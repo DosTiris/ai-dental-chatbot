@@ -46,6 +46,19 @@
     workflow_cleared_note: "Note cleared.",
     workflow_note_empty: "Enter a note before saving, or use Clear note.",
     workflow_failed: "The change was not saved. Please try again.",
+    /* P6-A notification-settings wording (office-facing, closed set). */
+    settings_saved: "Notification settings saved.",
+    settings_conflict:
+      "Notification settings were updated somewhere else. Showing the latest state.",
+    settings_both_empty:
+      "Enter at least one destination (email or phone) before saving.",
+    settings_invalid:
+      "That email or phone number was not accepted. Please check and try again.",
+    settings_failed: "The change was not saved. Please try again.",
+    settings_email_configured: "Email alerts: configured.",
+    settings_email_unconfigured: "Email alerts: not configured.",
+    settings_sms_configured: "SMS alerts: configured.",
+    settings_sms_unconfigured: "SMS alerts: not configured.",
     appointments_empty: "No appointments in this range.",
     appointments_tz_note_prefix: "Times shown in the office timezone: ",
     /* P5-A appointment action wording. Office-facing, closed set. */
@@ -416,6 +429,22 @@
       noteSeq: 0
     };
 
+    /* P6-A notification-settings page state. The page MUTATES (full-
+     * replacement PUT), so it mirrors the P3-B2 workflow discipline: token
+     * is the last-observed SERVER concurrency token (OPAQUE - stored and
+     * echoed verbatim, never parsed, contract C4); saveBusy is the
+     * duplicate-submit guard; saveSeq is the monotonic sequence so a
+     * superseded load/save response can never overwrite newer UI state; and
+     * generation is bumped by resetContent so an in-flight settings GET/PUT
+     * resolving after a reset can never repopulate the wiped page. */
+    var settings = {
+      token: null,
+      loaded: false,
+      saveBusy: false,
+      saveSeq: 0,
+      generation: 0
+    };
+
     function byId(id) {
       return doc.getElementById(id);
     }
@@ -433,22 +462,25 @@
     /* Show exactly one page section; hide the rest (single-meaning state). */
     function showPage(pageId) {
       var pages = ["page-dashboard", "page-leads", "page-lead-detail",
-        "page-appointments", "page-schedule"];
+        "page-appointments", "page-schedule", "page-settings"];
       for (var i = 0; i < pages.length; i++) {
         byId(pages[i]).hidden = pages[i] !== pageId;
       }
       /* The nav highlights the SECTION the visible page belongs to; the
-       * detail page belongs to Leads, and Appointments and Schedule are
-       * their own sections. */
+       * detail page belongs to Leads, and Appointments, Schedule and
+       * Settings are their own sections. */
       var isAppointments = pageId === "page-appointments";
       var isSchedule = pageId === "page-schedule";
       var isDashboard = pageId === "page-dashboard";
-      var isLeads = !isAppointments && !isSchedule && !isDashboard;
+      var isSettings = pageId === "page-settings";
+      var isLeads = !isAppointments && !isSchedule && !isDashboard &&
+        !isSettings;
       byId("nav-dashboard").classList.toggle("portal-nav-active", isDashboard);
       byId("nav-leads").classList.toggle("portal-nav-active", isLeads);
       byId("nav-appointments").classList.toggle("portal-nav-active",
         isAppointments);
       byId("nav-schedule").classList.toggle("portal-nav-active", isSchedule);
+      byId("nav-settings").classList.toggle("portal-nav-active", isSettings);
     }
 
     /*
@@ -1641,6 +1673,132 @@
      * hand-back to the login view, so no office data can linger on a
      * shared front-desk computer.
      */
+    /* ---------------------------------------------------------------- */
+    /* Notification settings (P6-A)                                      */
+    /* ---------------------------------------------------------------- */
+
+    /* Derived read-only helper text (D10): NOT an enable/disable toggle - it
+     * only reflects whether each destination currently holds a value. */
+    function renderSettingsStatus(email, phone) {
+      setText("settings-email-status", email ?
+        MESSAGES.settings_email_configured :
+        MESSAGES.settings_email_unconfigured);
+      setText("settings-sms-status", phone ?
+        MESSAGES.settings_sms_configured :
+        MESSAGES.settings_sms_unconfigured);
+    }
+
+    /* Apply an AUTHORITATIVE settings body to the page: the inputs, the
+     * derived status lines, and the stored OPAQUE token (echoed verbatim on
+     * the next save - never parsed, contract C4). */
+    function applySettings(body) {
+      var email = body.notification_email;
+      var phone = body.notification_phone;
+      byId("settings-email").value = email === null ? "" : email;
+      byId("settings-phone").value = phone === null ? "" : phone;
+      settings.token = body.notification_settings_updated_at;
+      renderSettingsStatus(email, phone);
+    }
+
+    /* Load (or reload) the office's own destinations authoritatively. The
+     * generation + saveSeq guards discard a response the page has moved past
+     * (reset or a newer save/load), so a late GET can never repopulate a
+     * wiped page or overwrite newer state.
+     * successMessage (F2): when this GET is the authoritative refresh that
+     * FOLLOWS a successful PUT, the saved wording is written to the feedback
+     * line ONLY after this GET applies - so the confirmation is bound to the
+     * post-mutation authoritative state, never to the PUT body. A plain
+     * (nav-entry) load passes no message and clears the feedback line. */
+    function loadSettings(successMessage) {
+      var generation = settings.generation;
+      var requestId = ++settings.saveSeq;
+      settings.loaded = false;
+      if (!successMessage) {
+        setText("settings-feedback", "");
+      }
+      setText("settings-state", MESSAGES.loading);
+      data.getNotificationSettings().then(function (outcome) {
+        if (generation !== settings.generation ||
+            requestId !== settings.saveSeq) {
+          return;                            /* superseded / wiped */
+        }
+        if (!outcome.ok) {
+          handleFailure(outcome, "settings-state");
+          return;
+        }
+        setText("settings-state", "");
+        settings.loaded = true;
+        applySettings(outcome.data);
+        if (successMessage) {
+          setText("settings-feedback", successMessage);
+        }
+      });
+    }
+
+    function onSettingsSave() {
+      if (settings.saveBusy || !settings.loaded) {
+        return;                              /* duplicate submit blocked */
+      }
+      var email = byId("settings-email").value.trim();
+      var phone = byId("settings-phone").value.trim();
+      /* D6 mirrored locally for fast UX; the backend stays authoritative. */
+      if (email === "" && phone === "") {
+        setText("settings-feedback", MESSAGES.settings_both_empty);
+        return;
+      }
+      settings.saveBusy = true;
+      byId("settings-save").disabled = true;
+      setText("settings-feedback", "");
+      var generation = settings.generation;
+      var seq = ++settings.saveSeq;
+      /* Blanks are sent as null (clear that channel); the token is echoed
+       * VERBATIM (opaque - never parsed, contract C4). */
+      data.putNotificationSettings(
+        email === "" ? null : email,
+        phone === "" ? null : phone,
+        settings.token
+      ).then(function (outcome) {
+        if (generation !== settings.generation) {
+          return;                            /* wiped by reset - drop it */
+        }
+        settings.saveBusy = false;
+        byId("settings-save").disabled = false;
+        if (seq !== settings.saveSeq) {
+          return;                            /* superseded - never overwrite */
+        }
+        if (outcome.ok) {
+          /* F2 (contract v1.1): the validated PUT response is only an
+           * INTERMEDIATE success signal - the post-mutation authoritative GET
+           * is the frontend's FINAL authority for both the rendered
+           * destinations and the stored token. The PUT body is NOT applied
+           * here (no optimistic state). loadSettings' generation + saveSeq
+           * guards mean this refresh cannot overwrite a newer save/load and
+           * renders nothing if a reset/session-loss happened first; the saved
+           * wording appears only once the GET applies. */
+          loadSettings(MESSAGES.settings_saved);
+          return;
+        }
+        if (outcome.state === "conflict") {
+          /* Refresh authoritative state FIRST, then say it changed elsewhere
+           * so the notice survives the redraw (the workflow pattern). */
+          loadSettings();
+          setText("settings-feedback", MESSAGES.settings_conflict);
+          return;
+        }
+        if (outcome.state === "signed_out" ||
+            outcome.state === "unauthorized") {
+          handleFailure(outcome, "settings-feedback");
+          return;
+        }
+        if (outcome.state === "bad_request") {
+          setText("settings-feedback", MESSAGES.settings_invalid);
+          return;
+        }
+        setText("settings-feedback",
+          MESSAGES[outcome.state] || MESSAGES.settings_failed);
+      });
+    }
+
     function resetContent() {
       requestIds.dashboard += 1;   /* invalidate any in-flight responses */
       requestIds.leads += 1;
@@ -1730,6 +1888,23 @@
       byId("detail-note-save").disabled = false;
       byId("detail-note-clear").disabled = false;
       byId("detail-body").hidden = true;
+      /* P6-A: session loss / reset wipes the notification-settings page.
+       * Bump generation to discard any in-flight settings GET/PUT, bump
+       * saveSeq to supersede in-flight responses, drop the stored token and
+       * the rendered destinations (no office contact may linger on a shared
+       * front-desk computer, D10), and re-enable the control. */
+      settings.generation += 1;
+      settings.saveSeq += 1;
+      settings.token = null;
+      settings.loaded = false;
+      settings.saveBusy = false;
+      byId("settings-email").value = "";
+      byId("settings-phone").value = "";
+      setText("settings-email-status", "");
+      setText("settings-sms-status", "");
+      setText("settings-state", "");
+      setText("settings-feedback", "");
+      byId("settings-save").disabled = false;
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -1755,6 +1930,10 @@
       byId("nav-schedule").addEventListener("click", function () {
         openSchedule();
       });
+      byId("nav-settings").addEventListener("click", function () {
+        showPage("page-settings");
+        loadSettings();
+      });
       byId("appt-prev").addEventListener("click", onApptPrev);
       byId("appt-next").addEventListener("click", onApptNext);
       byId("schedule-prev").addEventListener("click", onSchedulePrev);
@@ -1769,6 +1948,7 @@
       byId("detail-status-save").addEventListener("click", onStatusSave);
       byId("detail-note-save").addEventListener("click", onNoteSave);
       byId("detail-note-clear").addEventListener("click", onNoteClear);
+      byId("settings-save").addEventListener("click", onSettingsSave);
     }
 
     wireEvents();
