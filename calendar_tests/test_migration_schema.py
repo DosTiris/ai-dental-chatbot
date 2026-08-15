@@ -1689,3 +1689,133 @@ def test_009_preserves_existing_destination_bytes(migrated_connection):
             "ALTER TABLE clients DROP COLUMN IF EXISTS notification_email;"
             "ALTER TABLE clients DROP COLUMN IF EXISTS notification_phone;"
         )
+
+
+# ---------------------------------------------------------------------------
+# PATCH P4-B - migration 010 (schedule_config_updated_at token column). One
+# nullable TIMESTAMPTZ column, no default/backfill/CHECK; mirrors 009's
+# reversibility and preservation proofs. The recurring config lives in the
+# EXISTING office_hours/settings JSONB columns - 010 must not disturb them.
+# ---------------------------------------------------------------------------
+
+UP_010 = "010_schedule_config_token_up.sql"
+DOWN_010 = "010_schedule_config_token_down.sql"
+
+SCHEDULE_TOKEN_COLUMN = "schedule_config_updated_at"
+
+
+def test_010_adds_exactly_the_nullable_token_column(migrated_connection):
+    """010 adds EXACTLY one nullable timestamptz token column to clients and
+    nothing else; down removes exactly it."""
+    before = _clients_columns(migrated_connection)
+    assert SCHEDULE_TOKEN_COLUMN not in before          # clean baseline
+    try:
+        _run_migration_file(migrated_connection, UP_010)
+        after = _clients_columns(migrated_connection)
+        added = set(after) - set(before)
+        assert added == {SCHEDULE_TOKEN_COLUMN}
+        assert after[SCHEDULE_TOKEN_COLUMN] == (
+            "timestamp with time zone", "YES")
+    finally:
+        _run_migration_file(migrated_connection, DOWN_010)
+        assert _clients_columns(migrated_connection) == before
+
+
+def test_reapplying_010_fails_loudly(migrated_connection):
+    """010 up has NO 'IF NOT EXISTS' on the ADD (contract 2): a second
+    application must fail loudly. Applies once, proves the second attempt
+    raises, rolls back the aborted transaction, proves the shared connection
+    is still usable, and removes its own application in cleanup."""
+    from sqlalchemy.exc import ProgrammingError
+
+    _run_migration_file(migrated_connection, UP_010)
+    try:
+        try:
+            with pytest.raises(ProgrammingError):
+                _run_migration_file(migrated_connection, UP_010)
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
+    finally:
+        _run_migration_file(migrated_connection, DOWN_010)
+
+
+def test_010_down_removes_only_token_and_preserves_prior(migrated_connection):
+    """010 down removes exactly its one column and NOTHING else: the clients
+    column set returns to this test's own pre-010 snapshot and the 001 tables'
+    column sets are unchanged. Down is also safe to run when 010 was never
+    applied (IF EXISTS)."""
+    clients_before = _clients_columns(migrated_connection)
+    appointments_before = _table_columns(migrated_connection, "appointments")
+    slots_before = _table_columns(migrated_connection, "appointment_slots")
+
+    _run_migration_file(migrated_connection, UP_010)
+    _run_migration_file(migrated_connection, DOWN_010)
+
+    assert _clients_columns(migrated_connection) == clients_before
+    assert _table_columns(migrated_connection, "appointments") == \
+        appointments_before
+    assert _table_columns(migrated_connection, "appointment_slots") == \
+        slots_before
+
+    # Down is idempotent when the column is already gone (IF EXISTS).
+    _run_migration_file(migrated_connection, DOWN_010)
+    assert _clients_columns(migrated_connection) == clients_before
+
+
+def test_010_preserves_existing_office_hours_and_settings_bytes(
+        migrated_connection):
+    """F7: the recurring config is stored in the EXISTING office_hours and
+    settings JSONB columns; 010 adds ONLY the token column and must not move,
+    rewrite, or default those columns. This models the real clients row by
+    adding the two JSONB columns to the throwaway clients table, seeds known
+    JSON, and proves both the parsed value AND the ::text serialization
+    survive up and down unchanged while the token arrives NULL then departs.
+    It restores the throwaway clients table to its (id) shape in cleanup."""
+    seed_id = uuid.uuid4()
+    office_hours = {"mon": {"open": True, "start": "09:00", "end": "17:00"},
+                    "sun": {"open": False, "start": None, "end": None}}
+    settings = {"calendar": {"recurring": {"slot_minutes": 30,
+                "closures": [{"date": "2026-12-25"}]}}}
+
+    def _jsonb(colname):
+        return migrated_connection.exec_driver_sql(
+            f"SELECT {colname}, {colname}::text FROM clients WHERE id = %s",
+            (str(seed_id),),
+        ).fetchone()
+
+    def _token_value():
+        return migrated_connection.exec_driver_sql(
+            f"SELECT {SCHEDULE_TOKEN_COLUMN} FROM clients WHERE id = %s",
+            (str(seed_id),),
+        ).fetchone()[0]
+
+    import json
+    try:
+        migrated_connection.exec_driver_sql(
+            "ALTER TABLE clients ADD COLUMN office_hours JSONB;"
+            "ALTER TABLE clients ADD COLUMN settings JSONB;")
+        migrated_connection.exec_driver_sql(
+            "INSERT INTO clients (id, office_hours, settings)"
+            " VALUES (%s, %s, %s)",
+            (str(seed_id), json.dumps(office_hours), json.dumps(settings)))
+        before = _jsonb("office_hours")
+        settings_before = _jsonb("settings")
+
+        _run_migration_file(migrated_connection, UP_010)
+        assert SCHEDULE_TOKEN_COLUMN in _clients_columns(migrated_connection)
+        assert _token_value() is None                    # token starts NULL
+        assert _jsonb("office_hours") == before          # value + ::text bytes
+        assert _jsonb("settings") == settings_before
+
+        _run_migration_file(migrated_connection, DOWN_010)
+        assert SCHEDULE_TOKEN_COLUMN not in _clients_columns(
+            migrated_connection)
+        assert _jsonb("office_hours") == before
+        assert _jsonb("settings") == settings_before
+    finally:
+        migrated_connection.exec_driver_sql(
+            "ALTER TABLE clients DROP COLUMN IF EXISTS "
+            + SCHEDULE_TOKEN_COLUMN + ";"
+            "ALTER TABLE clients DROP COLUMN IF EXISTS office_hours;"
+            "ALTER TABLE clients DROP COLUMN IF EXISTS settings;")

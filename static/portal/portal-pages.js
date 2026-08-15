@@ -445,6 +445,16 @@
       generation: 0
     };
 
+    /* P4-B recurring-schedule page state. token is the OPAQUE server config
+     * token (echoed VERBATIM, never parsed - A1); busy is the duplicate-submit
+     * guard; generation is bumped by resetContent so an in-flight GET/PUT/
+     * preview/apply resolving after a tenant wipe can never repopulate the
+     * cleared page (D10); rows maps each weekday to its live input elements. */
+    var recurring = {
+      token: null, loaded: false, busy: false, generation: 0,
+      saveSeq: 0, previewSeq: 0, previewedToken: null, closures: [], rows: {}
+    };
+
     function byId(id) {
       return doc.getElementById(id);
     }
@@ -462,9 +472,11 @@
     /* Show exactly one page section; hide the rest (single-meaning state). */
     function showPage(pageId) {
       var pages = ["page-dashboard", "page-leads", "page-lead-detail",
-        "page-appointments", "page-schedule", "page-settings"];
+        "page-appointments", "page-schedule", "page-settings", "page-recurring"];
       for (var i = 0; i < pages.length; i++) {
-        byId(pages[i]).hidden = pages[i] !== pageId;
+        /* P4-B: null-tolerant so a suite without the page-recurring node
+         * (the frozen notification-settings suite) never throws here. */
+        var pgEl = byId(pages[i]); if (pgEl) pgEl.hidden = pages[i] !== pageId;
       }
       /* The nav highlights the SECTION the visible page belongs to; the
        * detail page belongs to Leads, and Appointments, Schedule and
@@ -473,14 +485,17 @@
       var isSchedule = pageId === "page-schedule";
       var isDashboard = pageId === "page-dashboard";
       var isSettings = pageId === "page-settings";
+      var isRecurring = pageId === "page-recurring";
       var isLeads = !isAppointments && !isSchedule && !isDashboard &&
-        !isSettings;
+        !isSettings && !isRecurring;
       byId("nav-dashboard").classList.toggle("portal-nav-active", isDashboard);
       byId("nav-leads").classList.toggle("portal-nav-active", isLeads);
       byId("nav-appointments").classList.toggle("portal-nav-active",
         isAppointments);
       byId("nav-schedule").classList.toggle("portal-nav-active", isSchedule);
       byId("nav-settings").classList.toggle("portal-nav-active", isSettings);
+      var navRecurringEl = byId("nav-recurring");
+      if (navRecurringEl) navRecurringEl.classList.toggle("portal-nav-active", isRecurring);
     }
 
     /*
@@ -1833,6 +1848,24 @@
       setText("schedule-booked-remaining", "");
       clearChildren(byId("schedule-list"));
       byId("schedule-day").value = "";
+      /* P4-B (D10): invalidate any in-flight recurring request and wipe the
+       * rendered panel; guarded so absent ids never throw. */
+      recurring.generation += 1;
+      recurring.busy = false;
+      recurring.token = null;
+      recurring.previewedToken = null;
+      recurring.saveSeq += 1;
+      recurring.previewSeq += 1;
+      recurring.loaded = false;
+      recurring.closures = [];
+      recurring.rows = {};
+      setRecurringText("recurring-state", "");
+      setRecurringText("recurring-save-feedback", "");
+      setRecurringText("recurring-preview-output", "");
+      setRecurringText("recurring-apply-output", "");
+      var recHoursEl = byId("recurring-hours"); if (recHoursEl) clearChildren(recHoursEl);
+      var recClosuresEl = byId("recurring-closures"); if (recClosuresEl) clearChildren(recClosuresEl);
+      var recMinutesEl = byId("recurring-slot-minutes"); if (recMinutesEl) recMinutesEl.value = "";
       byId("schedule-open").value = "";
       byId("schedule-end").value = "";
       byId("schedule-minutes").value = "30";
@@ -1915,6 +1948,230 @@
       loadDashboard();
     }
 
+    var RECURRING_ORDER = ["mon","tue","wed","thu","fri","sat","sun"];
+    var RECURRING_CLOSURE_WARNING = "Removing a closure only updates your recurring configuration. Any slots a previous Apply blocked for those dates stay blocked. To make specific dates bookable again, reopen individual slots with Unblock on the Schedule page.";
+
+    function setRecurringText(id, t){ var el = byId(id); if (el) el.textContent = t; }
+
+    /* F2: a valid Apply requires a CURRENT Preview. Any config edit, a fresh
+     * load, a successful Save, or an Apply conflict invalidates the previewed
+     * token so Apply is disabled until the office Previews again - no stale
+     * previewed token can ever be applied, and there is no permanent stale
+     * loop (re-Preview always re-arms Apply against the latest token). */
+    function invalidatePreview(){
+      recurring.previewedToken = null;
+      recurring.previewSeq += 1;   /* T3: supersede any in-flight Preview response */
+      var applyBtn = byId("recurring-apply"); if (applyBtn) applyBtn.disabled = true;
+    }
+
+    /* Render one editable weekday row; editing any field invalidates Preview. */
+    function buildRecurringRow(wd, row){
+      var wrap = doc.createElement("div"); wrap.setAttribute("data-weekday", wd);
+      var open = doc.createElement("input"); open.type = "checkbox"; open.checked = !!row.open;
+      var start = doc.createElement("input"); start.type = "text";
+      start.value = row.open ? (row.start || "") : "";
+      var end = doc.createElement("input"); end.type = "text";
+      end.value = row.open ? (row.end || "") : "";
+      open.addEventListener("change", invalidatePreview);
+      start.addEventListener("change", invalidatePreview);
+      end.addEventListener("change", invalidatePreview);
+      wrap.appendChild(open); wrap.appendChild(start); wrap.appendChild(end);
+      recurring.rows[wd] = { open: open, start: start, end: end };
+      return wrap;
+    }
+
+    /* Render the AUTHORITATIVE config (never echoed input). Rendering a fresh
+     * config invalidates any prior Preview (F2). */
+    function renderRecurring(cfg){
+      recurring.token = cfg.schedule_config_updated_at;   /* opaque, verbatim */
+      recurring.closures = Array.isArray(cfg.closures) ? cfg.closures.slice() : [];
+      recurring.rows = {};
+      var minutes = byId("recurring-slot-minutes");
+      if (minutes) minutes.value = String(cfg.slot_minutes);
+      var host = byId("recurring-hours");
+      if (host){ clearChildren(host);
+        for (var i=0;i<RECURRING_ORDER.length;i++){ var wd=RECURRING_ORDER[i];
+          var row=(cfg.weekly_hours && cfg.weekly_hours[wd]) || {open:false};
+          host.appendChild(buildRecurringRow(wd, row)); } }
+      renderClosures();
+      invalidatePreview();   /* F2: a new config requires a fresh Preview */
+      setRecurringText("recurring-closure-warning", RECURRING_CLOSURE_WARNING);
+    }
+
+    /* Render closures: single-date {date} OR inclusive range {start,end} (F3). */
+    function renderClosures(){
+      var list = byId("recurring-closures"); if (!list) return; clearChildren(list);
+      for (var i=0;i<recurring.closures.length;i++){ (function(idx){
+        var c=recurring.closures[idx]; var li=doc.createElement("li");
+        li.textContent = c && c.date ? c.date
+          : (c && c.start ? (c.start + " to " + c.end) : "");
+        var rm=doc.createElement("button"); rm.textContent="Remove";
+        rm.addEventListener("click", function(){
+          recurring.closures.splice(idx,1); renderClosures(); invalidatePreview(); });
+        li.appendChild(rm); list.appendChild(li); })(i); }
+    }
+
+    function collectWeeklyHours(){
+      var out={};
+      for (var i=0;i<RECURRING_ORDER.length;i++){ var wd=RECURRING_ORDER[i];
+        var r=recurring.rows[wd];
+        if (r && r.open.checked){ out[wd]={open:true,start:r.start.value,end:r.end.value}; }
+        else { out[wd]={open:false,start:null,end:null}; } }
+      return out;
+    }
+
+    /* F3: add a single-date closure (end blank) OR an inclusive start..end
+     * range. Backend keeps MAX_CLOSURES / range-length authority. */
+    function onRecurringClosureAdd(){
+      var startEl=byId("recurring-closure-date"); if(!startEl) return;
+      var endEl=byId("recurring-closure-end");
+      var start=(startEl.value||"").trim();
+      var end=endEl ? (endEl.value||"").trim() : "";
+      if(start===""){ return; }
+      if(end===""){ recurring.closures.push({date:start}); }
+      else { recurring.closures.push({start:start, end:end}); }
+      startEl.value=""; if(endEl) endEl.value="";
+      renderClosures(); invalidatePreview();
+    }
+
+    function openRecurring(){
+      var gen=recurring.generation; showPage("page-recurring");
+      setRecurringText("recurring-state","Loading recurring schedule...");
+      data.getRecurringSchedule().then(function(outcome){
+        if (gen!==recurring.generation) return;   /* superseded by reset (D10) */
+        if (!outcome.ok){ handleFailure(outcome,"recurring-state"); return; }
+        recurring.loaded=true; renderRecurring(outcome.data); setRecurringText("recurring-state","");
+      });
+    }
+
+    /* F2: authoritative refresh - GET, render the GET body as the final state
+     * and token. Guarded by generation (reset) and saveSeq (superseding). */
+    function authoritativeRefresh(feedbackId, message){
+      var gen=recurring.generation; var seq=(recurring.saveSeq += 1);
+      data.getRecurringSchedule().then(function(outcome){
+        if (gen!==recurring.generation || seq!==recurring.saveSeq) return;
+        if (!outcome.ok){ handleFailure(outcome, feedbackId); return; }
+        renderRecurring(outcome.data);   /* final authoritative state + token */
+        if (message) setRecurringText(feedbackId, message);
+      });
+    }
+
+    /* F2: Save follows the P6-A lifecycle - PUT success -> authoritative GET is
+     * the final rendered state/token; a 409 conflict refreshes authoritatively;
+     * Save always invalidates any prior Preview. */
+    function onRecurringSave(){
+      if (recurring.busy) return; recurring.busy=true;
+      invalidatePreview();   /* V1: supersede any current/in-flight Preview BEFORE the PUT */
+      var gen=recurring.generation;
+      var minutesEl=byId("recurring-slot-minutes");
+      var minutes=minutesEl?parseInt(minutesEl.value,10):NaN;
+      setRecurringText("recurring-save-feedback","Saving...");
+      data.putRecurringSchedule(collectWeeklyHours(), minutes, recurring.closures.slice(),
+        recurring.token).then(function(outcome){
+        recurring.busy=false; if (gen!==recurring.generation) return;
+        if (!outcome.ok){
+          if (outcome.state==="conflict"){
+            authoritativeRefresh("recurring-save-feedback",
+              "Settings changed elsewhere; showing the latest saved state.");
+          } else { handleFailure(outcome,"recurring-save-feedback"); }
+          return; }
+        /* P6-A lifecycle: the authoritative GET (not the PUT body) is final. */
+        authoritativeRefresh("recurring-save-feedback","Recurring schedule saved.");
+      });
+    }
+
+    /* R2: human labels so each returned DAY shows its actual outcome (not just
+     * an aggregate). Booked windows/counts are surfaced so staff can see a
+     * closure will NOT cancel existing appointments. */
+    function previewDayLabel(d){
+      var o=d.outcome, s;
+      if (o==="would_publish"){ s="would publish"+(d.would_publish_count!=null?" ("+d.would_publish_count+")":""); }
+      else if (o==="existing_inventory"){ s="existing inventory"; }
+      else if (o==="weekly_closed_empty"){ s="weekly closed"; }
+      else if (o==="would_block"){ s="closure would block "+(d.would_block_available_held||0); }
+      else if (o==="closure_empty"){ s="closure (no open slots)"; }
+      else if (o==="dst_invalid"){ s="DST invalid - skipped"; }
+      else { s=o; }
+      if (Array.isArray(d.booked_windows) && d.booked_windows.length){
+        s += " - booked preserved: "+d.booked_windows.length; }
+      return s;
+    }
+    function applyDayLabel(d){
+      var o=d.outcome, s;
+      if (o==="published"){ s="published"+(d.published_count!=null?" ("+d.published_count+")":""); }
+      else if (o==="existing_inventory_skipped"){ s="existing inventory - skipped"; }
+      else if (o==="weekly_closed"){ s="weekly closed"; }
+      else if (o==="closure_blocked"){ s="closure blocked "+(d.blocked_count||0); }
+      else if (o==="closure_empty"){ s="closure (nothing to block)"; }
+      else if (o==="dst_skipped"){ s="DST skipped"; }
+      else { s=o; }
+      if (Array.isArray(d.booked_remaining) && d.booked_remaining.length){
+        s += " - booked preserved: "+d.booked_remaining.length; }
+      return s;
+    }
+    /* Genuine per-day rendering: one "DATE - outcome" line per returned day. */
+    function renderDayLines(header, days, labelFn){
+      var lines=[header];
+      for (var i=0;i<days.length;i++){ lines.push(days[i].day+" - "+labelFn(days[i])); }
+      return lines.join("\n");
+    }
+
+    /* R1 + R2: Preview pins the returned token verbatim, enables Apply ONLY when
+     * that token is non-null (a pre-first-Save Preview leaves Apply disabled),
+     * and renders each day's actual outcome. */
+    function onRecurringPreview(){
+      if (recurring.busy) return;   /* V1: reject new Preview while Save/Apply is in flight */
+      invalidatePreview();          /* V1: clear token + disable Apply + supersede older Preview... */
+      var gen=recurring.generation; var seq=recurring.previewSeq;   /* ...THEN capture this request */
+      setRecurringText("recurring-preview-output","Computing preview...");
+      data.previewRecurringSchedule().then(function(outcome){
+        /* T3: ignore a stale Preview response - superseded by reset (generation),
+         * or by any newer Preview / Save / edit / Apply-conflict (previewSeq). */
+        if (gen!==recurring.generation || seq!==recurring.previewSeq) return;
+        if (!outcome.ok){ invalidatePreview(); handleFailure(outcome,"recurring-preview-output"); return; }
+        var d=outcome.data;
+        recurring.previewedToken = d.schedule_config_updated_at;   /* pin exact token (may be null) */
+        var applyBtn=byId("recurring-apply");
+        if (applyBtn) applyBtn.disabled = (recurring.previewedToken === null);   /* R1 */
+        var note = recurring.previewedToken===null
+          ? " Save the schedule before it can be applied." : "";
+        var header="Preview "+d.start_day+" to "+d.end_day+" ("+d.days.length+
+          " days); applied day by day, not one transaction."+note;
+        setRecurringText("recurring-preview-output", renderDayLines(header, d.days, previewDayLabel));
+      });
+    }
+
+    /* R1 + R2: Apply sends the PREVIEWED token verbatim (only possible when it is
+     * non-null), renders each day's actual outcome plus totals, then invalidates
+     * the Preview; a stale conflict refreshes and requires a fresh Preview. */
+    function onRecurringApply(){
+      var applyToken = recurring.previewedToken;   /* V1: capture the exact token first */
+      if (applyToken===null) return;               /* R1: never fire without a current Preview */
+      if (recurring.busy) return; recurring.busy=true;
+      invalidatePreview();   /* V1: consume - one-shot per Preview; Apply disables immediately;
+                             * a late older Preview cannot re-arm Apply while this runs. */
+      var gen=recurring.generation;
+      setRecurringText("recurring-apply-output","Applying...");
+      data.applyRecurringSchedule(applyToken).then(function(outcome){
+        recurring.busy=false; if (gen!==recurring.generation) return;
+        if (!outcome.ok){
+          if (outcome.state==="conflict"){
+            authoritativeRefresh("recurring-apply-output",
+              "Configuration changed; Preview again before applying.");
+            return; }
+          handleFailure(outcome,"recurring-apply-output"); return; }
+        var d=outcome.data; var t=d.totals;
+        recurring.token = d.schedule_config_updated_at;   /* refresh authoritative token
+           (the Preview was already consumed/invalidated at Apply start - V1) */
+        var header="Applied "+d.start_day+" to "+d.end_day+" (day by day):";
+        var body=renderDayLines(header, d.days, applyDayLabel)+
+          "\nTotals - published days: "+t.published_days+
+          ", closure-blocked days: "+t.closure_blocked_days+
+          ", inventory-skipped days: "+t.existing_inventory_skipped_days+".";
+        setRecurringText("recurring-apply-output", body);
+      });
+    }
+
     function wireEvents() {
       byId("nav-dashboard").addEventListener("click", function () {
         showPage("page-dashboard");
@@ -1949,6 +2206,21 @@
       byId("detail-note-save").addEventListener("click", onNoteSave);
       byId("detail-note-clear").addEventListener("click", onNoteClear);
       byId("settings-save").addEventListener("click", onSettingsSave);
+      /* P4-B: null-tolerant wiring so a page suite WITHOUT the recurring ids
+       * (e.g. the frozen notification-settings suite) never breaks at
+       * construction; the recurring id-contract suites include these ids. */
+      var navRec = byId("nav-recurring");
+      if (navRec) navRec.addEventListener("click", openRecurring);
+      var recSave = byId("recurring-save");
+      if (recSave) recSave.addEventListener("click", onRecurringSave);
+      var recPrev = byId("recurring-preview");
+      if (recPrev) recPrev.addEventListener("click", onRecurringPreview);
+      var recApply = byId("recurring-apply");
+      if (recApply) recApply.addEventListener("click", onRecurringApply);
+      var recAddClosure = byId("recurring-closure-add");
+      if (recAddClosure) recAddClosure.addEventListener("click", onRecurringClosureAdd);
+      var recMinutesInput = byId("recurring-slot-minutes");
+      if (recMinutesInput) recMinutesInput.addEventListener("change", invalidatePreview);
     }
 
     wireEvents();

@@ -58,6 +58,16 @@ from app.routes import portal_appointment_actions as portal_appointment_actions_
 # this router adds no new auth path and no new tenant selector. Migration 009
 # adds the one concurrency-token column and MUST run before this code deploys.
 from app.routes import portal_notification_settings as portal_notification_settings_routes
+# P4-B (Portal Recurring Schedule Management v1): transport wiring lives in
+# app/routes/portal_recurring_schedule.py; every rule (office_admin guard,
+# config validation, the atomic partial-JSONB compare-and-set, the
+# authoritative re-read, and the Preview/Apply materialization orchestration
+# that DELEGATES all slot mutation to the frozen P4-A primitives) is owned by
+# app/services/portal_recurring_schedule_service.py. Authentication and tenant
+# binding are REUSED from the P2 owner (portal_auth via portal.py) - this
+# router adds no new auth path and no new tenant selector. Migration 010 adds
+# the one concurrency-token column and MUST run before this code deploys.
+from app.routes import portal_recurring_schedule as portal_recurring_schedule_routes
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -108,6 +118,7 @@ app.include_router(portal_appointments_routes.router)  # Portal Appointments v1:
 app.include_router(portal_schedule_routes.router)  # P4-A: portal slot schedule controls
 app.include_router(portal_appointment_actions_routes.router)  # P5-A: portal appointment Confirm/Cancel
 app.include_router(portal_notification_settings_routes.router)  # P6-A: portal notification destination settings
+app.include_router(portal_recurring_schedule_routes.router)  # P4-B: portal recurring schedule (weekly hours + closures -> materialization)
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)

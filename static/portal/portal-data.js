@@ -52,6 +52,12 @@
    * are ever sent; tenancy is the verified bearer token alone. */
   var NOTIFICATION_SETTINGS_URL = "/portal/notification-settings";
 
+  /* P4-B: the office RECURRING SCHEDULE surface. One base URL; /preview and
+   * /apply are path suffixes built by concatenation (no second base URL). The
+   * opaque config
+   * token is echoed VERBATIM, never parsed (A1). */
+  var RECURRING_SCHEDULE_URL = "/portal/schedule/recurring";
+
   /* Closed vocabulary of schedule query parameter names (Constitution 4.5):
    * anything not in this list is NEVER serialized, and there is deliberately
    * NO tenant parameter - tenancy is the verified bearer token alone. */
@@ -696,6 +702,31 @@
       return authorizedSend("GET", url, undefined, isValidBody);
     }
 
+    /* P4-B recurring-config body validators (shape only; the backend is the
+     * authority). weekly_hours is an object, slot_minutes a number, closures
+     * an array, and the token a string or null (opaque). */
+    function isPlainObject(v){return v!==null&&typeof v==="object"&&!Array.isArray(v);}
+    function isValidRecurringConfigBody(body){
+      return isPlainObject(body)&&isPlainObject(body.weekly_hours)&&
+        typeof body.slot_minutes==="number"&&Array.isArray(body.closures)&&
+        (body.schedule_config_updated_at===null||
+         typeof body.schedule_config_updated_at==="string");
+    }
+    function _validToken(v){ return v===null||typeof v==="string"; }
+    function isValidRecurringPreviewBody(body){
+      /* F6: pin the full Preview shape; a malformed 200 fails closed as
+       * invalid_response rather than reaching the panel. */
+      return isPlainObject(body)&&Array.isArray(body.days)&&
+        typeof body.start_day==="string"&&typeof body.end_day==="string"&&
+        _validToken(body.schedule_config_updated_at);
+    }
+    function isValidRecurringApplyBody(body){
+      /* F6: Apply must carry token + horizon + per-day list + totals. */
+      return isPlainObject(body)&&Array.isArray(body.days)&&isPlainObject(body.totals)&&
+        typeof body.start_day==="string"&&typeof body.end_day==="string"&&
+        _validToken(body.schedule_config_updated_at);
+    }
+
     /* Public surface: one function per backend endpoint, nothing else. */
     return {
       /* GET /portal/dashboard - counts + recent leads for the ONE office
@@ -807,6 +838,31 @@
           SCHEDULE_URL + "/days/" + encodeURIComponent(String(day)) +
             "/block-all-open",
           undefined, isValidBlockAllOpenBody);
+      },
+      /* P4-B - GET /portal/schedule/recurring: the office's recurring config
+       * (weekly hours + slot_minutes + closures) and the opaque token. */
+      getRecurringSchedule: function () {
+        return authorizedGet(RECURRING_SCHEDULE_URL, isValidRecurringConfigBody);
+      },
+      /* P4-B - PUT /portal/schedule/recurring: save config only (atomic CAS).
+       * expectedToken is sent VERBATIM (opaque, never reserialized). */
+      putRecurringSchedule: function (weeklyHours, slotMinutes, closures, expectedToken) {
+        return authorizedSend("PUT", RECURRING_SCHEDULE_URL,
+          { weekly_hours: weeklyHours, slot_minutes: slotMinutes,
+            closures: closures,
+            expected_schedule_config_updated_at: expectedToken },
+          isValidRecurringConfigBody);
+      },
+      /* P4-B - POST /portal/schedule/recurring/preview: body EXACTLY {} (F2). */
+      previewRecurringSchedule: function () {
+        return authorizedSend("POST", RECURRING_SCHEDULE_URL + "/preview",
+          {}, isValidRecurringPreviewBody);
+      },
+      /* P4-B - POST /portal/schedule/recurring/apply: send the expected token. */
+      applyRecurringSchedule: function (expectedToken) {
+        return authorizedSend("POST", RECURRING_SCHEDULE_URL + "/apply",
+          { expected_schedule_config_updated_at: expectedToken },
+          isValidRecurringApplyBody);
       },
       /* P6-A - GET /portal/notification-settings: the office's own two
        * notification destinations + the concurrency token. No parameters,

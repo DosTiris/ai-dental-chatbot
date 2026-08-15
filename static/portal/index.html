@@ -89,6 +89,8 @@
                 type="button">Appointments</button>
         <button id="nav-schedule" class="portal-nav-button"
                 type="button">Schedule</button>
+        <button id="nav-recurring" class="portal-nav-button"
+                type="button">Recurring</button>
         <button id="nav-settings" class="portal-nav-button"
                 type="button">Settings</button>
       </nav>
@@ -252,6 +254,44 @@
           <p id="detail-transcript-note"
              class="portal-muted portal-transcript-note"></p>
           <ul id="detail-messages" class="portal-messages"></ul>
+        </div>
+      </section>
+
+      <!-- P4-B: Recurring weekly schedule. Saves CONFIG ONLY (weekly hours
+           + slot length + closures); Preview then Apply materializes bounded
+           slots through the frozen P4-A publish path. appointment_slots stays
+           the sole bookability authority; this panel never books. -->
+      <section id="page-recurring" hidden>
+        <h3 class="portal-section-title">Recurring schedule</h3>
+        <p id="recurring-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <div class="portal-workflow">
+          <div id="recurring-hours" class="portal-recurring-hours"></div>
+
+          <label class="portal-label" for="recurring-slot-minutes">Slot length (minutes)</label>
+          <input class="portal-input" id="recurring-slot-minutes" type="number"
+                 min="10" max="240" step="5" />
+
+          <h4 class="portal-section-subtitle">Closures</h4>
+          <ul id="recurring-closures" class="portal-lead-list"></ul>
+          <label class="portal-label" for="recurring-closure-date">Closure date</label>
+          <input class="portal-input" id="recurring-closure-date" type="date" />
+          <label class="portal-label" for="recurring-closure-end">Closure end (optional, for a range)</label>
+          <input class="portal-input" id="recurring-closure-end" type="date" />
+          <button id="recurring-closure-add" class="portal-button portal-button-secondary"
+                  type="button">Add closure</button>
+          <p id="recurring-closure-warning" class="portal-muted"></p>
+
+          <button id="recurring-save" class="portal-button" type="button">
+            Save recurring schedule</button>
+          <p id="recurring-save-feedback" class="portal-muted" aria-live="polite"></p>
+
+          <button id="recurring-preview" class="portal-button portal-button-secondary"
+                  type="button">Preview</button>
+          <p id="recurring-preview-output" class="portal-muted" aria-live="polite"></p>
+
+          <button id="recurring-apply" class="portal-button" type="button">Apply</button>
+          <p id="recurring-apply-output" class="portal-muted" aria-live="polite"></p>
         </div>
       </section>
 

@@ -766,6 +766,153 @@ test("no session means NO schedule request at all", async () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* P4-B: recurring-schedule data layer (GET/PUT/preview/apply)          */
+/* ------------------------------------------------------------------ */
+
+function validRecurringBody(overrides) {
+  return Object.assign({
+    weekly_hours: { mon: { open: true, start: "09:00", end: "17:00" } },
+    slot_minutes: 30,
+    closures: [],
+    schedule_config_updated_at: "2026-08-14T12:00:00.000000Z"
+  }, overrides || {});
+}
+function validPreviewBody(overrides) {
+  return Object.assign({
+    schedule_config_updated_at: "2026-08-14T12:00:00.000000Z",
+    start_day: "2026-08-14", end_day: "2026-09-13", days: []
+  }, overrides || {});
+}
+function validApplyBody(overrides) {
+  return Object.assign({
+    schedule_config_updated_at: "2026-08-14T12:00:00.000000Z",
+    start_day: "2026-08-14", end_day: "2026-09-13",
+    days: [], totals: { published_days: 0, closure_blocked_days: 0,
+      existing_inventory_skipped_days: 0 }
+  }, overrides || {});
+}
+
+test("P4-B: GET recurring carries the Bearer token to the exact endpoint", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/recurring", method: "GET",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validRecurringBody() });
+  const outcome = await env.data.getRecurringSchedule();
+  assert(outcome.ok, "ok"); assertEqual(env.fetch.remaining(), 0, "no leftover");
+});
+
+test("P4-B: PUT recurring sends EXACTLY the four-key body with the token VERBATIM", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/recurring", method: "PUT",
+      bodyJson: { weekly_hours: { mon: { open: true, start: "09:00", end: "17:00" } },
+                  slot_minutes: 30, closures: [],
+                  expected_schedule_config_updated_at: "2026-08-14T12:00:00.000000Z" } },
+    { status: 200, json: validRecurringBody() });
+  const outcome = await env.data.putRecurringSchedule(
+    { mon: { open: true, start: "09:00", end: "17:00" } }, 30, [], "2026-08-14T12:00:00.000000Z");
+  assert(outcome.ok, "ok"); assertEqual(env.fetch.remaining(), 0, "exact body matched");
+});
+
+test("P4-B: PUT recurring 409 maps to conflict; 422 maps to bad_request", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring", method: "PUT" },
+    { status: 409, json: {} });
+  const c = await env.data.putRecurringSchedule({}, 30, [], "2026-08-14T12:00:00.000000Z");
+  assertEqual(c.state, "conflict", "409 -> conflict");
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring", method: "PUT" },
+    { status: 422, json: {} });
+  const b = await env.data.putRecurringSchedule({}, 30, [], "2026-08-14T12:00:00.000000Z");
+  assertEqual(b.state, "bad_request", "422 -> bad_request");
+});
+
+test("P4-B: Preview POSTs a body of EXACTLY {} (F2)", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/recurring/preview", method: "POST",
+      bodyJson: {} },
+    { status: 200, json: validPreviewBody() });
+  const outcome = await env.data.previewRecurringSchedule();
+  assert(outcome.ok, "ok"); assertEqual(env.fetch.remaining(), 0, "preview body was exactly {}");
+});
+
+test("P4-B: Apply POSTs the expected token VERBATIM and returns totals", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/recurring/apply", method: "POST",
+      bodyJson: { expected_schedule_config_updated_at: "2026-08-14T12:00:00.000000Z" } },
+    { status: 200, json: validApplyBody() });
+  const outcome = await env.data.applyRecurringSchedule("2026-08-14T12:00:00.000000Z");
+  assert(outcome.ok, "ok"); assertEqual(env.fetch.remaining(), 0, "apply sent the verbatim token");
+});
+
+test("P4-B: Apply 409 maps to conflict", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/apply", method: "POST" },
+    { status: 409, json: {} });
+  const outcome = await env.data.applyRecurringSchedule("2026-08-14T12:00:00.000000Z");
+  assertEqual(outcome.state, "conflict", "409 -> conflict");
+});
+
+test("P4-B: no session means NO recurring request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  assertEqual((await env.data.getRecurringSchedule()).state, "signed_out", "GET signed_out");
+  assertEqual((await env.data.putRecurringSchedule({}, 30, [], null)).state, "signed_out", "PUT signed_out");
+  assertEqual((await env.data.previewRecurringSchedule()).state, "signed_out", "preview signed_out");
+  assertEqual((await env.data.applyRecurringSchedule(null)).state, "signed_out", "apply signed_out");
+  assertEqual(env.fetch.seen().length, 0, "no request was made");
+});
+
+test("P4-B/F6: a Preview 200 missing schedule_config_updated_at fails closed as invalid_response", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/preview", method: "POST" },
+    { status: 200, json: { start_day: "2026-08-14", end_day: "2026-09-13", days: [] } });
+  const outcome = await env.data.previewRecurringSchedule();
+  assertEqual(outcome.state, "invalid_response", "malformed Preview 200 -> invalid_response");
+});
+
+test("P4-B/F6: a Preview 200 missing start_day/end_day/days fails closed", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/preview", method: "POST" },
+    { status: 200, json: { schedule_config_updated_at: "2026-08-14T12:00:00.000000Z" } });
+  const outcome = await env.data.previewRecurringSchedule();
+  assertEqual(outcome.state, "invalid_response", "missing horizon/days -> invalid_response");
+});
+
+test("P4-B/F6: an Apply 200 missing totals fails closed as invalid_response", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/apply", method: "POST" },
+    { status: 200, json: { schedule_config_updated_at: "2026-08-14T12:00:00.000000Z",
+      start_day: "2026-08-14", end_day: "2026-09-13", days: [] } });
+  const outcome = await env.data.applyRecurringSchedule("2026-08-14T12:00:00.000000Z");
+  assertEqual(outcome.state, "invalid_response", "Apply without totals -> invalid_response");
+});
+
+test("P4-B/F6: an Apply 200 missing horizon/token fails closed", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/apply", method: "POST" },
+    { status: 200, json: { days: [], totals: { published_days: 0, closure_blocked_days: 0,
+      existing_inventory_skipped_days: 0 } } });
+  const outcome = await env.data.applyRecurringSchedule("2026-08-14T12:00:00.000000Z");
+  assertEqual(outcome.state, "invalid_response", "Apply missing token/horizon -> invalid_response");
+});
+
+test("P4-B/R2: a Preview 200 with closure booked_windows validates and passes the day through", async () => {
+  const env = makeData(); seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/schedule/recurring/preview", method: "POST" },
+    { status: 200, json: { schedule_config_updated_at: "2026-08-14T12:00:00.000000Z",
+      start_day: "2026-08-14", end_day: "2026-09-13",
+      days: [ { day: "2026-12-25", outcome: "closure_empty",
+                would_block_available_held: 0,
+                booked_windows: [ { start_utc: "2026-12-25T14:00:00Z",
+                                    end_utc: "2026-12-25T14:30:00Z" } ] } ] } });
+  const outcome = await env.data.previewRecurringSchedule();
+  assert(outcome.ok, "valid preview with booked_windows is ok");
+  assertEqual(outcome.data.days[0].booked_windows.length, 1, "booked_windows passed through");
+});
+
+/* ------------------------------------------------------------------ */
 
 (async () => {
   const summary = await h.runRegisteredTests("test_portal_data");

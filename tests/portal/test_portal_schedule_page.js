@@ -110,6 +110,15 @@ const PAGE_ELEMENT_IDS = [
   "schedule-booked-remaining", "schedule-action-feedback",
   "nav-settings", "page-settings", "settings-state",
   "settings-email", "settings-phone", "settings-save",
+  /* P4-B id-contract growth (disclosed, no behavior change): the recurring
+   * panel ids that wireEvents/showPage/resetContent reference must exist in
+   * the fake DOM (identical house pattern as P6-A). */
+  "nav-recurring", "page-recurring", "recurring-state", "recurring-hours",
+  "recurring-slot-minutes", "recurring-closures", "recurring-closure-date",
+  "recurring-closure-add", "recurring-closure-end", "recurring-closure-warning",
+  "recurring-save", "recurring-save-feedback",
+  "recurring-preview", "recurring-preview-output",
+  "recurring-apply", "recurring-apply-output",
   "settings-feedback", "settings-email-status", "settings-sms-status"
 ];
 

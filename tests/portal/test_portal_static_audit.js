@@ -186,6 +186,21 @@ test("audit: portal-data calls only the allow-listed read endpoints", () => {
     "notification-settings endpoint literal must exist (P6-A)");
 });
 
+/* P4-B: the recurring-schedule surface is a MULTI-segment path the
+ * single-segment allow-list regex above cannot capture, so it is brought
+ * under the closed list here: exactly ONE base literal must appear, and
+ * /preview + /apply are built by concatenation (no second literal). */
+test("audit: portal-data recurring surface uses exactly the one approved base literal", () => {
+  const content = read("portal-data.js");
+  assert(content.indexOf('"/portal/schedule/recurring"') !== -1,
+    "recurring base endpoint literal must exist (P4-B)");
+  const recurringLiterals = content.match(/"\/portal\/schedule\/recurring[a-z/-]*"/g) || [];
+  assertEqual(recurringLiterals.length, 1,
+    "recurring surface must use exactly one base literal; /preview and /apply are concatenated");
+  assertEqual(recurringLiterals[0], '"/portal/schedule/recurring"',
+    "the one recurring literal must be the approved base");
+});
+
 /* ------------------------------------------------------------------ */
 /* P4-A: schedule surface audits                                       */
 /* ------------------------------------------------------------------ */

@@ -32,6 +32,17 @@ class Client(Base):
     # deploy this mapping SECOND (see the 009 header; rollback order reverse).
     notification_settings_updated_at = Column(DateTime(timezone=True), nullable=True)
 
+    # P4-B: optimistic-concurrency token for the portal recurring-schedule
+    # config writer (migration 010). Server-owned, strictly advancing on
+    # every accepted config write (weekly office_hours +
+    # settings.calendar.recurring), NULL until the first portal Save. NOT a
+    # business value and never exposed except as the schedule config token.
+    # SEPARATE from the P6-A notification token above; the two never share.
+    # Migration 010 is the sole schema authority for existing databases
+    # (create_all cannot ALTER an existing clients table); production must
+    # migrate FIRST and deploy this mapping SECOND (see the 010 header).
+    schedule_config_updated_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     conversations = relationship("Conversation", back_populates="client")  # Client -> many conversations
     faqs = relationship("ClientFAQ", back_populates="client")  # Client -> many FAQs
