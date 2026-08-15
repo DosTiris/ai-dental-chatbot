@@ -18,7 +18,8 @@ const suites = [
   "test_portal_schedule_page.js",  /* P4-A */
   "test_portal_appointment_actions_page.js",  /* P5-A */
   "test_portal_notification_settings_page.js",  /* P6-A */
-  "test_portal_recurring_schedule_page.js"  /* P4-B */
+  "test_portal_recurring_schedule_page.js",  /* P4-B */
+  "test_portal_calendar_page.js"  /* Visual Calendar Phase 1 */
 ];
 
 let failed = 0;

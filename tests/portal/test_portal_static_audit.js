@@ -27,7 +27,8 @@ const PORTAL_FILES = [
   "portal-app.js",
   "portal-reset.js",
   "portal-data.js",   /* P3-B1: read-only data access */
-  "portal-pages.js"   /* P3-B1: dashboard/leads DOM glue */
+  "portal-pages.js",  /* P3-B1: dashboard/leads DOM glue */
+  "portal-calendar.js" /* Visual Calendar Phase 1: pure Week-view render */
 ];
 
 function read(name) {
@@ -137,7 +138,7 @@ test("audit: no client identifier vocabulary in any portal file", () => {
 
 test("audit: portal JS never reads the query string (no tenant/params channel)", () => {
   for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js",
-    "portal-data.js", "portal-pages.js"]) {
+    "portal-data.js", "portal-pages.js", "portal-calendar.js"]) {
     const content = read(name);
     assert(content.indexOf("location.search") === -1,
       name + " must not read location.search");
@@ -150,7 +151,7 @@ test("audit: portal JS never reads the query string (no tenant/params channel)",
 
 test("audit: portal JS references no operator or Calendar admin routes", () => {
   for (const name of ["portal-core.js", "portal-app.js", "portal-reset.js",
-    "portal-data.js", "portal-pages.js"]) {
+    "portal-data.js", "portal-pages.js", "portal-calendar.js"]) {
     const content = read(name);
     assert(content.indexOf("/admin/") === -1, name + " must not call /admin/ routes");
     assert(content.indexOf("/chat") === -1, name + " must not call the patient chat API");
@@ -255,6 +256,152 @@ test("audit: portal-pages performs no network requests of its own", () => {
     "portal-pages.js must not use XMLHttpRequest");
   assert(content.indexOf('"/portal/') === -1,
     "portal-pages.js must not hold backend endpoint literals");
+});
+
+/* Visual Calendar Phase 1: the renderer is a PURE presentation module.
+ * This is the byte-level proof that it never became a second network
+ * owner - the single highest architectural risk of adding a page. */
+test("audit: portal-calendar performs no network requests of its own", () => {
+  const content = read("portal-calendar.js");
+  assert(content.indexOf("fetch") === -1,
+    "portal-calendar.js must not reference fetch at all");
+  assert(content.indexOf("XMLHttpRequest") === -1,
+    "portal-calendar.js must not use XMLHttpRequest");
+  assert(content.indexOf("/portal/") === -1,
+    "portal-calendar.js must hold no backend endpoint path at all");
+  assert(content.indexOf("EventSource") === -1,
+    "portal-calendar.js must not open a server stream");
+  assert(content.indexOf("WebSocket") === -1,
+    "portal-calendar.js must not open a socket");
+});
+
+/* Visual Calendar Phase 1: the four presentation helpers are INJECTED,
+ * never redeclared, so the portal keeps exactly one time formatter, one
+ * day-shift helper, and one status vocabulary per entity (Rule 3). */
+test("audit: portal-calendar reimplements none of the injected helpers", () => {
+  const content = read("portal-calendar.js");
+  for (const name of ["formatInTimeZone", "shiftLocalDay",
+    "scheduleSlotStatusLabel", "appointmentStatusLabel",
+    "notificationOutcomeLabel"]) {
+    assert(content.indexOf("function " + name) === -1,
+      "portal-calendar.js must not declare its own " + name);
+  }
+  /* And it must genuinely take them from the caller. */
+  assert(content.indexOf("deps.formatInTimeZone") !== -1,
+    "formatInTimeZone must be injected");
+  assert(content.indexOf("deps.shiftLocalDay") !== -1,
+    "shiftLocalDay must be injected");
+  assert(content.indexOf("deps.scheduleSlotStatusLabel") !== -1,
+    "scheduleSlotStatusLabel must be injected");
+  assert(content.indexOf("deps.appointmentStatusLabel") !== -1,
+    "appointmentStatusLabel must be injected");
+  assert(content.indexOf("deps.notificationOutcomeLabel") !== -1,
+    "notificationOutcomeLabel must be injected");
+});
+
+/* Time-axis refinement: geometry is applied through CSSOM property
+ * assignment (element.style.top = ...), which the baseline CSP permits.
+ * A style attribute parsed from a string would be blocked by style-src
+ * 'self', so the grid would silently collapse in production. */
+test("audit: portal-calendar sets geometry via CSSOM, never a style attribute", () => {
+  const content = read("portal-calendar.js");
+  assert(content.indexOf("setAttribute") === -1,
+    "portal-calendar.js must not use setAttribute (CSP style-src)");
+  assert(content.indexOf("innerHTML") === -1,
+    "portal-calendar.js must not use innerHTML");
+  assert(content.indexOf(".style.top") !== -1,
+    "vertical position must be applied through CSSOM");
+  assert(content.indexOf(".style.height") !== -1,
+    "block height must be applied through CSSOM");
+});
+
+/* Final polish: the calendar must not grow its own vertical scroll box.
+ * The page scrolls; a nested vertical scroller would hide the early and
+ * late hours the expanding window exists to reveal. */
+test("audit: the calendar grid introduces no internal vertical scrolling", () => {
+  const css = read("portal.css");
+  const start = css.indexOf(".portal-calendar-grid {");
+  assert(start !== -1, "the calendar grid rule must exist");
+  const rule = css.slice(start, css.indexOf("}", start));
+  assert(rule.indexOf("overflow-x: auto") !== -1,
+    "day columns scroll HORIZONTALLY");
+  assert(rule.indexOf("overflow-y: auto") === -1 &&
+    rule.indexOf("overflow-y: scroll") === -1,
+    "the calendar must not become its own vertical scroll container");
+  assert(css.indexOf(".portal-calendar-canvas {") !== -1,
+    "the canvas rule must exist");
+  const canvas = css.slice(css.indexOf(".portal-calendar-canvas {"),
+    css.indexOf("}", css.indexOf(".portal-calendar-canvas {")));
+  assert(canvas.indexOf("overflow-y") === -1,
+    "the day canvas must not scroll vertically either");
+});
+
+/* Final polish: Open availability is a background layer. A solid fill or a
+ * full border would put it back in competition with the appointments. */
+test("audit: Open availability keeps a subdued background treatment", () => {
+  const css = read("portal.css");
+  const start = css.indexOf(".portal-calendar-band-available {");
+  assert(start !== -1, "the open-availability rule must exist");
+  const rule = css.slice(start, css.indexOf("}", start));
+  assert(rule.indexOf("rgba(") !== -1,
+    "the fill must be a translucent tint, not a solid panel colour");
+  assert(!/\bborder:\s/.test(rule),
+    "no full border - a thin left accent only");
+});
+
+/* Time-axis refinement: the detail panel is READ-ONLY. No action control
+ * and no unauthorized action vocabulary may appear on the calendar surface
+ * until a separate contract approves one. */
+test("audit: the calendar surface renders no unauthorized action vocabulary", () => {
+  const html = read("index.html");
+  const start = html.indexOf('id="page-calendar"');
+  assert(start !== -1, "index.html must contain the page-calendar section");
+  const end = html.indexOf("</section>", start);
+  assert(end !== -1, "page-calendar section must be closed");
+  const section = html.slice(start, end);
+  for (const word of ["Reschedule", "Duplicate", "New appointment",
+    "Book ", "Create appointment"]) {
+    assert(section.indexOf(word) === -1,
+      "page-calendar markup must not offer " + word);
+  }
+  /* The only controls in the section are week navigation, refresh and the
+   * panel close: four buttons, none of them a mutation. */
+  const buttons = section.match(/<button/g) || [];
+  assert(buttons.length === 4,
+    "expected exactly the four read-only controls, found " + buttons.length);
+});
+
+/* Visual Calendar Phase 1: the grid never advertises a slot as bookable.
+ * Booking eligibility is the availability policy owner's decision and
+ * depends on rules (minimum notice, horizon, service) the grid never sees;
+ * an open slot therefore renders with the frozen "Open" status wording.
+ *
+ * SCOPED DELIBERATELY to the calendar surface: the frozen P4-B recurring
+ * warning legitimately tells the office how to make dates bookable again,
+ * and Phase 1 does not touch that wording (Rule 12: no unrelated change). */
+test("audit: the calendar surface never claims a slot is bookable", () => {
+  assert(read("portal-calendar.js").toLowerCase().indexOf("bookable") === -1,
+    "portal-calendar.js must not use the word bookable");
+  const html = read("index.html");
+  const start = html.indexOf('id="page-calendar"');
+  assert(start !== -1, "index.html must contain the page-calendar section");
+  const end = html.indexOf("</section>", start);
+  assert(end !== -1, "page-calendar section must be closed");
+  assert(html.slice(start, end).toLowerCase().indexOf("bookable") === -1,
+    "page-calendar markup must not use the word bookable");
+});
+
+/* Visual Calendar Phase 1: portal-pages.js reads the renderer at
+ * construction, so the module must be defined FIRST. A reversed order
+ * would silently degrade the Calendar page to its unavailable state. */
+test("audit: index.html loads portal-calendar.js before portal-pages.js", () => {
+  const content = read("index.html");
+  const calendarAt = content.indexOf('src="/static/portal/portal-calendar.js"');
+  const pagesAt = content.indexOf('src="/static/portal/portal-pages.js"');
+  assert(calendarAt !== -1, "index.html must load portal-calendar.js");
+  assert(pagesAt !== -1, "index.html must load portal-pages.js");
+  assert(calendarAt < pagesAt,
+    "portal-calendar.js must be loaded before portal-pages.js");
 });
 
 test("audit: the only backend endpoints the portal calls are /portal/config and /portal/me", () => {

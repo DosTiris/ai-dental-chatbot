@@ -87,6 +87,8 @@
                 type="button">Leads</button>
         <button id="nav-appointments" class="portal-nav-button"
                 type="button">Appointments</button>
+        <button id="nav-calendar" class="portal-nav-button"
+                type="button">Calendar</button>
         <button id="nav-schedule" class="portal-nav-button"
                 type="button">Schedule</button>
         <button id="nav-recurring" class="portal-nav-button"
@@ -212,6 +214,56 @@
         <ul id="schedule-list" class="portal-lead-list"></ul>
       </section>
 
+      <!-- Visual Calendar Phase 1: a READ-ONLY Week view over the existing
+           authoritative Schedule and Appointments reads. It books nothing
+           and mutates nothing: Block/Unblock stay on the Schedule page and
+           Confirm/Cancel stay on the Appointments page, each with their
+           existing guards. The grid never asserts booking eligibility - it
+           shows the authoritative slot and appointment status only. -->
+      <section id="page-calendar" hidden>
+        <div class="portal-appt-range portal-calendar-controls">
+          <button id="calendar-prev" class="portal-button portal-button-secondary"
+                  type="button">Previous week</button>
+          <span id="calendar-range-label" class="portal-muted"></span>
+          <button id="calendar-next" class="portal-button portal-button-secondary"
+                  type="button">Next week</button>
+          <button id="calendar-refresh" class="portal-button portal-button-secondary"
+                  type="button">Refresh</button>
+        </div>
+        <!-- The office timezone is stated ONCE here, at calendar level. It is
+             deliberately not repeated inside every block. -->
+        <p id="calendar-timezone-note" class="portal-muted"></p>
+        <p id="calendar-state" class="portal-muted portal-page-state"
+           aria-live="polite"></p>
+        <div class="portal-calendar-layout">
+          <div id="calendar-grid" class="portal-calendar-grid"></div>
+          <!-- READ-ONLY appointment details. One element: CSS alone decides
+               whether it presents as a right-hand drawer on a wide screen or
+               a near-full-screen sheet on a narrow one. It is populated
+               entirely from the appointment row the week read already
+               returned, so opening it issues no request. -->
+          <aside id="calendar-drawer" class="portal-calendar-drawer"
+                 aria-label="Appointment details" hidden>
+            <div class="portal-calendar-drawer-head">
+              <div>
+                <h3 id="calendar-drawer-title"
+                    class="portal-calendar-drawer-title"></h3>
+                <p id="calendar-drawer-status" class="portal-muted"></p>
+              </div>
+              <button id="calendar-drawer-close"
+                      class="portal-button portal-button-secondary"
+                      type="button">Close</button>
+            </div>
+            <dl id="calendar-drawer-fields" class="portal-detail-fields"></dl>
+            <!-- Reserved space for a future, separately approved action
+                 contract. No action control is rendered in this phase. -->
+            <div class="portal-calendar-drawer-actions">
+              <p id="calendar-drawer-actions-note" class="portal-muted"></p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
       <section id="page-lead-detail" hidden>
         <button id="detail-back" class="portal-button portal-button-secondary"
                 type="button">Back to leads</button>
@@ -330,6 +382,7 @@
   </main>
   <script src="/static/portal/portal-core.js"></script>
   <script src="/static/portal/portal-data.js"></script>
+  <script src="/static/portal/portal-calendar.js"></script>
   <script src="/static/portal/portal-pages.js"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>

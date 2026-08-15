@@ -86,7 +86,19 @@
     schedule_bulk_note:
       "Blocks every slot that is currently open on this day. Publishing new slots later will reopen the day.",
     schedule_booked_remaining_prefix: "Booked appointments remain at: ",
-    schedule_slot_gone: "That slot could not be found. Showing the latest schedule."
+    schedule_slot_gone: "That slot could not be found. Showing the latest schedule.",
+    /* Visual Calendar Phase 1 wording (read-only Week view). Deliberately
+     * NOT prefixed schedule_* : the Schedule page owns that vocabulary and
+     * its audited no-day-shutting rule; these are a separate page. */
+    calendar_empty: "Nothing scheduled in this range.",
+    calendar_range_mismatch:
+      "The portal returned two different date ranges. Nothing is shown; please refresh.",
+    calendar_unavailable_module:
+      "The calendar view could not be loaded. Please reload the portal.",
+    calendar_outside_prefix: "Entries outside this range were not shown: ",
+    calendar_drawer_actions_note:
+      "Confirm and Cancel remain on the Appointments page.",
+    calendar_drawer_untitled: "Appointment"
   };
 
   /* ------------------------------------------------------------------ */
@@ -341,7 +353,7 @@
 
     /* Stale-response guards: one monotonically increasing id per page. */
     var requestIds = { dashboard: 0, leads: 0, detail: 0, appointments: 0,
-      schedule: 0 };
+      schedule: 0, calendar: 0 };
 
     /* P4-A Schedule page state (contract v1.2 SS6 / Correction C4).
      * The Schedule page MUTATES, so the read-page sequence guard alone is
@@ -373,6 +385,36 @@
       publishBusy: false,
       bulkBusy: false,
       slotBusy: {}
+    };
+
+    /* Visual Calendar Phase 1 state. Week navigation mirrors the frozen
+     * schedule/appointments discipline exactly: weekOffset 0 means the
+     * BACKEND default range (both bounds omitted, so the backend anchors
+     * "today" in the OFFICE timezone), and any non-zero offset navigates
+     * whole seven-day windows relative to the last default start the
+     * backend echoed - never a browser-computed today.
+     *
+     * GUARDS: requestIds.calendar is the supersession counter (only the
+     * newest issued load may render) and lifecycle is the page/session
+     * token bumped by resetContent and by page re-entry (a load issued
+     * before a wipe or re-entry may never render afterwards). There is
+     * deliberately NO mutation-generation counter here: Phase 1 is
+     * strictly read-only and owns no mutation, so a generation counter
+     * would guard nothing. It belongs with the first calendar write
+     * action, not before it (Constitution 12/17: no premature scaffolding). */
+    var calendar = {
+      weekOffset: 0,
+      defaultStart: null,
+      currentStart: null,
+      currentEnd: null,
+      /* The office timezone from the AGREED envelopes, kept so the
+       * detail panel renders in the same zone the grid was laid out in.
+       * It is only ever adopted from a consistency-checked pair. */
+      timezoneName: "",
+      /* The appointment row the READ-ONLY detail panel is showing, or
+       * null. It is a reference to an ALREADY loaded row - never fetched. */
+      selected: null,
+      lifecycle: 0
     };
 
     /* Appointments week-navigation state. weekOffset 0 = the backend
@@ -455,6 +497,34 @@
       saveSeq: 0, previewSeq: 0, previewedToken: null, closures: [], rows: {}
     };
 
+    /* Visual Calendar Phase 1: the PURE rendering module (portal-calendar.js).
+     * It is OPTIONAL at construction - the null-tolerant convention P4-B
+     * established for the recurring panel - so a context that loads only
+     * portal-pages.js (every frozen page suite) constructs exactly as
+     * before and every other page is bit-for-bit unaffected.
+     *
+     * The four presentation helpers are INJECTED rather than reimplemented,
+     * so the portal keeps ONE time formatter and ONE status vocabulary
+     * (Rule 3). The calendar module performs no request of its own; this
+     * file remains the only caller of the data owner. */
+    var calendarRenderer = null;
+    if (typeof globalScope.createMiaPortalCalendar === "function") {
+      calendarRenderer = globalScope.createMiaPortalCalendar({
+        documentRef: doc,
+        formatInTimeZone: formatInTimeZone,
+        scheduleSlotStatusLabel: scheduleSlotStatusLabel,
+        appointmentStatusLabel: appointmentStatusLabel,
+        notificationOutcomeLabel: notificationOutcomeLabel,
+        shiftLocalDay: shiftLocalDay,
+        /* READ-ONLY selection. The row handed back is the one ALREADY
+         * loaded by the week read, so opening details issues no request
+         * of any kind and cannot mutate anything. */
+        onAppointmentSelect: function (appointment) {
+          openCalendarDrawer(appointment);
+        }
+      });
+    }
+
     function byId(id) {
       return doc.getElementById(id);
     }
@@ -472,7 +542,8 @@
     /* Show exactly one page section; hide the rest (single-meaning state). */
     function showPage(pageId) {
       var pages = ["page-dashboard", "page-leads", "page-lead-detail",
-        "page-appointments", "page-schedule", "page-settings", "page-recurring"];
+        "page-appointments", "page-schedule", "page-settings", "page-recurring",
+        "page-calendar"];
       for (var i = 0; i < pages.length; i++) {
         /* P4-B: null-tolerant so a suite without the page-recurring node
          * (the frozen notification-settings suite) never throws here. */
@@ -486,8 +557,12 @@
       var isDashboard = pageId === "page-dashboard";
       var isSettings = pageId === "page-settings";
       var isRecurring = pageId === "page-recurring";
+      /* Visual Calendar Phase 1: Calendar is its own section. It MUST be
+       * excluded here, otherwise the Leads-default fallback would light up
+       * the Leads nav while the Calendar page is visible. */
+      var isCalendar = pageId === "page-calendar";
       var isLeads = !isAppointments && !isSchedule && !isDashboard &&
-        !isSettings && !isRecurring;
+        !isSettings && !isRecurring && !isCalendar;
       byId("nav-dashboard").classList.toggle("portal-nav-active", isDashboard);
       byId("nav-leads").classList.toggle("portal-nav-active", isLeads);
       byId("nav-appointments").classList.toggle("portal-nav-active",
@@ -496,6 +571,8 @@
       byId("nav-settings").classList.toggle("portal-nav-active", isSettings);
       var navRecurringEl = byId("nav-recurring");
       if (navRecurringEl) navRecurringEl.classList.toggle("portal-nav-active", isRecurring);
+      var navCalendarEl = byId("nav-calendar");
+      if (navCalendarEl) navCalendarEl.classList.toggle("portal-nav-active", isCalendar);
     }
 
     /*
@@ -1679,6 +1756,252 @@
     }
 
     /* ---------------------------------------------------------------- */
+    /* Visual Calendar Phase 1 - READ-ONLY Week view (time axis)         */
+    /* ---------------------------------------------------------------- */
+
+    /* Null-tolerant text setter for the calendar ids (the setRecurringText
+     * convention), so a suite whose fake DOM predates these ids never
+     * throws inside shared code paths such as resetContent. */
+    function setCalendarText(id, text) {
+      var el = byId(id);
+      if (el) el.textContent = text || "";
+    }
+
+    function setCalendarNavDisabled(disabled) {
+      var prevEl = byId("calendar-prev");
+      if (prevEl) prevEl.disabled = disabled;
+      var nextEl = byId("calendar-next");
+      if (nextEl) nextEl.disabled = disabled;
+    }
+
+    /*
+     * Purpose: open the READ-ONLY appointment detail panel for one row the
+     * week read ALREADY returned. No request is made here: every value comes
+     * from the loaded response, so the drawer can never be a second data
+     * pathway and can never mutate anything.
+     * The panel is one element; CSS alone decides whether it presents as a
+     * right-hand drawer (desktop) or a near-full-screen sheet (mobile).
+     */
+    function openCalendarDrawer(appointment) {
+      if (!appointment || calendarRenderer === null) {
+        return;
+      }
+      var panel = byId("calendar-drawer");
+      if (!panel) {
+        return;
+      }
+      calendar.selected = appointment;
+      setCalendarText("calendar-drawer-title",
+        appointment.patient_name || MESSAGES.calendar_drawer_untitled);
+      setCalendarText("calendar-drawer-status",
+        appointmentStatusLabel(appointment.status));
+
+      var fields = byId("calendar-drawer-fields");
+      if (fields) {
+        clearChildren(fields);
+        var rows = calendarRenderer.appointmentDetailFields(
+          appointment, calendar.timezoneName, MESSAGES.value_missing);
+        for (var i = 0; i < rows.length; i++) {
+          var term = doc.createElement("dt");
+          term.textContent = rows[i].label;
+          var value = doc.createElement("dd");
+          /* textContent only: patient-supplied text can never inject markup. */
+          value.textContent = rows[i].value;
+          fields.appendChild(term);
+          fields.appendChild(value);
+        }
+      }
+      /* The actions region stays deliberately EMPTY of controls in this
+       * phase - it reserves the space a future Confirm/Cancel/Reschedule
+       * contract would occupy, and meanwhile points at where those actions
+       * genuinely live today. No new mutation path is created here. */
+      setCalendarText("calendar-drawer-actions-note",
+        MESSAGES.calendar_drawer_actions_note);
+      /* Keep the originating block visibly selected while the panel is open,
+       * so it is obvious which appointment is being read. Appearance only. */
+      calendarRenderer.applySelection(appointment);
+      panel.hidden = false;
+    }
+
+    /* Close and WIPE. The panel holds patient contact details, so closing
+     * clears them rather than merely hiding them - nothing may linger on a
+     * shared front-desk computer behind a hidden element. */
+    function closeCalendarDrawer() {
+      calendar.selected = null;
+      /* Clearing the selection is part of closing: no block may keep a
+       * selected look once the panel it belonged to is gone. Guarded because
+       * resetContent also runs in contexts where no renderer was built. */
+      if (calendarRenderer !== null) {
+        calendarRenderer.applySelection(null);
+      }
+      var panel = byId("calendar-drawer");
+      if (panel) panel.hidden = true;
+      setCalendarText("calendar-drawer-title", "");
+      setCalendarText("calendar-drawer-status", "");
+      setCalendarText("calendar-drawer-actions-note", "");
+      var fields = byId("calendar-drawer-fields");
+      if (fields) clearChildren(fields);
+    }
+
+    /*
+     * Purpose: render ONE week from the two authoritative responses.
+     * FAIL CLOSED (the response consistency guard): the pure module refuses
+     * whenever the Schedule and Appointments envelopes disagree on
+     * start_day / end_day / timezone_name, or the range is unusable. On a
+     * refusal NOTHING is rendered - no grid, no range label, no timezone
+     * note - and the office is told plainly. Two authoritative ranges are
+     * never blended (Constitution 14: failure must be visible).
+     */
+    function renderCalendarPage(scheduleBody, appointmentsBody) {
+      var gridEl = byId("calendar-grid");
+      if (gridEl) clearChildren(gridEl);
+      /* A re-render replaces every block element, so any open drawer would
+       * be pointing at a detached row: close it first. */
+      closeCalendarDrawer();
+
+      var result = calendarRenderer.buildGrid(scheduleBody, appointmentsBody);
+      if (!result.ok) {
+        calendar.currentStart = null;
+        calendar.currentEnd = null;
+        calendar.timezoneName = "";
+        setCalendarText("calendar-range-label", "");
+        setCalendarText("calendar-timezone-note", "");
+        setCalendarText("calendar-state", MESSAGES.calendar_range_mismatch);
+        setCalendarNavDisabled(true);
+        return;
+      }
+
+      /* Only an AGREED range is ever adopted as navigation state. */
+      calendar.currentStart = scheduleBody.start_day;
+      calendar.currentEnd = scheduleBody.end_day;
+      calendar.timezoneName = scheduleBody.timezone_name;
+      if (calendar.weekOffset === 0) {
+        calendar.defaultStart = scheduleBody.start_day;
+      }
+      /* The office timezone is stated ONCE, at calendar level - never
+       * repeated inside every block (that repetition is exactly what made
+       * the first resting view unreadable). */
+      setCalendarText("calendar-timezone-note",
+        MESSAGES.appointments_tz_note_prefix + scheduleBody.timezone_name);
+      setCalendarText("calendar-range-label",
+        appointmentsRangeLabel(scheduleBody.start_day, scheduleBody.end_day));
+      if (gridEl) gridEl.appendChild(result.element);
+
+      if (result.outsideCount > 0) {
+        /* The backend should not return rows outside the window it echoed.
+         * If it ever does, say so rather than dropping them silently. */
+        setCalendarText("calendar-state",
+          MESSAGES.calendar_outside_prefix + result.outsideCount);
+      } else if (result.visibleCount === 0) {
+        setCalendarText("calendar-state", MESSAGES.calendar_empty);
+      } else {
+        setCalendarText("calendar-state", "");
+      }
+      setCalendarNavDisabled(calendar.defaultStart === null);
+    }
+
+    /*
+     * Purpose: load one calendar week through the EXISTING data owner -
+     * exactly the two frozen read methods, with the same closed parameter
+     * vocabulary the Schedule and Appointments pages already send. No new
+     * endpoint, no new request pathway.
+     * Guards: the response is applied only when its request id is still the
+     * newest AND the lifecycle captured at issue still holds (a load issued
+     * before a sign-out wipe or a page re-entry may never render).
+     * Both responses must succeed; the first failure is reported through the
+     * shared handleFailure rule, so session loss wipes and hands back.
+     */
+    function loadCalendar() {
+      if (calendarRenderer === null) {
+        return;
+      }
+      var requestId = ++requestIds.calendar;
+      var lifecycleAtIssue = calendar.lifecycle;
+      setCalendarText("calendar-state", MESSAGES.loading);
+
+      var params = {};
+      if (calendar.weekOffset !== 0) {
+        if (calendar.defaultStart === null) {
+          calendar.weekOffset = 0;
+        } else {
+          var start = shiftLocalDay(calendar.defaultStart,
+            calendar.weekOffset * 7);
+          var end = shiftLocalDay(start, 6);
+          if (start !== "" && end !== "") {
+            params = { start_day: start, end_day: end };
+          } else {
+            calendar.weekOffset = 0;
+          }
+        }
+      }
+
+      Promise.all([
+        data.getSchedule(params),
+        data.getAppointments(params)
+      ]).then(function (outcomes) {
+        if (requestId !== requestIds.calendar ||
+            lifecycleAtIssue !== calendar.lifecycle) {
+          return; /* superseded, or wiped/re-entered - never applied */
+        }
+        var scheduleOutcome = outcomes[0];
+        var appointmentsOutcome = outcomes[1];
+        if (!scheduleOutcome.ok) {
+          handleFailure(scheduleOutcome, "calendar-state");
+          return;
+        }
+        if (!appointmentsOutcome.ok) {
+          handleFailure(appointmentsOutcome, "calendar-state");
+          return;
+        }
+        renderCalendarPage(scheduleOutcome.data, appointmentsOutcome.data);
+      });
+    }
+
+    function onCalendarPrev() {
+      if (calendar.defaultStart === null) {
+        return;
+      }
+      calendar.weekOffset -= 1;
+      loadCalendar();
+    }
+
+    function onCalendarNext() {
+      if (calendar.defaultStart === null) {
+        return;
+      }
+      calendar.weekOffset += 1;
+      loadCalendar();
+    }
+
+    /* The visible manual Refresh control: re-read the CURRENT week from the
+     * server. There is no polling and no timer in Phase 1 - a refresh only
+     * ever happens because the office asked for one or re-entered the page. */
+    function onCalendarRefresh() {
+      loadCalendar();
+    }
+
+    /* Re-entry is a page reset (the frozen openSchedule discipline): bump the
+     * lifecycle so any load still in flight from the previous visit can no
+     * longer render, drop the stale anchor, and reload from the backend
+     * default week. */
+    function openCalendar() {
+      calendar.lifecycle += 1;
+      calendar.weekOffset = 0;
+      calendar.defaultStart = null;
+      calendar.currentStart = null;
+      calendar.currentEnd = null;
+      calendar.timezoneName = "";
+      closeCalendarDrawer();
+      setCalendarNavDisabled(true);
+      setCalendarText("calendar-range-label", "");
+      setCalendarText("calendar-timezone-note", "");
+      var gridEl = byId("calendar-grid");
+      if (gridEl) clearChildren(gridEl);
+      showPage("page-calendar");
+      loadCalendar();
+    }
+
+    /* ---------------------------------------------------------------- */
     /* Entry, reset, wiring                                              */
     /* ---------------------------------------------------------------- */
 
@@ -1938,6 +2261,27 @@
       setText("settings-state", "");
       setText("settings-feedback", "");
       byId("settings-save").disabled = false;
+      /* Visual Calendar Phase 1: session loss / reset invalidates any
+       * in-flight calendar load (BOTH the request id and the lifecycle) and
+       * wipes every rendered value - no office\u2019s appointment or slot times
+       * may linger behind the login view on a shared front-desk computer.
+       * Every access is null-tolerant so the frozen suites are unaffected. */
+      requestIds.calendar += 1;
+      calendar.lifecycle += 1;
+      calendar.weekOffset = 0;
+      calendar.defaultStart = null;
+      calendar.currentStart = null;
+      calendar.currentEnd = null;
+      calendar.timezoneName = "";
+      setCalendarText("calendar-state", "");
+      setCalendarText("calendar-range-label", "");
+      setCalendarText("calendar-timezone-note", "");
+      var calendarGridEl = byId("calendar-grid");
+      if (calendarGridEl) clearChildren(calendarGridEl);
+      setCalendarNavDisabled(true);
+      /* The detail panel carries patient contact details: close AND wipe
+       * it, never merely hide it. */
+      closeCalendarDrawer();
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -2221,6 +2565,20 @@
       if (recAddClosure) recAddClosure.addEventListener("click", onRecurringClosureAdd);
       var recMinutesInput = byId("recurring-slot-minutes");
       if (recMinutesInput) recMinutesInput.addEventListener("change", invalidatePreview);
+      /* Visual Calendar Phase 1: same null-tolerant convention, so a suite
+       * whose fake DOM predates these ids constructs without throwing. */
+      var navCalendar = byId("nav-calendar");
+      if (navCalendar) navCalendar.addEventListener("click", openCalendar);
+      var calPrev = byId("calendar-prev");
+      if (calPrev) calPrev.addEventListener("click", onCalendarPrev);
+      var calNext = byId("calendar-next");
+      if (calNext) calNext.addEventListener("click", onCalendarNext);
+      var calRefresh = byId("calendar-refresh");
+      if (calRefresh) calRefresh.addEventListener("click", onCalendarRefresh);
+      var calDrawerClose = byId("calendar-drawer-close");
+      if (calDrawerClose) {
+        calDrawerClose.addEventListener("click", closeCalendarDrawer);
+      }
     }
 
     wireEvents();

@@ -413,3 +413,306 @@ body {
   opacity: 0.5;
   cursor: default;
 }
+
+/* Visual Calendar Phase 1: read-only Week view on a true time axis.
+   Google-Calendar ergonomics in Mia's existing portal visual language: a
+   sticky hour rail on the left, day columns across the top, and every entry
+   positioned by its office-local wall clock. One hour = 48px, so a 30-minute
+   block is exactly half the height of a 60-minute block - the geometry lives
+   in portal-calendar.js and is applied through element.style (CSSOM), which
+   the baseline CSP allows; no style attribute is ever parsed from a string.
+
+   Responsive treatment is deliberately the SMALLEST usable one: the week
+   keeps all seven columns and scrolls horizontally while the hour rail stays
+   pinned. No separate Day view and no shell-width change - both would be a
+   calendar redesign rather than a refinement. */
+.portal-calendar-controls { flex-wrap: wrap; }
+.portal-calendar-controls .portal-button { width: auto; padding: 8px 14px; }
+.portal-calendar-controls .portal-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.portal-calendar-layout { position: relative; }
+
+.portal-calendar-grid {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--portal-border);
+  border-radius: var(--portal-radius);
+  background: var(--portal-card-bg);
+}
+
+.portal-calendar-frame { display: flex; min-width: 680px; }
+
+/* The hour rail stays pinned while the day columns scroll under it. */
+.portal-calendar-rail {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  flex: 0 0 56px;
+  background: var(--portal-card-bg);
+  border-right: 1px solid var(--portal-border);
+}
+
+.portal-calendar-rail-corner {
+  height: 44px;
+  border-bottom: 1px solid var(--portal-border);
+  background: var(--portal-card-bg);
+}
+
+.portal-calendar-hour { position: relative; }
+
+.portal-calendar-hour-label {
+  position: absolute;
+  top: -7px;
+  right: 6px;
+  font-size: 11px;
+  color: var(--portal-muted);
+  white-space: nowrap;
+}
+
+.portal-calendar-days { display: flex; flex: 1 1 auto; }
+
+.portal-calendar-col {
+  flex: 1 1 0;
+  min-width: 92px;
+  border-right: 1px solid var(--portal-border);
+}
+
+.portal-calendar-col:last-child { border-right: 0; }
+
+.portal-calendar-dayhead {
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border-bottom: 1px solid var(--portal-border);
+  background: var(--portal-card-bg);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.portal-calendar-dayhead-weekday {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--portal-muted);
+}
+
+.portal-calendar-dayhead-date { font-size: 14px; font-weight: 600; }
+
+.portal-calendar-canvas { position: relative; }
+
+.portal-calendar-lines { position: absolute; inset: 0; }
+.portal-calendar-line { border-bottom: 1px solid var(--portal-border); }
+
+.portal-calendar-bands { position: absolute; inset: 0; }
+.portal-calendar-blocks { position: absolute; inset: 0; }
+
+/* Consolidated availability / held / blocked regions. Adjacent open slots
+   read as one calm band instead of a stack of cards; the status WORD is
+   always printed, so meaning never rests on colour alone. */
+.portal-calendar-band {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.portal-calendar-band-label {
+  display: block;
+  padding: 1px 5px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--portal-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Open availability is a BACKGROUND layer, not a headline. It used a solid
+   green fill with a dashed green border, which turned a normal working day
+   into large green panels competing with the appointments that actually
+   need attention. It now reads as a faint tint with a thin left accent:
+   still unmistakably "this time is open", but it recedes behind the
+   appointment blocks. Held and blocked keep their approved treatments,
+   because those two say something the office must not miss. */
+.portal-calendar-band-available {
+  background: rgba(22, 163, 74, 0.05);
+  border-left: 2px solid rgba(22, 163, 74, 0.30);
+  border-radius: 3px;
+}
+
+.portal-calendar-band-available .portal-calendar-band-label {
+  opacity: 0.6;
+}
+
+.portal-calendar-band-held {
+  background: #fffbeb;
+  border: 1px dashed #fcd34d;
+}
+
+.portal-calendar-band-blocked {
+  background: #f1f5f9;
+  border: 1px solid var(--portal-border);
+  background-image: repeating-linear-gradient(
+    135deg, transparent, transparent 5px, #e2e8f0 5px, #e2e8f0 10px);
+}
+
+/* Compact appointment blocks: start time, patient, service, status word.
+   The fully-qualified date/timezone rendering belongs in the drawer. */
+.portal-calendar-block {
+  position: absolute;
+  display: block;
+  overflow: hidden;
+  text-align: left;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-left-width: 3px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--portal-text);
+  cursor: pointer;
+}
+
+/* A small lift so appointment blocks read as the foreground layer. */
+.portal-calendar-block { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+.portal-calendar-block:hover { filter: brightness(0.97); }
+.portal-calendar-block:focus-visible { outline: 2px solid var(--portal-primary); }
+
+/* Every line truncates with an ellipsis rather than wrapping into broken
+   fragments. The grid is never widened to fit text; the full record is one
+   click away in the detail panel, and the hover title carries it meanwhile. */
+.portal-calendar-block-time,
+.portal-calendar-block-name,
+.portal-calendar-block-service {
+  display: block;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.portal-calendar-block-time { color: var(--portal-muted); }
+.portal-calendar-block-name { font-weight: 600; }
+.portal-calendar-block-service { color: var(--portal-muted); }
+
+/* A laned block is a fraction of the column wide: it drops the secondary
+   line and keeps the patient name, which is the highest-priority content.
+   The status word stays in the markup for assistive technology. */
+.portal-calendar-block-narrow .portal-calendar-block-service { display: none; }
+.portal-calendar-block-narrow .portal-calendar-block-time { font-size: 10px; }
+.portal-calendar-block-status {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--portal-muted);
+}
+
+/* A short block puts the time and name on one row and lets the status word
+   fall away visually - it remains in the markup for assistive technology. */
+.portal-calendar-block-compact { padding: 1px 5px; }
+.portal-calendar-block-compact .portal-calendar-block-time,
+.portal-calendar-block-compact .portal-calendar-block-name {
+  display: inline;
+  font-size: 11px;
+}
+.portal-calendar-block-compact .portal-calendar-block-time { margin-right: 4px; }
+.portal-calendar-block-compact .portal-calendar-block-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Confirmed and pending differ in fill, border weight AND printed word, so
+   the two are distinguishable without relying on colour perception. */
+.portal-calendar-appointment-confirmed {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  border-left-color: var(--portal-primary);
+}
+
+.portal-calendar-appointment-pending {
+  background: var(--portal-card-bg);
+  border-color: #c4b5fd;
+  border-left-color: #7c3aed;
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+/* The block whose detail panel is open. A ring plus a lift: obvious at a
+   glance without shouting, and it does not restate any status. Purely a
+   frontend selection cue - it carries no authority and clears whenever the
+   panel closes or the grid is rebuilt. */
+.portal-calendar-block-selected {
+  box-shadow: 0 0 0 2px var(--portal-primary),
+    0 2px 6px rgba(15, 23, 42, 0.16);
+  z-index: 2;
+}
+
+/* READ-ONLY detail panel. Right-hand drawer on a wide screen; near
+   full-screen sheet on a narrow one. Same element, CSS decides. */
+.portal-calendar-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 320px;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 14px;
+  background: var(--portal-card-bg);
+  border: 1px solid var(--portal-border);
+  border-radius: var(--portal-radius);
+  box-shadow: -6px 0 18px rgba(15, 23, 42, 0.10);
+  z-index: 5;
+}
+
+.portal-calendar-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.portal-calendar-drawer-head .portal-button { width: auto; padding: 6px 12px; }
+
+.portal-calendar-drawer-title { margin: 0; font-size: 16px; }
+
+.portal-calendar-drawer .portal-detail-fields { margin: 0 0 12px; }
+
+/* Reserved space for a future, separately approved action contract. */
+.portal-calendar-drawer-actions {
+  min-height: 44px;
+  padding-top: 10px;
+  border-top: 1px solid var(--portal-border);
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .portal-calendar-frame { min-width: 620px; }
+  .portal-calendar-col { min-width: 84px; }
+  .portal-calendar-rail { flex-basis: 48px; }
+  .portal-calendar-drawer {
+    position: fixed;
+    top: 4vh;
+    left: 3vw;
+    right: 3vw;
+    bottom: 0;
+    width: auto;
+    max-height: 96vh;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.18);
+  }
+}
