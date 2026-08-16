@@ -1204,12 +1204,21 @@
         .filter(function (value) { return !!value; }).join("  ");
       row.appendChild(contact);
 
-      /* Status + patient type + urgency + notification outcome badges. */
+      /* Status + patient type + urgency + notification outcome badges.
+       * SLICE 4A: a staff-created appointment sends no booking
+       * notification BY DESIGN (frozen backend contract; its derived
+       * outcome is the permanent no-attempt "pending"), so its badge would
+       * be noise, not information - it is suppressed for portal_staff
+       * ONLY. Every other source keeps its badge exactly as before,
+       * including visible failures (Rule 16). Same rationale, same
+       * revisit-rule as the drawer projection in portal-calendar.js. */
       var badges = [
         appointmentStatusLabel(appointment.status),
         appointment.new_or_returning || "",
         appointment.urgency || "",
-        notificationOutcomeLabel(appointment.notification_outcome)
+        appointment.source === "portal_staff"
+          ? ""
+          : notificationOutcomeLabel(appointment.notification_outcome)
       ].filter(function (value) { return !!value; });
       for (var i = 0; i < badges.length; i++) {
         var badge = doc.createElement("span");

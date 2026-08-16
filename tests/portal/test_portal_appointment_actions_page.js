@@ -615,3 +615,38 @@ test("appointments: a stale same-row completion does not clear a newer busy owne
   const summary = await h.runRegisteredTests("test_portal_appointment_actions_page");
   process.exitCode = summary.failed === 0 ? 0 : 1;
 })();
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 4A: list badge - staff bookings show no permanent    */
+/* "Notification pending" noise; every other source keeps its badge.   */
+/* ------------------------------------------------------------------ */
+
+function rowBadgeTexts(f, index) {
+  const item = f.doc._elements["appointments-list"].children[index];
+  const row = item.children[0];
+  const texts = [];
+  for (const child of row.children) {
+    if (child.className === "portal-badge") { texts.push(child.textContent); }
+  }
+  return texts;
+}
+
+test("slice 4A: a staff booking's list row carries no notification badge", async () => {
+  const f = makePages();
+  f.data.queue("getAppointments", { ok: true, data: apptBody([
+    apptMember({ source: "portal_staff", status: "confirmed",
+      notification_outcome: "pending" }),
+    apptMember({ source: "mia_widget", notification_outcome: "pending" })
+  ]) });
+  openAppointments(f);
+  await flush();
+  const staffBadges = rowBadgeTexts(f, 0);
+  assert(staffBadges.indexOf("Notification pending") === -1,
+    "no permanent pending noise for a staff booking");
+  assert(staffBadges.indexOf("Confirmed") !== -1,
+    "its real status badge still renders");
+  const widgetBadges = rowBadgeTexts(f, 1);
+  assert(widgetBadges.indexOf("Notification pending") !== -1,
+    "every other source keeps its honest notification badge");
+});

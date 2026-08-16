@@ -4763,3 +4763,68 @@ test("hotfix: every interactive element is a button inside its audited layer", a
   assert(liveBlocks[0].className.indexOf("portal-calendar-block") !== -1,
     "so does the live appointment - one re-enabling class, two layers");
 });
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 4A: staff-booking drawer polish (projection only)    */
+/* ------------------------------------------------------------------ */
+/* The stored source stays portal_staff (server semantics untouched);
+ * ONLY the office-facing projection changes, and ONLY for that one
+ * source: a human "Booked by: Office staff" row, and the two rows that
+ * could never say anything but permanent missing/pending noise for a
+ * staff booking (confirmed_at deliberately NULL, no notification sent
+ * by design) are hidden. Every other source keeps its exact rows. */
+
+function drawerLabels(doc) {
+  return drawerPairs(doc).map((pair) => pair[0]);
+}
+
+test("slice 4A: a staff-created appointment reads Booked by: Office staff", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ source: "portal_staff",
+    confirmed_at: null, notification_outcome: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  assertEqual(drawerValue(f.doc, "Booked by"), "Office staff",
+    "the human label replaces the storage enum");
+  assertEqual(drawerValue(f.doc, "Source"), null,
+    "no raw Source row renders for a staff booking");
+  const everything = drawerPairs(f.doc).map((p) => p.join(" ")).join(" ");
+  assert(everything.indexOf("portal_staff") === -1,
+    "the raw storage value never reaches the office user's eyes");
+});
+
+test("slice 4A: the two noise rows are hidden for staff bookings only", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ source: "portal_staff",
+    confirmed_at: null, notification_outcome: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  assertEqual(drawerValue(f.doc, "Staff confirmed"), null,
+    "no permanent Not-provided row for a staff booking");
+  assertEqual(drawerValue(f.doc, "Office notification"), null,
+    "no permanent Notification-pending row for a staff booking");
+  assert(drawerLabels(f.doc).indexOf("Patient") !== -1 &&
+    drawerLabels(f.doc).indexOf("Status") !== -1,
+    "the real rows all still render");
+});
+
+test("slice 4A: every other source keeps its exact previous rows", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ source: "mia_widget",
+    confirmed_at: null, notification_outcome: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  assertEqual(drawerValue(f.doc, "Source"), "mia_widget",
+    "a widget booking still shows its raw source");
+  assertEqual(drawerValue(f.doc, "Booked by"), null,
+    "the human label belongs to portal_staff alone");
+  assertEqual(drawerValue(f.doc, "Staff confirmed"), "Not provided",
+    "the confirmed_at row survives untouched for other sources");
+  assertEqual(drawerValue(f.doc, "Office notification"),
+    "Notification pending",
+    "the notification row survives untouched for other sources, pending included");
+});

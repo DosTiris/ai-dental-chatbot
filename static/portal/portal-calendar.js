@@ -1149,23 +1149,41 @@
           { label: "Ends",
             value: formatInTimeZone(appointment.end_datetime, timeZone) },
           { label: "Status",
-            value: appointmentStatusLabel(appointment.status) },
-          { label: "Source", value: present(appointment.source) }
+            value: appointmentStatusLabel(appointment.status) }
         ];
+        /* SLICE 4A: the receptionist reads WHO booked, not a storage enum.
+         * portal_staff is the ONE source with an owner-approved human
+         * label; the stored value is untouched (projection only) and every
+         * other source keeps its existing raw display unchanged. */
+        var staffCreated = appointment.source === "portal_staff";
+        fields.push(staffCreated
+          ? { label: "Booked by", value: "Office staff" }
+          : { label: "Source", value: present(appointment.source) });
         /* confirmed_at is null for an appointment that was never STAFF
          * confirmed - including one auto-confirmed by the backend - so it is
-         * reported as its own fact and never used to infer the status. */
-        fields.push({
-          label: "Staff confirmed",
-          value: (typeof appointment.confirmed_at === "string" &&
-            appointment.confirmed_at !== "")
-            ? formatInTimeZone(appointment.confirmed_at, timeZone)
-            : absent
-        });
-        fields.push({
-          label: "Office notification",
-          value: notificationOutcomeLabel(appointment.notification_outcome)
-        });
+         * reported as its own fact and never used to infer the status.
+         * SLICE 4A: a staff-created appointment is born CONFIRMED with
+         * confirmed_at deliberately NULL and sends NO booking notification
+         * (both frozen backend contracts), so for portal_staff these two
+         * rows could only ever read as permanent "missing"/"pending" noise
+         * - they are hidden for that one source, per the owner-approved
+         * direction. Every other source keeps both rows exactly as before,
+         * including visible failures (Rule 16). If a future slice ever
+         * writes confirmed_at or sends notifications for staff bookings,
+         * this projection must be revisited in that slice's contract. */
+        if (!staffCreated) {
+          fields.push({
+            label: "Staff confirmed",
+            value: (typeof appointment.confirmed_at === "string" &&
+              appointment.confirmed_at !== "")
+              ? formatInTimeZone(appointment.confirmed_at, timeZone)
+              : absent
+          });
+          fields.push({
+            label: "Office notification",
+            value: notificationOutcomeLabel(appointment.notification_outcome)
+          });
+        }
         return fields;
       }
     };
