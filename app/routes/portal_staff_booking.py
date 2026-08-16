@@ -73,6 +73,7 @@ from app.routes.portal import get_db, require_portal_identity
 from app.services.portal_auth import PortalIdentity
 # The frozen Slice 1 booking owner. This route adds no rule of its own.
 from app.services import booking_service
+from app.services.appointment_note_service import INVALID_INTERNAL_NOTE_DETAIL
 # The ONE public portal-appointment projection owner, shared with the read
 # GET and the P5-A action routes (Rule 3): a success response is built
 # through the exact same field-by-field, leak-safe builder, so the booking,
@@ -140,6 +141,12 @@ class StaffBookingRequest(BaseModel):
     patient_email: Optional[str] = None
     new_or_returning: Optional[str] = None
     reason: Optional[str] = None
+    # SLICE 4B1: optional office-internal note, created ATOMICALLY with the
+    # appointment inside the one staff-booking transaction. Normalization
+    # (blank -> NULL, trim, <= 2000) is owned by
+    # appointment_note_service.normalize_internal_note inside the lifecycle
+    # owner - never restated here (Rule 3). Absent field = no note.
+    internal_note: Optional[str] = None
 
 
 def _success_view(result) -> PortalAppointmentView:
@@ -226,6 +233,7 @@ def portal_staff_book_slot(
         # Server-owned, NEVER derived from the browser (v1.0.1 audit
         # correction F1) - the one established word (STAFF_DEFAULT_URGENCY).
         urgency=STAFF_DEFAULT_URGENCY,
+        internal_note=body.internal_note,   # 4B1: raw; owner normalizes
     )
     if result.reason == "slot_missing":
         raise HTTPException(status_code=404, detail=SLOT_NOT_FOUND_DETAIL)
@@ -238,4 +246,10 @@ def portal_staff_book_slot(
     if result.reason == "invalid_patient_data":
         raise HTTPException(status_code=422,
                             detail=INVALID_PATIENT_DATA_DETAIL)
+    if result.reason == "invalid_internal_note":
+        # 4B1: over-limit office-internal note. The wording is the note
+        # owner's single refusal sentence; the booking rolled back in full
+        # (the appointment and its note are atomic - neither exists now).
+        raise HTTPException(status_code=422,
+                            detail=INVALID_INTERNAL_NOTE_DETAIL)
     return _success_view(result)

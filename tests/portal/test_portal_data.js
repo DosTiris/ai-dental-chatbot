@@ -1048,9 +1048,67 @@ function validAppointmentMember(overrides) {
     status: "pending",
     confirmed_at: null,
     source: "mia_widget",
-    notification_outcome: "pending"
+    notification_outcome: "pending",
+    internal_note: null   /* 4B1: part of the exact approved member */
   }, overrides || {});
 }
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 4B1: internal_note joins the exact appointment       */
+/* member contract. The fail-closed direction is deliberate and is     */
+/* itself the deployment-order guard: a backend without the field (or  */
+/* one rolled back after this ships) fails the WHOLE body closed as    */
+/* invalid_response rather than rendering a half-contract.             */
+/* ------------------------------------------------------------------ */
+
+test("Slice 4B1: a member MISSING internal_note fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  const member = validAppointmentMember();
+  delete member.internal_note;
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: { timezone_name: "America/New_York",
+      start_day: "2026-07-16", end_day: "2026-07-22",
+      appointments: [member] } }
+  );
+  const outcome = await env.data.getAppointments();
+  assert(!outcome.ok, "a pre-4B1 body is not silently accepted");
+  assertEqual(outcome.state, "invalid_response",
+    "the exact-key contract fails the whole body closed");
+});
+
+test("Slice 4B1: internal_note must be null or a string", async () => {
+  for (const bad of [7, {}, [], true]) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/appointments", method: "GET" },
+      { status: 200, json: { timezone_name: "America/New_York",
+        start_day: "2026-07-16", end_day: "2026-07-22",
+        appointments: [validAppointmentMember({ internal_note: bad })] } }
+    );
+    const outcome = await env.data.getAppointments();
+    assert(!outcome.ok, "a mis-typed note fails closed: " + typeof bad);
+    assertEqual(outcome.state, "invalid_response", "invalid_response");
+  }
+});
+
+test("Slice 4B1: a string note rides the approved member through", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments", method: "GET" },
+    { status: 200, json: { timezone_name: "America/New_York",
+      start_day: "2026-07-16", end_day: "2026-07-22",
+      appointments: [validAppointmentMember(
+        { internal_note: "gate code 4411" })] } }
+  );
+  const outcome = await env.data.getAppointments();
+  assert(outcome.ok, "a well-typed note is accepted");
+  assertEqual(outcome.data.appointments[0].internal_note, "gate code 4411",
+    "and reaches the caller verbatim");
+});
 
 test("appointments default request sends NO bounds to the exact endpoint", async () => {
   const env = makeData();

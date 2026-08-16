@@ -120,6 +120,14 @@ class PortalAppointmentView(BaseModel):
     # The single safe derived outcome (sent | failed | pending). Never the
     # raw notify_error text and never the individual channel booleans.
     notification_outcome: str
+    # SLICE 4B1: the office-internal administrative note (null = none).
+    # SAFE HERE BY CONSTRUCTION: this model is consumed ONLY by the three
+    # authenticated portal surfaces (the read GET below, the P5-A action
+    # routes, and the staff-booking POST), all behind require_portal_identity
+    # and tenant-filtered - proven by the Slice 4B1 recon and pinned by the
+    # leak tests. It is NEVER patient-facing and never enters notifications,
+    # chat, public/widget APIs, or exports.
+    internal_note: Optional[str]
 
 
 class PortalAppointmentListView(BaseModel):
@@ -217,6 +225,7 @@ def build_portal_appointment_view(a) -> PortalAppointmentView:
         confirmed_at=(calendar_settings_service.ensure_utc(a.confirmed_at)
                       if a.confirmed_at is not None else None),
         source=a.source,
+        internal_note=a.internal_note,   # 4B1: portal-only, see the model
         notification_outcome=derive_notification_outcome(
             sanitized,
             bool(a.office_sms_sent),

@@ -226,6 +226,7 @@ def create_appointment_from_slot(
     urgency: str,
     status: str,
     source: str = "mia_widget",
+    internal_note: Optional[str] = None,
 ) -> Appointment:
     """
     Purpose: Insert the appointment row for an already-locked, verified slot.
@@ -236,6 +237,12 @@ def create_appointment_from_slot(
     Possible failures: raises ValueError on missing name/phone or invalid
         status — these indicate a bug upstream, and hiding them would create
         unreachable appointment rows (Rule 16).
+    SLICE 4B1: internal_note is stored VERBATIM and must already be
+        normalized (blank -> None, trimmed, <= 2000) by the single
+        normalization owner (appointment_note_service.normalize_internal_note)
+        at the write boundary - this primitive never restates that rule
+        (Rule 3). Default None keeps every pre-4B1 caller - including the
+        frozen chatbot finalize_booking path - byte-for-byte unaffected.
     """
     if not (patient_name or "").strip() or not (patient_phone or "").strip():
         raise ValueError("Appointment requires patient_name and patient_phone.")
@@ -256,6 +263,7 @@ def create_appointment_from_slot(
         end_datetime=slot.end_datetime,
         status=status,
         source=source,
+        internal_note=internal_note,
     )
     db.add(appointment)
     db.flush()

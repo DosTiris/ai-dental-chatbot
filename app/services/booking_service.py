@@ -28,6 +28,11 @@ from sqlalchemy.orm import Session
 from app.calendar_models import Appointment, AppointmentStatus, SlotStatus
 from app.repositories import appointment_repository
 from app.services.availability_rules import evaluate_slot_policy, hold_is_active
+# SLICE 4B1: the ONE internal-note normalization owner. Used by the STAFF
+# booking path only; the frozen chatbot finalize_booking neither accepts nor
+# stores notes. This import brings in NO notification, chat, or public-schema
+# code (appointment_note_service imports the repository only).
+from app.services.appointment_note_service import normalize_internal_note
 from app.services.calendar_settings_service import CalendarSettings, ensure_utc
 
 
@@ -280,6 +285,7 @@ def finalize_staff_booking(
     new_or_returning: Optional[str],
     reason: Optional[str],
     urgency: str,
+    internal_note: Optional[str] = None,
 ) -> BookingResult:
     """
     Purpose: PHASE 3A Slice 1 - book ONE existing authoritative slot on behalf
@@ -371,6 +377,24 @@ def finalize_staff_booking(
                            half-empty. patient_email is optional and a blank
                            one is normalized to NULL by that same primitive;
                            nothing here requires an email.
+        invalid_internal_note - SLICE 4B1: the optional office-internal note
+                           exceeds 2000 characters after trimming. Judged by
+                           the ONE normalization owner
+                           (appointment_note_service.normalize_internal_note)
+                           BEFORE the INSERT, inside this same transaction,
+                           so the appointment and its note are created
+                           atomically or not at all - there is no
+                           book-first / note-second path, and a refusal
+                           creates nothing. Blank/whitespace notes normalize
+                           to NULL (no note). The parameter defaults to
+                           None (the contract-specified shape): unlike the
+                           injected CONTEXT parameters above, an absent note
+                           is a true value - "no note" - not missing context,
+                           so the default is honest rather than permissive,
+                           and every pre-4B1 caller (including the frozen
+                           Slice 1/2 tests) remains valid unchanged. The note
+                           never influences any slot/status/source/policy
+                           decision above or below this point.
 
     Database effects: ONE transaction. On success: appointment INSERT + slot
         UPDATE to booked with the hold columns cleared, committed together.
@@ -413,6 +437,17 @@ def finalize_staff_booking(
             db.rollback()
             return BookingResult(False, "slot_started")
 
+        # SLICE 4B1: normalize the optional office-internal note UNDER the
+        # same row lock and transaction as the INSERT it rides with. An
+        # over-limit note refuses the WHOLE booking (rollback, nothing
+        # persisted) - atomicity is the contract, and silent truncation is
+        # forbidden.
+        try:
+            normalized_internal_note = normalize_internal_note(internal_note)
+        except ValueError:
+            db.rollback()
+            return BookingResult(False, "invalid_internal_note")
+
         try:
             appointment = appointment_repository.create_appointment_from_slot(
                 db,
@@ -432,6 +467,7 @@ def finalize_staff_booking(
                 urgency=urgency,
                 status=AppointmentStatus.CONFIRMED,   # D5
                 source=STAFF_BOOKING_SOURCE,          # D6
+                internal_note=normalized_internal_note,  # 4B1: pre-normalized
             )
         except ValueError:
             db.rollback()

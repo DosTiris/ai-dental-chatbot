@@ -228,7 +228,8 @@ function apptMember(overrides) {
     status: "pending",
     confirmed_at: null,
     source: "mia_widget",
-    notification_outcome: "pending"
+    notification_outcome: "pending",
+    internal_note: null   /* 4B1: part of the exact approved member */
   }, overrides || {});
 }
 

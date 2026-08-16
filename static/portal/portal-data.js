@@ -308,6 +308,10 @@
         appointment.status !== "" &&
         typeof appointment.notification_outcome === "string" &&
         appointment.notification_outcome !== "" &&
+        /* 4B1: the office-internal note is null or a string - any other
+         * shape fails the whole body closed like every other member rule. */
+        (appointment.internal_note === null ||
+          typeof appointment.internal_note === "string") &&
         isValidUtcInstant(appointment.start_datetime) &&
         isValidUtcInstant(appointment.end_datetime);
     }
@@ -349,10 +353,17 @@
      * instants go through the strict isValidUtcInstant validator (never
      * Date.parse). Adding a key here is a reviewed contract change - the Node
      * bites pin this array. */
+    /* SLICE 4B1 - DELIBERATE contract amendment (the reviewed mechanism
+     * these exact-key sets exist for): internal_note joins the approved
+     * appointment member. DEPLOYMENT ORDER MATTERS: this validator fails
+     * CLOSED against a backend that does not yet send the key (and against
+     * one that still sends it after a rollback), so backend and frontend
+     * must ship this contract change together - stated here because the
+     * fail-closed behavior is the feature, not a bug. */
     var APPOINTMENT_MEMBER_KEYS = ["appointment_id", "patient_name",
       "patient_phone", "patient_email", "new_or_returning", "reason",
       "urgency", "start_datetime", "end_datetime", "status",
-      "confirmed_at", "source", "notification_outcome"];
+      "confirmed_at", "source", "notification_outcome", "internal_note"];
 
     function isValidAppointmentActionBody(body) {
       return hasExactKeys(body, APPOINTMENT_MEMBER_KEYS) &&

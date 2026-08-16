@@ -564,6 +564,27 @@ test("audit: no third-party or plaintext resources; scripts are same-origin port
   }
 });
 
+/* v1.0.1 F2 (Slice 4B1): portal-data.js carries an incompatible-contract
+ * response validator (exact appointment member keys, fail-closed in both
+ * directions), so its script tag must carry the matching DETERMINISTIC
+ * version token - a stale cached copy against the new backend fails every
+ * appointment read closed. This bite pins the exact token, so a future
+ * incompatible contract change cannot ship without consciously bumping it
+ * (and re-facing this audit). No other asset may silently grow a query
+ * key, and no nondeterministic (timestamp-like) token is permitted. */
+test("audit: the portal-data asset carries the Slice 4B1 cache-bust token", () => {
+  const html = read("index.html");
+  assert(html.indexOf(
+    '<script src="/static/portal/portal-data.js?v=4b1-internal-note-v1"></script>') !== -1,
+    "portal-data.js must ship with the exact 4b1-internal-note-v1 token");
+  const scripts = html.match(/<script[^>]*src="([^"]+)"/g) || [];
+  for (const tag of scripts) {
+    if (tag.indexOf("portal-data.js") !== -1) { continue; }
+    assert(tag.indexOf("?") === -1,
+      "only the versioned contract asset carries a query token: " + tag);
+  }
+});
+
 test("audit: both pages are noindex and carry the baseline CSP meta", () => {
   for (const page of ["index.html", "reset.html"]) {
     const content = read(page);

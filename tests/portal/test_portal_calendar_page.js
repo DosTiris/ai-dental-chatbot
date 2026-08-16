@@ -273,7 +273,8 @@ function appointmentFixture(overrides) {
     status: "confirmed",
     confirmed_at: "2026-08-20T18:00:00Z",
     source: "mia_widget",
-    notification_outcome: "sent"
+    notification_outcome: "sent",
+    internal_note: null   /* 4B1: part of the exact approved member */
   }, overrides || {});
 }
 

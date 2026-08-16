@@ -44,10 +44,12 @@
 # reason and never fabricating a malformed success body.
 
 import uuid
+from typing import Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 # Reused P2/P3 owners: the per-request session factory and the ONE portal
@@ -57,7 +59,8 @@ from sqlalchemy.orm import Session
 from app.routes.portal import get_db, require_portal_identity
 from app.services.portal_auth import PortalIdentity
 # The frozen appointment lifecycle owner. This route adds no rule of its own.
-from app.services import booking_service
+from app.services import appointment_note_service, booking_service
+from app.services.appointment_note_service import INVALID_INTERNAL_NOTE_DETAIL
 # The ONE public portal-appointment projection owner, shared with the read
 # GET (Rule 3): a success response is built through the exact same field-by-
 # field, leak-safe builder, so the action and read surfaces can never drift.
@@ -196,3 +199,76 @@ def portal_cancel_appointment(
             detail=f"Appointment is {result.detail} and cannot be cancelled.",
         )
     return _success_view(result, _CANCEL_SUCCESS_REASONS)
+
+
+# --------------------------------------------------------------------------
+# PHASE 3A Slice 4B1: office-internal note edit/clear
+# --------------------------------------------------------------------------
+
+_NOTE_SUCCESS_REASONS = frozenset({"ok"})
+
+
+class InternalNoteUpdateRequest(BaseModel):
+    """The note-edit body - STRICT transport (the StaffBookingRequest /
+    PublishDayRequest convention): any undeclared field is rejected with 422
+    by pydantic itself, so a smuggled client_id/status/source/slot/timestamp
+    key can never be silently ignored. Exactly ONE field is declared, and it
+    is REQUIRED-BUT-NULLABLE (v1.0.1 audit correction F1): a string replaces
+    the note, an EXPLICIT null clears it, and blank/whitespace normalizes to
+    null (clears) - but an ABSENT field is a 422 and mutates NOTHING. An
+    office note is stored data; erasing it must always be a stated intent,
+    never the side effect of an accidentally empty PUT. Normalization and
+    the 2000-character limit are owned by appointment_note_service - never
+    restated here (Rule 3)."""
+    model_config = ConfigDict(extra="forbid")
+    internal_note: Optional[str]
+
+
+@router.put("/appointments/{appointment_id}/internal-note",
+            response_model=PortalAppointmentView)
+def portal_set_internal_note(
+    appointment_id: uuid.UUID,
+    payload: InternalNoteUpdateRequest,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose (Slice 4B1): the authenticated office replaces or clears the
+        office-internal note on ONE of its own appointments. The rule lives
+        in the note owner (appointment_note_service.
+        set_appointment_internal_note); this route only binds the tenant and
+        maps the result onto HTTP - the confirm/cancel wiring convention.
+    Inputs: the Authorization header (dependency), the appointment id path
+        segment, and the strict one-field body. The verified identity ALONE
+        selects the tenant; there is no tenant parameter to declare, and the
+        strict model rejects a smuggled one with 422.
+    Behavior: works for ANY appointment the office can see - any source
+        (a Mia-created appointment may carry a private office note) and any
+        status (a cancelled historical appointment may legitimately retain
+        one). Editing a note changes NOTHING else: no status, slot, source,
+        confirmed_at, notification state, hold, or availability - and no
+        notification is sent (the owner imports no notification code).
+    Returns: PortalAppointmentView (the leak-safe shared projection), so the
+        caller sees the stored note exactly as normalized.
+    Database effects: exactly the note owner's one transaction (a
+        tenant-scoped SELECT ... FOR UPDATE - the same lock the cancel path
+        uses, so a note edit and a concurrent lifecycle action serialize -
+        then a single-column UPDATE, committed; every refusal rolls back).
+    Possible failures: 404 "Appointment not found." for an unknown or
+        cross-tenant id (indistinguishable, Rule 15 - the existing portal
+        convention word-for-word); 422 with the note owner's single refusal
+        sentence for an over-limit note (nothing mutated); 401/503 as on
+        every portal endpoint; HTTPException(500) fail-closed for an
+        unexpected result (guardrails G1/G2); database errors propagate
+        (fail closed, Rule 16).
+    """
+    result = appointment_note_service.set_appointment_internal_note(
+        db, identity.client.id, appointment_id,
+        internal_note=payload.internal_note,
+    )
+    if result.reason == "appointment_missing":
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    if result.reason == "invalid_internal_note":
+        raise HTTPException(status_code=422,
+                            detail=INVALID_INTERNAL_NOTE_DETAIL)
+    return _success_view(result, _NOTE_SUCCESS_REASONS)

@@ -430,7 +430,15 @@
     </noscript>
   </main>
   <script src="/static/portal/portal-core.js"></script>
-  <script src="/static/portal/portal-data.js"></script>
+  <!-- v1.0.1 F2 (Slice 4B1 rollout protection): the appointment member
+       contract in portal-data.js changed incompatibly (internal_note is
+       now REQUIRED by the exact-key validator), so a STALE cached copy
+       would fail every appointment read closed against the new backend.
+       The deterministic version token forces every browser to fetch the
+       matching contract on first load after deployment. Bump this token
+       whenever portal-data.js changes its response contract - the static
+       audit pins it so an incompatible change cannot ship without one. -->
+  <script src="/static/portal/portal-data.js?v=4b1-internal-note-v1"></script>
   <script src="/static/portal/portal-calendar.js"></script>
   <script src="/static/portal/portal-pages.js"></script>
   <script src="/static/portal/portal-app.js"></script>

@@ -1819,3 +1819,163 @@ def test_010_preserves_existing_office_hours_and_settings_bytes(
             + SCHEDULE_TOKEN_COLUMN + ";"
             "ALTER TABLE clients DROP COLUMN IF EXISTS office_hours;"
             "ALTER TABLE clients DROP COLUMN IF EXISTS settings;")
+
+
+# ---------------------------------------------------------------------------
+# 011: appointments.internal_note (PHASE 3A Slice 4B1)
+# ---------------------------------------------------------------------------
+
+UP_011 = "011_appointment_internal_note_up.sql"
+DOWN_011 = "011_appointment_internal_note_down.sql"
+
+NOTE_CHECK = "ck_appointments_internal_note_len"
+
+
+def _appointments_columns(connection) -> dict:
+    """{column_name: (data_type, is_nullable)} for the throwaway schema's
+    appointments table (the _clients_columns convention)."""
+    rows = connection.exec_driver_sql(
+        "SELECT column_name, data_type, is_nullable"
+        " FROM information_schema.columns"
+        " WHERE table_schema = %s AND table_name = 'appointments'",
+        (SCHEMA,),
+    ).fetchall()
+    return {name: (data_type, nullable) for name, data_type, nullable in rows}
+
+
+def test_011_adds_nullable_internal_note_and_existing_rows_stay_valid(
+    migrated_connection,
+):
+    """011 adds EXACTLY one nullable text column to appointments; a row that
+    already existed BEFORE the migration remains valid and reads back with
+    internal_note = NULL; down removes exactly the column."""
+    client_id, conversation_a, _, slot_1, _ = _seed_ids(
+        migrated_connection)
+    pre_existing = uuid.uuid4()
+    _insert_appointment(migrated_connection, pre_existing, client_id,
+                        slot_1, conversation_a)
+
+    before = _appointments_columns(migrated_connection)
+    assert "internal_note" not in before          # clean baseline
+    try:
+        _run_migration_file(migrated_connection, UP_011)
+        after = _appointments_columns(migrated_connection)
+        added = set(after) - set(before)
+        assert added == {"internal_note"}
+        assert after["internal_note"] == ("text", "YES")
+        row = migrated_connection.exec_driver_sql(
+            "SELECT internal_note FROM appointments WHERE id = %s",
+            (str(pre_existing),),
+        ).fetchone()
+        assert row is not None and row[0] is None
+    finally:
+        _run_migration_file(migrated_connection, DOWN_011)
+        assert _appointments_columns(migrated_connection) == before
+
+
+def test_011_check_bites_below_the_application(migrated_connection):
+    """With the application bypassed entirely (raw SQL), the database itself
+    refuses a 2001-character note with SQLSTATE 23514 naming exactly our
+    constraint, and accepts exactly 2000."""
+    from sqlalchemy.exc import IntegrityError
+
+    client_id, conversation_a, _, slot_1, _ = _seed_ids(
+        migrated_connection)
+    appointment_id = uuid.uuid4()
+    _insert_appointment(migrated_connection, appointment_id, client_id,
+                        slot_1, conversation_a)
+    try:
+        _run_migration_file(migrated_connection, UP_011)
+
+        try:
+            with pytest.raises(IntegrityError) as excinfo:
+                migrated_connection.exec_driver_sql(
+                    "UPDATE appointments SET internal_note = %s WHERE id = %s",
+                    ("x" * 2001, str(appointment_id)),
+                )
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        driver_error = excinfo.value.orig
+        assert getattr(driver_error, "pgcode", None) == "23514"
+        assert getattr(driver_error.diag, "constraint_name", None) == NOTE_CHECK
+
+        migrated_connection.exec_driver_sql(
+            "UPDATE appointments SET internal_note = %s WHERE id = %s",
+            ("y" * 2000, str(appointment_id)),
+        )
+        stored = migrated_connection.exec_driver_sql(
+            "SELECT char_length(internal_note) FROM appointments"
+            " WHERE id = %s", (str(appointment_id),),
+        ).fetchone()
+        assert stored[0] == 2000
+    finally:
+        _run_migration_file(migrated_connection, DOWN_011)
+
+
+def test_reapplying_011_fails_loudly(migrated_connection):
+    """No IF NOT EXISTS: a second application must be a loud error, never a
+    silent no-op (the 003..010 convention)."""
+    from sqlalchemy.exc import ProgrammingError
+
+    _run_migration_file(migrated_connection, UP_011)
+    try:
+        try:
+            with pytest.raises(ProgrammingError):
+                _run_migration_file(migrated_connection, UP_011)
+        finally:
+            migrated_connection.exec_driver_sql("ROLLBACK")
+        migrated_connection.exec_driver_sql("SELECT 1")   # connection usable
+    finally:
+        _run_migration_file(migrated_connection, DOWN_011)
+
+
+def test_011_down_preserves_every_other_appointment_byte(migrated_connection):
+    """Down removes ONLY internal_note (destroying notes is what reversal
+    means - stated, not hidden); every other column value on an existing row
+    survives byte-for-byte, and up reapplies cleanly afterward."""
+    client_id, conversation_a, _, slot_1, _ = _seed_ids(
+        migrated_connection)
+    appointment_id = uuid.uuid4()
+    _insert_appointment(migrated_connection, appointment_id, client_id,
+                        slot_1, conversation_a, status="confirmed")
+
+    _run_migration_file(migrated_connection, UP_011)
+    migrated_connection.exec_driver_sql(
+        "UPDATE appointments SET internal_note = 'will be destroyed'"
+        " WHERE id = %s", (str(appointment_id),))
+    before = migrated_connection.exec_driver_sql(
+        "SELECT id, client_id, slot_id, conversation_id, patient_name,"
+        " patient_phone, status FROM appointments WHERE id = %s",
+        (str(appointment_id),),
+    ).fetchone()
+
+    _run_migration_file(migrated_connection, DOWN_011)
+    after = migrated_connection.exec_driver_sql(
+        "SELECT id, client_id, slot_id, conversation_id, patient_name,"
+        " patient_phone, status FROM appointments WHERE id = %s",
+        (str(appointment_id),),
+    ).fetchone()
+    assert after == before
+    assert "internal_note" not in _appointments_columns(migrated_connection)
+
+    _run_migration_file(migrated_connection, UP_011)          # reapplies
+    try:
+        assert "internal_note" in _appointments_columns(migrated_connection)
+    finally:
+        _run_migration_file(migrated_connection, DOWN_011)
+
+
+def test_011_orm_parity(migrated_connection):
+    """The ORM column and the migrated column agree (Rule 3: the migration is
+    the production authority; the mapping must mirror it exactly)."""
+    from app.calendar_models import Appointment
+
+    orm_column = Appointment.__table__.columns["internal_note"]
+    assert orm_column.nullable is True
+    assert str(orm_column.type).upper() == "TEXT"
+    try:
+        _run_migration_file(migrated_connection, UP_011)
+        after = _appointments_columns(migrated_connection)
+        assert after["internal_note"] == ("text", "YES")
+    finally:
+        _run_migration_file(migrated_connection, DOWN_011)

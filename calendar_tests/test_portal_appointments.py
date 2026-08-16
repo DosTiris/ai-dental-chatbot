@@ -63,11 +63,16 @@ INVALID_DETAIL = "Invalid portal credentials."
 
 # The COMPLETE approved appointment field set (leak-prevention pin). Any
 # drift here means the response model and this contract diverged.
+# SLICE 4B1 - DELIBERATE pin amendment (the reviewed-contract-change
+# mechanism this pin exists for): internal_note joins the approved portal
+# surface. Recon proved the projection is consumed ONLY by the three
+# authenticated portal routes, and the office-only leak tests pin that the
+# field never reaches notifications, chat, public/widget APIs, or exports.
 APPROVED_APPOINTMENT_FIELDS = {
     "appointment_id", "patient_name", "patient_phone", "patient_email",
     "new_or_returning", "reason", "urgency", "start_datetime",
     "end_datetime", "status", "confirmed_at", "source",
-    "notification_outcome",
+    "notification_outcome", "internal_note",
 }
 APPROVED_ENVELOPE_FIELDS = {
     "timezone_name", "start_day", "end_day", "appointments",

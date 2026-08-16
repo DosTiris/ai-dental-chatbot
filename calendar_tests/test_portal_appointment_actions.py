@@ -80,11 +80,14 @@ UNEXPECTED_DETAIL = "Unable to update appointment."
 
 # The COMPLETE approved action-response field set (leak-prevention pin) - the
 # SAME 13 fields the read GET returns. Drift here means the contract diverged.
+# SLICE 4B1 - DELIBERATE pin amendment (same mechanism, same rationale as
+# APPROVED_APPOINTMENT_FIELDS in test_portal_appointments.py): internal_note
+# joins the approved portal action surface.
 APPROVED_ACTION_FIELDS = {
     "appointment_id", "patient_name", "patient_phone", "patient_email",
     "new_or_returning", "reason", "urgency", "start_datetime",
     "end_datetime", "status", "confirmed_at", "source",
-    "notification_outcome",
+    "notification_outcome", "internal_note",
 }
 # Markers that must NEVER appear in an action response.
 FORBIDDEN_BODY_MARKERS = [
@@ -151,6 +154,7 @@ def _fake_appt(status="confirmed", *, confirmed_at=None):
     a.office_sms_sent = False
     a.office_email_sent = False
     a.notify_error = None
+    a.internal_note = None   # 4B1: the projection now reads this column
     return a
 
 

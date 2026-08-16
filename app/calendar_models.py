@@ -218,6 +218,18 @@ class Appointment(Base):
 
     source = Column(String, nullable=False, server_default="mia_widget", default="mia_widget")
 
+    # SLICE 4B1: office-internal administrative note. Optional plain text,
+    # at most 2000 chars when present (mirrors
+    # migrations/011_appointment_internal_note_up.sql ck_appointments_
+    # internal_note_len EXACTLY; the migration test proves they stay in
+    # sync). Blank input is normalized to NULL by the ONE normalization
+    # owner (app/services/appointment_note_service.py) at the authenticated
+    # portal write boundaries. NEVER patient-facing: excluded by
+    # construction from notifications, chat, public/widget APIs, and
+    # exports - the leak tests pin that. Independent from reason (not
+    # repurposed) and from urgency/notification state.
+    internal_note = Column(Text, nullable=True)
+
     # Notification outcome bookkeeping (Rule 16 — failure must be visible).
     # If the appointment saved but a message failed, these fields say so.
     office_sms_sent = Column(Boolean, nullable=False, server_default="false", default=False)
