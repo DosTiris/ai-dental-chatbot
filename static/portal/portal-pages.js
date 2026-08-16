@@ -96,8 +96,13 @@
     calendar_unavailable_module:
       "The calendar view could not be loaded. Please reload the portal.",
     calendar_outside_prefix: "Entries outside this range were not shown: ",
-    calendar_drawer_actions_note:
-      "Confirm and Cancel remain on the Appointments page.",
+    /* P2-A: the drawer now offers the EXISTING P5-A actions, so the
+     * outcome wording is the P5-A wording verbatim - one vocabulary for
+     * one capability, whichever page invoked it. Only the "nothing to
+     * offer" line is new, because the Appointments page shows an empty
+     * control group where the drawer needs a sentence. */
+    calendar_drawer_no_actions:
+      "No actions are available for this appointment.",
     calendar_drawer_untitled: "Appointment"
   };
 
@@ -411,9 +416,62 @@
        * detail panel renders in the same zone the grid was laid out in.
        * It is only ever adopted from a consistency-checked pair. */
       timezoneName: "",
-      /* The appointment row the READ-ONLY detail panel is showing, or
-       * null. It is a reference to an ALREADY loaded row - never fetched. */
+      /* The appointment row the detail panel is showing, or null. It is a
+       * reference to an ALREADY loaded row - never separately fetched. */
       selected: null,
+      /* P2-A: the appointment_id the panel is showing. The panel is
+       * reopened after an authoritative refresh by THIS ID, never by the
+       * old object reference - after a refresh the row is a NEW object,
+       * and matching on the stale reference would silently fail to
+       * reopen (or worse, show pre-mutation values). */
+      selectedId: null,
+      /* P2-A mutation ownership, mirroring P5-A exactly rather than
+       * inventing a second scheme:
+       *   generation  - bumped the moment ANY calendar mutation begins.
+       *                 A week GET is applied only when the generation it
+       *                 captured still equals this one, so a read issued
+       *                 BEFORE a mutation can never roll the calendar
+       *                 back behind that mutation's authoritative refresh.
+       *   actionBusy  - appointment_id -> the UNIQUE token of the mutation
+       *                 that owns it. Presence means busy, which both
+       *                 suppresses duplicate submits and disables BOTH of
+       *                 that appointment's controls. A completing mutation
+       *                 releases the entry only when the token is still
+       *                 its own, so it can never free a newer owner.
+       *   armed       - the two-step cancel guard, scoped per appointment.
+       *   actionSeq   - the monotonic source of those tokens.
+       * lifecycle (already present) remains the page/session token. */
+      generation: 0,
+      actionBusy: {},
+      armed: {},
+      actionSeq: 0,
+      /* F1: lifecycle alone cannot distinguish the two very different
+       * events that bump it. resetContent (sign-out / independent reset)
+       * means "this surface was WIPED - stay wiped and fire nothing".
+       * openCalendar (page re-entry) means "the office is looking at this
+       * page again" - and a mutation that succeeds afterwards MUST NOT
+       * leave that visible page showing pre-mutation state.
+       *   wipeEpoch - bumped ONLY by resetContent. A mutation whose captured
+       *               epoch is stale was wiped: it renders nothing and
+       *               triggers no request, ever.
+       *   active    - whether the Calendar page is the one currently shown.
+       *               Owned by showPage, so there is exactly one writer.
+       *               A re-entry refresh happens only when the office is
+       *               actually on the Calendar - never as background work
+       *               behind another page. */
+      wipeEpoch: 0,
+      active: false,
+      /* F6: a mutation is settled, but the authoritative refresh it started
+       * has not arrived yet. Until it does, the Calendar does NOT know the
+       * new truth, so the drawer keeps its controls disabled and refuses new
+       * actions. Without this there is a window - the length of the combined
+       * GET - in which Confirm/Cancel could be pressed again against a row
+       * that is already stale. Cleared the moment authoritative state lands
+       * (renderCalendarPage) or that read fails, so it can never stick. */
+      settling: 0,
+      /* A settled mutation message that must survive the authoritative
+       * re-render which immediately follows it. */
+      pendingFeedback: "",
       lifecycle: 0
     };
 
@@ -573,6 +631,9 @@
       if (navRecurringEl) navRecurringEl.classList.toggle("portal-nav-active", isRecurring);
       var navCalendarEl = byId("nav-calendar");
       if (navCalendarEl) navCalendarEl.classList.toggle("portal-nav-active", isCalendar);
+      /* F1: one writer for "is the Calendar the visible page". Every page
+       * switch routes through here, so this can never drift. */
+      calendar.active = isCalendar;
     }
 
     /*
@@ -1775,10 +1836,107 @@
     }
 
     /*
-     * Purpose: open the READ-ONLY appointment detail panel for one row the
+     * Purpose (P2-A): render the action controls for ONE appointment at the
+     * bottom of the drawer.
+     *
+     * The offered set comes from appointmentActionsFor - the SAME frozen
+     * status/action matrix the Appointments page uses. No second matrix is
+     * defined here, so a status that offers nothing there offers nothing
+     * here, and a control can never appear where the lifecycle owner would
+     * only refuse it.
+     *
+     * Both controls share ONE button list, so a mutation in flight disables
+     * both (the P5-A C5 rule) - Confirm and Cancel can never overlap on the
+     * same appointment.
+     */
+    function renderCalendarDrawerActions(appointment) {
+      var host = byId("calendar-drawer-actions");
+      if (!host) {
+        return;
+      }
+      clearChildren(host);
+      var appointmentId = appointment.appointment_id;
+      var actions = appointmentActionsFor(appointment.status);
+      if (actions.length === 0) {
+        setCalendarText("calendar-drawer-actions-note",
+          MESSAGES.calendar_drawer_no_actions);
+        return;
+      }
+      setCalendarText("calendar-drawer-actions-note", "");
+      /* Busy means EITHER this appointment has a request in flight, OR the
+       * Calendar is still waiting for the authoritative state that a settled
+       * mutation asked for (F6). */
+      var busy = calendar.actionBusy[appointmentId] !== undefined ||
+        calendar.settling > 0;
+      var buttons = [];
+      if (actions.indexOf("confirm") !== -1) {
+        var confirmBtn = doc.createElement("button");
+        confirmBtn.type = "button";
+        confirmBtn.className = "portal-button portal-button-secondary";
+        confirmBtn.textContent = "Confirm";
+        confirmBtn.disabled = busy;
+        confirmBtn.addEventListener("click", function () {
+          onCalendarAppointmentAction(appointmentId, data.confirmAppointment,
+            buttons, MESSAGES.appointment_confirmed);
+        });
+        buttons.push(confirmBtn);
+        host.appendChild(confirmBtn);
+      }
+      if (actions.indexOf("cancel") !== -1) {
+        var armed = calendar.armed[appointmentId] === true;
+        var cancelBtn = doc.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "portal-button portal-button-secondary";
+        /* The armed wording is the P5-A wording: the second click is an
+         * explicit, differently-labelled confirmation, never a repeat of
+         * the same label. */
+        cancelBtn.textContent = armed ? "Confirm cancel" : "Cancel appointment";
+        cancelBtn.disabled = busy;
+        cancelBtn.addEventListener("click", function () {
+          onCalendarCancelClick(appointmentId, cancelBtn, buttons);
+        });
+        buttons.push(cancelBtn);
+        host.appendChild(cancelBtn);
+      }
+    }
+
+    /*
+     * Purpose (F4): refresh ONLY the drawer's action controls, from the row
+     * ALREADY on screen. No request, no grid re-render, no second action
+     * architecture - it re-runs the very builder the drawer already uses.
+     * It exists for ONE narrow recovery case: an active, re-entered drawer
+     * whose mutation failed in a way that changed nothing on the server, so
+     * no authoritative refresh is warranted and nothing else would ever
+     * re-enable the controls.
+     *
+     * It must NEVER run on a path that is about to refresh (F6): rebuilding
+     * from the stale row would re-enable Confirm/Cancel before the Calendar
+     * knows the authoritative state. Every precondition is therefore checked
+     * here as well as at the call site - this is the one function that can
+     * un-disable an action control, so it fails closed.
+     */
+    function refreshCalendarDrawerActions(appointmentId) {
+      if (!calendar.active) {
+        return; /* never hidden DOM work behind another page */
+      }
+      if (calendar.settling > 0) {
+        return; /* authoritative state is in flight - stay disabled */
+      }
+      if (calendar.actionBusy[appointmentId] !== undefined) {
+        return; /* a NEWER mutation owns this appointment - still busy */
+      }
+      if (calendar.selected === null ||
+          calendar.selectedId !== appointmentId) {
+        return; /* the panel no longer represents this appointment */
+      }
+      renderCalendarDrawerActions(calendar.selected);
+    }
+
+    /*
+     * Purpose: open (or re-open) the appointment detail panel for one row the
      * week read ALREADY returned. No request is made here: every value comes
-     * from the loaded response, so the drawer can never be a second data
-     * pathway and can never mutate anything.
+     * from the loaded response, so the panel can never be a second data
+     * pathway.
      * The panel is one element; CSS alone decides whether it presents as a
      * right-hand drawer (desktop) or a near-full-screen sheet (mobile).
      */
@@ -1791,6 +1949,7 @@
         return;
       }
       calendar.selected = appointment;
+      calendar.selectedId = appointment.appointment_id;
       setCalendarText("calendar-drawer-title",
         appointment.patient_name || MESSAGES.calendar_drawer_untitled);
       setCalendarText("calendar-drawer-status",
@@ -1811,23 +1970,24 @@
           fields.appendChild(value);
         }
       }
-      /* The actions region stays deliberately EMPTY of controls in this
-       * phase - it reserves the space a future Confirm/Cancel/Reschedule
-       * contract would occupy, and meanwhile points at where those actions
-       * genuinely live today. No new mutation path is created here. */
-      setCalendarText("calendar-drawer-actions-note",
-        MESSAGES.calendar_drawer_actions_note);
+      renderCalendarDrawerActions(appointment);
       /* Keep the originating block visibly selected while the panel is open,
-       * so it is obvious which appointment is being read. Appearance only. */
+       * so it is obvious which appointment is being read. Appearance only.
+       * A cancelled appointment has no block in the resting calendar, so
+       * this simply selects nothing - the panel still shows its true state. */
       calendarRenderer.applySelection(appointment);
       panel.hidden = false;
     }
 
     /* Close and WIPE. The panel holds patient contact details, so closing
      * clears them rather than merely hiding them - nothing may linger on a
-     * shared front-desk computer behind a hidden element. */
+     * shared front-desk computer behind a hidden element. Closing also
+     * disarms any pending cancel: an arm never survives the panel it was
+     * made in, so re-opening always requires the two clicks again. */
     function closeCalendarDrawer() {
       calendar.selected = null;
+      calendar.selectedId = null;
+      calendar.armed = {};
       /* Clearing the selection is part of closing: no block may keep a
        * selected look once the panel it belonged to is gone. Guarded because
        * resetContent also runs in contexts where no renderer was built. */
@@ -1839,8 +1999,256 @@
       setCalendarText("calendar-drawer-title", "");
       setCalendarText("calendar-drawer-status", "");
       setCalendarText("calendar-drawer-actions-note", "");
+      setCalendarText("calendar-drawer-feedback", "");
+      var actionsHost = byId("calendar-drawer-actions");
+      if (actionsHost) clearChildren(actionsHost);
       var fields = byId("calendar-drawer-fields");
       if (fields) clearChildren(fields);
+    }
+
+    /* Find one appointment in an authoritative response BY ID. Used to
+     * re-open the panel after a refresh: the refreshed row is a new object,
+     * so identity must be the id the backend owns, never a stale reference. */
+    function findAppointmentById(appointmentsBody, appointmentId) {
+      if (appointmentId === null || !appointmentsBody ||
+          !Array.isArray(appointmentsBody.appointments)) {
+        return null;
+      }
+      for (var i = 0; i < appointmentsBody.appointments.length; i++) {
+        var row = appointmentsBody.appointments[i];
+        if (row && row.appointment_id === appointmentId) {
+          return row;
+        }
+      }
+      return null;
+    }
+
+    /*
+     * Purpose (P2-A): the FIRST click of Cancel arms THIS appointment (no
+     * network, no window.confirm); the SECOND explicit click performs it.
+     * This is the P5-A guard reused verbatim - the Calendar must never offer
+     * a weaker cancellation path than the Appointments page. A mutation
+     * already in flight for the same appointment suppresses both.
+     */
+    function onCalendarCancelClick(appointmentId, cancelButton, buttons) {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight - not even an arm */
+      }
+      if (calendar.actionBusy[appointmentId] !== undefined) {
+        return; /* a mutation is in flight for this appointment */
+      }
+      if (calendar.armed[appointmentId] !== true) {
+        calendar.armed[appointmentId] = true;
+        cancelButton.textContent = "Confirm cancel";
+        setCalendarText("calendar-drawer-feedback",
+          MESSAGES.appointment_cancel_arm);
+        return;
+      }
+      onCalendarAppointmentAction(appointmentId, data.cancelAppointment,
+        buttons, MESSAGES.appointment_cancelled);
+    }
+
+    /*
+     * Purpose (P2-A): perform ONE appointment mutation from the drawer and
+     * settle it authoritatively, through the EXISTING P5-A data methods.
+     * Guards: a duplicate submit while this appointment is in flight is
+     * suppressed; BOTH drawer controls are disabled for the duration; a new
+     * mutation generation is opened so any week read issued before now is
+     * discarded. Optimistic state is NEVER rendered - only the authoritative
+     * combined re-read the settler triggers.
+     * External effects: one POST via the data layer; then the existing
+     * combined Schedule + Appointments GET on settle.
+     */
+    function onCalendarAppointmentAction(appointmentId, call, buttons,
+        successMessage) {
+      if (calendar.settling > 0) {
+        /* F6: a settled mutation is still waiting for authoritative state.
+         * Acting now would act against a row the Calendar already knows is
+         * out of date. */
+        return;
+      }
+      if (calendar.actionBusy[appointmentId] !== undefined) {
+        return; /* duplicate submit while in flight */
+      }
+      /* This mutation OWNS the appointment via a unique token, not an
+       * unowned boolean, so its late completion can only release its own
+       * ownership and never a newer mutation's. */
+      var token = ++calendar.actionSeq;
+      calendar.actionBusy[appointmentId] = token;
+      calendar.generation += 1;   /* a mutation begins */
+      var lifecycleAtIssue = calendar.lifecycle;
+      var generationAtIssue = calendar.generation;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].disabled = true;
+      }
+      setCalendarText("calendar-drawer-feedback", "");
+      call(appointmentId).then(function (outcome) {
+        /* The request itself is over, so its ownership is released here -
+         * but ONLY the settler decides whether the controls may be rebuilt
+         * (F6). Rebuilding here would re-enable them from the stale row
+         * while the authoritative refresh is still in flight. */
+        if (calendar.actionBusy[appointmentId] === token) {
+          delete calendar.actionBusy[appointmentId];
+        }
+        settleCalendarMutation(lifecycleAtIssue, generationAtIssue,
+          wipeEpochAtIssue, outcome, successMessage, appointmentId);
+      });
+    }
+
+    /*
+     * Purpose (P2-A): THE single settling point for a calendar appointment
+     * mutation response (the P5-A settleAppointmentMutation discipline).
+     * Guard order:
+     *   1. WIPED (sign-out or an independent reset happened while in
+     *      flight): render NOTHING and trigger NO GET - the wipe stands and
+     *      no request may repopulate a signed-out screen.
+     *   2. Session-loss outcome: wipe rendered tenant content and hand back
+     *      to the sign-in flow.
+     *   3. NOT ON SCREEN (F3): the office navigated to another page and has
+     *      not come back. Rendering or fetching here would be invisible
+     *      background work behind the page they are actually using, and it
+     *      is never needed - openCalendar performs a fresh authoritative
+     *      read on the next visit, so nothing can be stale by the time it
+     *      is seen again. Session loss is deliberately handled ABOVE this
+     *      gate: a lost session must wipe and hand back whichever page is
+     *      visible.
+     *   4. STALE LIFECYCLE without a wipe - i.e. PAGE RE-ENTRY (F1). The
+     *      re-entry GET may well have been answered BEFORE this mutation
+     *      committed, so the visible calendar can be showing pre-mutation
+     *      state. Returning silently here would leave it stale until a
+     *      manual refresh. A SUCCESSFUL commit therefore triggers the
+     *      smallest safe correction: one authoritative re-read of the
+     *      CURRENT window through the existing combined path (the on-screen
+     *      gate above already applies). No message is shown and no drawer is
+     *      reopened: that mutation's UI context is gone, and only the stale
+     *      pixels are being corrected. A FAILED older attempt changed
+     *      nothing and is simply dropped.
+     *   5. STALE GENERATION (a newer mutation already owns the surface): a
+     *      SUCCESSFUL older commit still changed the server, so fetch the
+     *      current truth; a failed older attempt is simply dropped.
+     *   6. Current: record the honest message and ALWAYS re-read the week
+     *      authoritatively - on success AND on every failure - so a
+     *      conflict, a not-found or an unavailable settles to real state.
+     * The message is held in pendingFeedback because the refresh rebuilds
+     * (and briefly closes) the panel; the settler never writes the final
+     * visual state itself.
+     */
+    /*
+     * Purpose (F9): is this outcome a lost session? THE single classifier -
+     * every calendar path that must distinguish "the credential is dead"
+     * from "this request merely failed" asks this one function, so the two
+     * values can never drift apart between the read path and the mutation
+     * path. Pure.
+     */
+    function isSessionLossOutcome(outcome) {
+      return !outcome.ok && (outcome.state === "signed_out" ||
+        outcome.state === "unauthorized");
+    }
+
+    /* F7: the outcomes that PROVE a mutation never took effect. This is an
+     * allow-list, not a deny-list, because the safe default for a POST is
+     * "the server may have moved".
+     *
+     * From the data owner's closed vocabulary, only bad_request (400/422)
+     * qualifies: the request was rejected before any lifecycle transition
+     * could occur. signed_out and unauthorized are also no-ops, but they
+     * never reach this predicate - the wipe path handles them first.
+     *
+     * Everything else is at best UNCERTAIN and must fail safe toward
+     * reading the truth:
+     *   ok               - it committed.
+     *   conflict         - a 409 reports the appointment changed SOMEWHERE
+     *                      ELSE, so the Calendar is likely the stale party.
+     *   not_found        - it is gone from the server's point of view.
+     *   unavailable      - a network failure or 5xx can happen AFTER the
+     *                      server committed and merely lose the response.
+     *   invalid_response - a 200 whose body failed validation still means
+     *                      the transition very likely occurred.
+     * A future vocabulary value falls through to "may have changed", which
+     * costs one extra read and can never leave the office looking at a
+     * stale appointment. */
+    var MUTATION_PROVEN_NO_EFFECT = ["bad_request"];
+
+    /*
+     * Purpose (F5/F7): may authoritative state have changed on the server?
+     * Returns false ONLY for an outcome that proves the mutation never
+     * applied; every other result - success, conflict, disappearance, and
+     * every ambiguous transport failure - returns true.
+     */
+    function mutationMayHaveChangedState(outcome) {
+      if (outcome.ok) {
+        return true;
+      }
+      return MUTATION_PROVEN_NO_EFFECT.indexOf(outcome.state) === -1;
+    }
+
+    /* Begin the authoritative refresh a settled mutation requires. The
+     * settling marker is raised BEFORE the read is issued, so the drawer is
+     * already frozen by the time control returns to the office (F6). */
+    function startCalendarSettleRefresh() {
+      calendar.settling += 1;
+      loadCalendar();
+    }
+
+    function settleCalendarMutation(lifecycleAtIssue, generationAtIssue,
+        wipeEpochAtIssue, outcome, successMessage, appointmentId) {
+      if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+        return; /* wiped by reset/sign-out - stay wiped, fire nothing */
+      }
+      if (isSessionLossOutcome(outcome)) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (!calendar.active) {
+        /* F3: the Calendar is not the page on screen. Do nothing at all -
+         * no read, no render, no feedback into a panel nobody is looking
+         * at. The next openCalendar reads authoritatively anyway. */
+        return;
+      }
+      if (lifecycleAtIssue !== calendar.lifecycle) {
+        /* Page re-entry, not a wipe (F1). The re-entry read may well have
+         * been answered before this mutation resolved, so if the server
+         * state may have moved (F5: committed, conflicted, or vanished) the
+         * visible page must be corrected. No message is written: an older
+         * mutation never overwrites a newer one's feedback. */
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        } else {
+          refreshCalendarDrawerActions(appointmentId);
+        }
+        return;
+      }
+      if (generationAtIssue !== calendar.generation) {
+        /* A newer mutation owns the surface now - so again, no feedback
+         * from this one. It still fetches when the server may have moved. */
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        } else {
+          refreshCalendarDrawerActions(appointmentId);
+        }
+        return;
+      }
+      if (!outcome.ok) {
+        var message;
+        if (outcome.state === "conflict") {
+          message = MESSAGES.appointment_action_conflict;
+        } else if (outcome.state === "not_found") {
+          message = MESSAGES.appointment_gone;
+        } else {
+          message = MESSAGES[outcome.state] || MESSAGES.appointment_action_failed;
+        }
+        /* Never success wording on a failure, and never an optimistic edit
+         * to the visible appointment. */
+        calendar.pendingFeedback = message;
+        startCalendarSettleRefresh();
+        return;
+      }
+      calendar.pendingFeedback = successMessage;
+      /* Authoritative state only - never optimistic. The drawer stays
+       * frozen until this read lands and rebuilds it from the NEW row. */
+      startCalendarSettleRefresh();
     }
 
     /*
@@ -1856,7 +2264,13 @@
       var gridEl = byId("calendar-grid");
       if (gridEl) clearChildren(gridEl);
       /* A re-render replaces every block element, so any open drawer would
-       * be pointing at a detached row: close it first. */
+       * be pointing at a detached row: close it first. The id is captured
+       * BEFORE the close (which clears it) so the panel can be reopened
+       * from the REFRESHED row below. */
+      /* Authoritative state has arrived: whatever a settled mutation was
+       * waiting for is now known, so the drawer may be rebuilt live again. */
+      calendar.settling = 0;
+      var reopenId = calendar.selectedId;
       closeCalendarDrawer();
 
       var result = calendarRenderer.buildGrid(scheduleBody, appointmentsBody);
@@ -1898,6 +2312,28 @@
         setCalendarText("calendar-state", "");
       }
       setCalendarNavDisabled(calendar.defaultStart === null);
+
+      /* P2-A: reopen the panel from the AUTHORITATIVE refreshed row, found
+       * by appointment_id. If the backend no longer returns it - which is
+       * expected after a cancellation once it leaves the window - the
+       * panel stays closed rather than continuing to display a row the
+       * server did not send. No history is fabricated. */
+      var refreshed = findAppointmentById(appointmentsBody, reopenId);
+      if (refreshed !== null) {
+        openCalendarDrawer(refreshed);
+      }
+      /* A settled mutation message survives its own refresh. It is shown
+       * inside the panel when the panel is open, and at calendar level
+       * when the appointment is gone - so the outcome is never lost. */
+      if (calendar.pendingFeedback !== "") {
+        if (refreshed !== null) {
+          setCalendarText("calendar-drawer-feedback",
+            calendar.pendingFeedback);
+        } else {
+          setCalendarText("calendar-state", calendar.pendingFeedback);
+        }
+        calendar.pendingFeedback = "";
+      }
     }
 
     /*
@@ -1917,6 +2353,11 @@
       }
       var requestId = ++requestIds.calendar;
       var lifecycleAtIssue = calendar.lifecycle;
+      /* P2-A: the week read is also generation-guarded now that the page
+       * mutates. A read issued BEFORE a mutation began can never be
+       * applied afterwards, so a stale pre-mutation GET cannot overwrite
+       * post-mutation authoritative state. */
+      var generationAtIssue = calendar.generation;
       setCalendarText("calendar-state", MESSAGES.loading);
 
       var params = {};
@@ -1940,27 +2381,59 @@
         data.getAppointments(params)
       ]).then(function (outcomes) {
         if (requestId !== requestIds.calendar ||
-            lifecycleAtIssue !== calendar.lifecycle) {
-          return; /* superseded, or wiped/re-entered - never applied */
+            lifecycleAtIssue !== calendar.lifecycle ||
+            generationAtIssue !== calendar.generation) {
+          return; /* superseded, wiped/re-entered, or pre-mutation */
         }
         var scheduleOutcome = outcomes[0];
         var appointmentsOutcome = outcomes[1];
-        if (!scheduleOutcome.ok) {
-          handleFailure(scheduleOutcome, "calendar-state");
-          return;
-        }
-        if (!appointmentsOutcome.ok) {
-          handleFailure(appointmentsOutcome, "calendar-state");
+        if (!scheduleOutcome.ok || !appointmentsOutcome.ok) {
+          /* F8: the read FAILED, so authoritative state never arrived. The
+           * settling marker is deliberately LEFT SET. After a mutation whose
+           * effect is committed or uncertain, the last row the Calendar
+           * holds is no longer safe to act on - and clearing the marker here
+           * would let the office re-enable Confirm/Cancel simply by closing
+           * and reopening the panel, acting against data the Calendar itself
+           * knows is unresolved.
+           * Nothing is fabricated: the honest read-failure message is shown,
+           * and recovery is a NEW authoritative read - manual Refresh, week
+           * navigation, or ordinary page re-entry - each of which clears the
+           * marker only by actually landing new truth. A sign-out or reset
+           * still wipes normally through handleFailure. */
+          /* F9: the Calendar reads TWO windows concurrently, so a failure
+           * selector that always preferred the Schedule half could hide a
+           * dead session behind an ordinary transport failure on the other
+           * half - leaving patient and appointment data on screen after the
+           * credential had already been rejected.
+           * Session loss therefore DOMINATES every ordinary failure,
+           * whichever half reports it, and the order of the two is
+           * irrelevant. Exactly ONE outcome reaches handleFailure, so the
+           * wipe and the hand-back happen exactly once. Neither response is
+           * partially rendered on any failure path. */
+          var failure;
+          if (isSessionLossOutcome(scheduleOutcome)) {
+            failure = scheduleOutcome;
+          } else if (isSessionLossOutcome(appointmentsOutcome)) {
+            failure = appointmentsOutcome;
+          } else {
+            failure = scheduleOutcome.ok ? appointmentsOutcome
+              : scheduleOutcome;
+          }
+          handleFailure(failure, "calendar-state");
           return;
         }
         renderCalendarPage(scheduleOutcome.data, appointmentsOutcome.data);
       });
     }
 
+    /* Changing week closes the panel FIRST, so a mutation still in flight
+     * cannot reopen a drawer for an appointment belonging to the week the
+     * office just left, and no arm survives the move. */
     function onCalendarPrev() {
       if (calendar.defaultStart === null) {
         return;
       }
+      closeCalendarDrawer();
       calendar.weekOffset -= 1;
       loadCalendar();
     }
@@ -1969,6 +2442,7 @@
       if (calendar.defaultStart === null) {
         return;
       }
+      closeCalendarDrawer();
       calendar.weekOffset += 1;
       loadCalendar();
     }
@@ -1985,7 +2459,19 @@
      * longer render, drop the stale anchor, and reload from the backend
      * default week. */
     function openCalendar() {
-      calendar.lifecycle += 1;
+      calendar.lifecycle += 1;   /* page re-entry: a mutation still in
+                                  * flight may no longer own the surface */
+      /* F4: actionBusy is deliberately NOT cleared here. A page visit does
+       * not stop an outstanding network request from existing, and clearing
+       * the lock would re-enable Confirm/Cancel for an appointment whose
+       * mutation is still in flight, allowing a second submit for the SAME
+       * appointment. Ownership is released by the completing mutation
+       * itself, or wiped wholesale by resetContent (sign-out / reset) -
+       * the only event entitled to declare the request irrelevant.
+       * The arm is UI state scoped to one panel visit, so it DOES clear. */
+      calendar.armed = {};
+      calendar.pendingFeedback = "";
+      calendar.settling = 0;
       calendar.weekOffset = 0;
       calendar.defaultStart = null;
       calendar.currentStart = null;
@@ -2267,7 +2753,14 @@
        * may linger behind the login view on a shared front-desk computer.
        * Every access is null-tolerant so the frozen suites are unaffected. */
       requestIds.calendar += 1;
+      calendar.generation += 1;
       calendar.lifecycle += 1;
+      calendar.wipeEpoch += 1;   /* F1: a WIPE, not a re-entry */
+      calendar.active = false;
+      calendar.actionBusy = {};
+      calendar.armed = {};
+      calendar.pendingFeedback = "";
+      calendar.settling = 0;
       calendar.weekOffset = 0;
       calendar.defaultStart = null;
       calendar.currentStart = null;

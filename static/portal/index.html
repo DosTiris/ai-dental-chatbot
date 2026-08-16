@@ -255,10 +255,15 @@
                       type="button">Close</button>
             </div>
             <dl id="calendar-drawer-fields" class="portal-detail-fields"></dl>
-            <!-- Reserved space for a future, separately approved action
-                 contract. No action control is rendered in this phase. -->
+            <!-- P2-A: the EXISTING P5-A Confirm / Cancel controls. They are
+                 rendered from the frozen appointmentActionsFor matrix, so this
+                 markup declares no action of its own and no action can appear
+                 where the lifecycle owner would refuse it. -->
             <div class="portal-calendar-drawer-actions">
+              <div id="calendar-drawer-actions" class="portal-appt-actions"></div>
               <p id="calendar-drawer-actions-note" class="portal-muted"></p>
+              <p id="calendar-drawer-feedback" class="portal-muted"
+                 aria-live="polite"></p>
             </div>
           </aside>
         </div>

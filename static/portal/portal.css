@@ -691,13 +691,36 @@ body {
 
 .portal-calendar-drawer .portal-detail-fields { margin: 0 0 12px; }
 
-/* Reserved space for a future, separately approved action contract. */
+/* P2-A: the appointment action region. Controls first, then the state
+   line, then the outcome feedback - so a message never displaces a button
+   the office is about to press. */
 .portal-calendar-drawer-actions {
   min-height: 44px;
   padding-top: 10px;
   border-top: 1px solid var(--portal-border);
   font-size: 12px;
 }
+
+.portal-calendar-drawer-actions .portal-appt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.portal-calendar-drawer-actions .portal-button {
+  width: auto;
+  padding: 7px 13px;
+}
+
+.portal-calendar-drawer-actions .portal-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#calendar-drawer-feedback:empty,
+#calendar-drawer-actions-note:empty { margin: 0; }
+
+#calendar-drawer-feedback { margin: 8px 0 0; }
 
 @media (max-width: 560px) {
   .portal-calendar-frame { min-width: 620px; }

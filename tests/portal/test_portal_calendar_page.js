@@ -134,7 +134,9 @@ const PAGE_ELEMENT_IDS = [
   "calendar-prev", "calendar-next", "calendar-refresh",
   "calendar-drawer", "calendar-drawer-title", "calendar-drawer-status",
   "calendar-drawer-fields", "calendar-drawer-close",
-  "calendar-drawer-actions-note"
+  "calendar-drawer-actions-note",
+  /* P2-A drawer action region. */
+  "calendar-drawer-actions", "calendar-drawer-feedback"
 ];
 
 function makeDocument() {
@@ -151,7 +153,8 @@ function makeFakeData() {
   const names = ["getDashboard", "listLeads", "getLeadDetail",
     "putLeadStatus", "putLeadNote", "getAppointments",
     "getSchedule", "publishScheduleDay", "blockScheduleSlot",
-    "unblockScheduleSlot", "blockAllOpenSlots"];
+    "unblockScheduleSlot", "blockAllOpenSlots",
+    "confirmAppointment", "cancelAppointment"];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -178,6 +181,8 @@ function makeFakeData() {
     blockScheduleSlot: (slotId) => next("blockScheduleSlot", slotId),
     unblockScheduleSlot: (slotId) => next("unblockScheduleSlot", slotId),
     blockAllOpenSlots: (day) => next("blockAllOpenSlots", day),
+    confirmAppointment: (id) => next("confirmAppointment", id),
+    cancelAppointment: (id) => next("cancelAppointment", id),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -337,6 +342,30 @@ function allBands(doc) {
   return out;
 }
 
+
+function actionButtons(doc) {
+  return doc._elements["calendar-drawer-actions"].children;
+}
+
+function actionLabels(doc) {
+  return actionButtons(doc).map((b) => b.textContent);
+}
+
+function actionButton(doc, label) {
+  for (const button of actionButtons(doc)) {
+    if (button.textContent === label) { return button; }
+  }
+  return null;
+}
+
+function feedbackText(doc) {
+  return doc._elements["calendar-drawer-feedback"].textContent;
+}
+
+function openDrawerFor(f, index) {
+  blocksIn(columns(f.doc)[0])[index || 0].trigger("click");
+}
+
 function drawerPairs(doc) {
   const fields = doc._elements["calendar-drawer-fields"].children;
   const pairs = [];
@@ -408,9 +437,13 @@ test("calendar: a default week calls EXACTLY getSchedule + getAppointments with 
   assertEqual(f.data.calls.getAppointments.length, 1, "one appointments read");
   assertEqual(JSON.stringify(f.data.calls.getSchedule[0]), "{}", "no bounds");
   assertEqual(JSON.stringify(f.data.calls.getAppointments[0]), "{}", "no bounds");
+  /* A read never touches a mutation method, and never touches another
+   * page's data method. confirmAppointment / cancelAppointment appear here
+   * too: merely loading a week must not call them. */
   for (const name of ["getDashboard", "listLeads", "getLeadDetail",
     "putLeadStatus", "putLeadNote", "publishScheduleDay", "blockScheduleSlot",
-    "unblockScheduleSlot", "blockAllOpenSlots"]) {
+    "unblockScheduleSlot", "blockAllOpenSlots",
+    "confirmAppointment", "cancelAppointment"]) {
     assertEqual(f.data.calls[name].length, 0, "calendar must not call " + name);
   }
 });
@@ -1039,7 +1072,7 @@ test("calendar: reset and session loss clear the selected block", async () => {
     "session loss releases the selection");
 });
 
-test("calendar: a re-render and a week change clear the selected block", async () => {
+test("calendar: a re-render moves the selection to the NEW block, by appointment id", async () => {
   const f = makePages();
   queueWeek(f, [], [appointmentFixture()]);
   openCalendar(f);
@@ -1048,22 +1081,57 @@ test("calendar: a re-render and a week change clear the selected block", async (
   stale.trigger("click");
   await flush();
 
-  queueWeek(f, [], [appointmentFixture()]);
+  /* P2-A supersedes the Phase 1 "a re-render always closes the panel" rule:
+   * the office must be able to watch an appointment settle in place after
+   * Confirm/Cancel. The DETACHED block still releases its selected look -
+   * the registry is rebuilt - and the panel is repopulated from the NEW
+   * row found by appointment_id, never from the stale object. */
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
   f.doc._elements["calendar-refresh"].trigger("click");
   await flush();
   assert(!stale.classList.contains("portal-calendar-block-selected"),
-    "a re-render releases the previous selection");
-  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
-
+    "the detached block releases its selection");
   const fresh = blocksIn(columns(f.doc)[0])[0];
-  fresh.trigger("click");
+  assert(fresh !== stale, "precondition: a new element was rendered");
+  assert(fresh.classList.contains("portal-calendar-block-selected"),
+    "the selection moved to the refreshed block");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false, "panel open");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "and it shows the REFRESHED status, not the pre-refresh one");
+});
+
+test("calendar: a refresh that no longer returns the appointment closes the panel honestly", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture()]);
+  openCalendar(f);
+  await flush();
+  blocksIn(columns(f.doc)[0])[0].trigger("click");
+  await flush();
+
+  queueWeek(f, [], []);
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "no row means no panel - history is never fabricated");
+  assertEqual(drawerPairs(f.doc).length, 0, "and the details are wiped");
+});
+
+test("calendar: changing week clears the selection and closes the panel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture()]);
+  openCalendar(f);
+  await flush();
+  const block = blocksIn(columns(f.doc)[0])[0];
+  block.trigger("click");
   await flush();
   queueWeek(f, [], [], { start_day: "2026-08-31", end_day: "2026-09-06" },
     { start_day: "2026-08-31", end_day: "2026-09-06" });
   f.doc._elements["calendar-next"].trigger("click");
   await flush();
-  assert(!fresh.classList.contains("portal-calendar-block-selected"),
+  assert(!block.classList.contains("portal-calendar-block-selected"),
     "changing week releases the selection");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "and closes the panel - the appointment belongs to the week just left");
 });
 
 test("calendar module: applySelection is appearance only and matches by identity", async () => {
@@ -1169,19 +1237,20 @@ test("calendar: a null or absent patient email opens the panel and reads Not pro
     "and no request was issued for the missing value");
 });
 
-test("calendar: the panel reserves action space but renders NO action control", async () => {
+test("calendar: the panel offers ONLY the approved existing actions", async () => {
   const f = makePages();
   queueWeek(f, [], [appointmentFixture()]);
   openCalendar(f);
   await flush();
   blocksIn(columns(f.doc)[0])[0].trigger("click");
   await flush();
-  const note = f.doc._elements["calendar-drawer-actions-note"].textContent;
-  assertEqual(note, "Confirm and Cancel remain on the Appointments page.",
-    "the reserved region points at where actions genuinely live today");
-  for (const word of ["Reschedule", "Duplicate", "Book", "Create"]) {
-    assert(note.indexOf(word) === -1,
-      "no unauthorized action vocabulary appears: " + word);
+  const labels = actionLabels(f.doc);
+  for (const word of ["Reschedule", "Duplicate", "Book", "Create", "New",
+    "Delete", "Edit"]) {
+    for (const label of labels) {
+      assert(label.indexOf(word) === -1,
+        "no unauthorized action vocabulary appears: " + label);
+    }
   }
 });
 
@@ -1602,6 +1671,1759 @@ test("calendar module: lane assignment is per overlap cluster, not per day", () 
   assertEqual(laned[1].laneCount, 2, "both members share the lane count");
   assertEqual(laned[2].laneCount, 1,
     "an unrelated afternoon entry keeps the full column width");
+});
+
+/* Two pending appointments in one day, used by the stale-generation test:
+ * a SECOND appointment is the only way to open a newer mutation generation,
+ * because actionBusy locks the first appointment for the whole flight. */
+function twoPending(statusA, statusB) {
+  return [
+    appointmentFixture({ appointment_id: "appt-a", patient_name: "Alpha Patient",
+      status: statusA,
+      start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-b", patient_name: "Bravo Patient",
+      status: statusB,
+      start_datetime: "2026-08-24T16:00:00Z",
+      end_datetime: "2026-08-24T17:00:00Z" })
+  ];
+}
+
+
+/* ------------------------------------------------------------------ */
+/* P2-A: drawer appointment actions                                     */
+/* ------------------------------------------------------------------ */
+
+test("actions: a pending appointment offers Confirm and Cancel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Confirm", "Cancel appointment"]),
+    "exactly the two actions the frozen matrix allows for pending");
+  assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent, "",
+    "no 'nothing available' line when actions exist");
+});
+
+test("actions: a confirmed appointment offers only Cancel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Cancel appointment"]),
+    "Confirm is never offered where the lifecycle owner would refuse it");
+});
+
+test("actions: the drawer uses the FROZEN status/action matrix, not a second one", () => {
+  const f = makePages();
+  const actionsFor = f.helpers.appointmentActionsFor;
+  assertEqual(JSON.stringify(actionsFor("pending")),
+    JSON.stringify(["confirm", "cancel"]), "pending");
+  assertEqual(JSON.stringify(actionsFor("confirmed")),
+    JSON.stringify(["cancel"]), "confirmed");
+  for (const terminal of ["cancelled", "completed", "no_show", "invented"]) {
+    assertEqual(JSON.stringify(actionsFor(terminal)), "[]",
+      terminal + " offers nothing");
+  }
+});
+
+test("actions: a terminal status shows no controls and says so", async () => {
+  const f = makePages();
+  /* Reached the honest way: cancel a confirmed appointment, then let the
+   * authoritative refresh return it as cancelled. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  f.data.queue("cancelAppointment", { ok: true, data: {} });
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.data.queue("getAppointments", { ok: true,
+    data: appointmentsBody([appointmentFixture({ status: "cancelled" })]) });
+  actionButton(f.doc, "Confirm cancel").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false,
+    "the row is still in the response, so the panel may stay open");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
+    "showing its refreshed authoritative state");
+  assertEqual(actionButtons(f.doc).length, 0, "and offering no action");
+  assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent,
+    "No actions are available for this appointment.", "stated plainly");
+  assertEqual(allBlocks(f.doc).length, 0,
+    "while the cancelled appointment leaves the resting grid");
+});
+
+/* ------------------------------------------------------------------ */
+/* Confirm                                                              */
+/* ------------------------------------------------------------------ */
+
+test("actions: Confirm calls exactly confirmAppointment with the selected id", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-1",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-1",
+    status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.confirmAppointment),
+    JSON.stringify(["appt-1"]), "one call, the selected appointment id");
+  assertEqual(f.data.calls.cancelAppointment.length, 0, "and nothing else");
+});
+
+test("actions: a successful Confirm re-reads BOTH Schedule and Appointments", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const readsBefore = f.data.calls.getSchedule.length;
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [slotFixture()],
+    [appointmentFixture({ status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, readsBefore + 1,
+    "Schedule is re-read: a mutation can change slot inventory too");
+  assertEqual(f.data.calls.getAppointments.length, readsBefore + 1,
+    "Appointments is re-read");
+  assertEqual(JSON.stringify(f.data.calls.getSchedule[readsBefore]), "{}",
+    "using the SAME current-week bounds the calendar already owns");
+});
+
+test("actions: after Confirm the panel and the block show the AUTHORITATIVE state", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "precondition");
+
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "the panel reflects the refreshed row");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "and so does the calendar block");
+  assertEqual(feedbackText(f.doc), "Appointment confirmed.", "honest outcome");
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Cancel appointment"]),
+    "and the offered actions follow the new status");
+});
+
+test("actions: the mutation response alone never becomes the visual state", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* The POST claims confirmed; the authoritative re-read says it is still
+   * pending (another terminal changed it back). The REFRESH wins. */
+  f.data.queue("confirmAppointment", { ok: true,
+    data: appointmentFixture({ status: "confirmed" }) });
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "the authoritative GET is the final visual state, not the POST body");
+});
+
+/* ------------------------------------------------------------------ */
+/* Cancel: the two-step guard                                           */
+/* ------------------------------------------------------------------ */
+
+test("actions: the first Cancel click arms and issues NO request", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const callsBefore = f.data.totalCalls();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "arming is a UI state change only - nothing is cancelled on click one");
+  assertEqual(f.data.calls.cancelAppointment.length, 0, "no cancel call");
+  assert(actionButton(f.doc, "Confirm cancel") !== null,
+    "the control relabels to an explicit second step");
+  assertEqual(feedbackText(f.doc), "Click Cancel again to confirm.",
+    "and says so");
+});
+
+test("actions: the second explicit click performs the cancellation", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-9",
+    status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+
+  f.data.queue("cancelAppointment", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  actionButton(f.doc, "Confirm cancel").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.cancelAppointment),
+    JSON.stringify(["appt-9"]), "one cancel, the armed appointment");
+});
+
+test("actions: a successful Cancel re-reads BOTH windows and never invents a slot", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  const readsBefore = f.data.calls.getSchedule.length;
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+
+  f.data.queue("cancelAppointment", { ok: true, data: {} });
+  /* The backend returns NO open slot for the freed time. The calendar must
+   * show exactly that, not a manufactured opening. */
+  queueWeek(f, [], []);
+  actionButton(f.doc, "Confirm cancel").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, readsBefore + 1, "Schedule re-read");
+  assertEqual(f.data.calls.getAppointments.length, readsBefore + 1,
+    "Appointments re-read");
+  assertEqual(allBands(f.doc).length, 0,
+    "no slot is manufactured - the slot display comes only from the re-read");
+  assertEqual(allBlocks(f.doc).length, 0, "and the appointment is gone");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "the panel closes honestly when the row is no longer returned");
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "Appointment cancelled.",
+    "the outcome survives the refresh even with the panel closed");
+});
+
+test("actions: an arm does not survive closing the panel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  assert(actionButton(f.doc, "Confirm cancel") !== null, "armed");
+
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f);
+  await flush();
+  assert(actionButton(f.doc, "Cancel appointment") !== null,
+    "reopening requires the two clicks again");
+  assertEqual(f.data.calls.cancelAppointment.length, 0, "nothing was cancelled");
+});
+
+/* ------------------------------------------------------------------ */
+/* Duplicate submits and cross-appointment isolation                    */
+/* ------------------------------------------------------------------ */
+
+test("actions: duplicate Confirm submits are suppressed while in flight", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  const button = actionButton(f.doc, "Confirm");
+  button.trigger("click");
+  button.trigger("click");
+  button.trigger("click");
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1,
+    "only the first submit is issued");
+  assertEqual(button.disabled, true, "and the control is disabled meanwhile");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, true,
+    "BOTH controls are disabled, so Confirm and Cancel cannot overlap");
+
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1, "still just one");
+});
+
+test("actions: Cancel cannot be started while Confirm is in flight", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.cancelAppointment.length, 0,
+    "an in-flight mutation on this appointment blocks the other action");
+
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+});
+
+test("actions: acting on one appointment never mutates another", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "left", status: "pending" }),
+    appointmentFixture({ appointment_id: "right", status: "pending",
+      patient_name: "Ana Ruiz",
+      start_datetime: "2026-08-24T16:00:00Z",
+      end_datetime: "2026-08-24T17:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 1);
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Ana Ruiz",
+    "precondition: the second appointment is open");
+
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "left", status: "pending" }),
+    appointmentFixture({ appointment_id: "right", status: "confirmed",
+      patient_name: "Ana Ruiz",
+      start_datetime: "2026-08-24T16:00:00Z",
+      end_datetime: "2026-08-24T17:00:00Z" })
+  ]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.confirmAppointment),
+    JSON.stringify(["right"]), "only the OPEN appointment is acted on");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "the other appointment is untouched");
+});
+
+/* ------------------------------------------------------------------ */
+/* Stale-response and lifecycle protection                              */
+/* ------------------------------------------------------------------ */
+
+test("guards: a pre-mutation week GET cannot overwrite post-mutation state", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* A refresh is issued and is still the NEWEST read... */
+  const staleSchedule = f.data.queueDeferred("getSchedule");
+  const staleAppointments = f.data.queueDeferred("getAppointments");
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+
+  /* ...then a mutation begins, opening a new generation. */
+  const mutation = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* The pre-mutation read now resolves. Its request id is STILL current, so
+   * only the generation guard can reject it - which is exactly the point. */
+  staleSchedule.resolve({ ok: true, data: scheduleBody([]) });
+  staleAppointments.resolve({ ok: true,
+    data: appointmentsBody([appointmentFixture({ status: "pending",
+      patient_name: "STALE" })]) });
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Rosa Delgado", "the pre-mutation read was discarded");
+
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  mutation.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "the post-mutation authoritative state stands");
+});
+
+test("guards: an older mutation completing after a NEWER one reaches the generation branch", async () => {
+  const f = makePages();
+  /* TWO appointments. One is not enough: actionBusy owns appointment A for
+   * the whole flight, so no second mutation on A can ever start and no
+   * newer generation would actually be opened. */
+  queueWeek(f, [], twoPending("pending", "pending"));
+  openCalendar(f);
+  await flush();
+
+  /* --- A: mutation starts and stays in flight (generation 1). --- */
+  openDrawerFor(f, 0);
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Alpha Patient", "precondition: A is open");
+  const deferredA = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  assertEqual(JSON.stringify(f.data.calls.confirmAppointment),
+    JSON.stringify(["appt-a"]), "A's mutation is genuinely in flight");
+
+  /* --- B: a genuinely SECOND mutation opens generation 2. --- */
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f, 1);
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Bravo Patient", "precondition: B is open");
+  assertEqual(actionButton(f.doc, "Confirm").disabled, false,
+    "B is a different appointment, so its controls are NOT locked by A");
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], twoPending("pending", "confirmed"));
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.confirmAppointment),
+    JSON.stringify(["appt-a", "appt-b"]),
+    "TWO distinct mutations really started - a newer generation is open");
+  assertEqual(feedbackText(f.doc), "Appointment confirmed.",
+    "B owns the feedback surface");
+  const readsAfterB = f.data.calls.getSchedule.length;
+  const blocksAfterB = blocksIn(columns(f.doc)[0]);
+  assertEqual(blockTexts(blocksAfterB[0])[3], "Pending", "A still pending");
+  assertEqual(blockTexts(blocksAfterB[1])[3], "Confirmed", "B confirmed");
+
+  /* --- A resolves LAST, on the stale generation. --- */
+  queueWeek(f, [], twoPending("confirmed", "confirmed"));
+  deferredA.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+
+  /* The generation branch is proven REACHED, not inferred: it is the only
+   * branch that issues an authoritative read WITHOUT claiming success.
+   * The "current" branch would have written "Appointment confirmed." into
+   * pendingFeedback, and an early return would have issued no read. */
+  assertEqual(f.data.calls.getSchedule.length, readsAfterB + 1,
+    "A's successful older commit still fetched the current truth");
+  assertEqual(f.data.calls.getAppointments.length, readsAfterB + 1,
+    "through the combined path, both windows");
+  assertEqual(feedbackText(f.doc), "",
+    "and the older completion claimed NO success message of its own");
+
+  const finalBlocks = blocksIn(columns(f.doc)[0]);
+  assertEqual(blockTexts(finalBlocks[0])[3], "Confirmed",
+    "A settles from the authoritative read");
+  assertEqual(blockTexts(finalBlocks[1])[3], "Confirmed",
+    "and B's newer state was never rolled back by the older completion");
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Bravo Patient",
+    "the panel still belongs to B - the older mutation reopened nothing");
+});
+
+test("guards: an older FAILED mutation on a stale generation is dropped entirely", async () => {
+  const f = makePages();
+  queueWeek(f, [], twoPending("pending", "pending"));
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  await flush();
+  const deferredA = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f, 1);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], twoPending("pending", "confirmed"));
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+  const readsAfterB = f.data.calls.getSchedule.length;
+
+  /* A was REJECTED before any transition could occur (400/422). That is the
+   * only outcome that proves the mutation never applied, so there is
+   * genuinely nothing to fetch and nothing to say. A conflict, a not_found,
+   * or an ambiguous transport failure would all be different - see the F5
+   * and F7 tests. It must not disturb B at all. */
+  deferredA.resolve({ ok: false, state: "bad_request" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, readsAfterB,
+    "a failed older attempt that changed nothing triggers no read");
+  assertEqual(feedbackText(f.doc), "Appointment confirmed.",
+    "and never overwrites the newer mutation's feedback with its conflict");
+});
+
+test("guards: a mutation completing after Close leaves the panel closed", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "a closed panel is not reopened behind the office's back");
+  assertEqual(drawerPairs(f.doc).length, 0, "and holds no patient details");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "while the grid still settles on authoritative state");
+});
+
+test("guards: a mutation completing after reset renders nothing and fires no GET", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  f.pages.reset();
+  const readsAfterReset = f.data.calls.getSchedule.length;
+
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, readsAfterReset,
+    "no request is fired into a wiped page");
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0,
+    "and the wipe stands");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+});
+
+test("guards: a successful mutation completing after re-entry corrects the stale page (F1)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* The Confirm POST is in flight... */
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* ...the office leaves and re-enters the Calendar, and the re-entry read
+   * is answered BEFORE the POST commits, so it still returns Pending. */
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  /* Counted separately: the Schedule page visit above issues a
+   * getSchedule of its own, so the two counters are legitimately
+   * different and comparing them to one baseline would be wrong. */
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "precondition: the re-entered page shows PRE-mutation state");
+
+  /* ...and only now does the original mutation commit. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads + 1,
+    "a new authoritative read corrects the visible page");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads + 1,
+    "both windows, through the existing combined path");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "the calendar is no longer stale");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "and the old drawer is NOT reopened by the old mutation");
+});
+
+test("guards: a mutation that CHANGED NOTHING after re-entry triggers no read (F1)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const readsAfterReentry = f.data.calls.getSchedule.length;
+
+  /* Rejected before any transition (400/422): the ONLY outcome that proves
+   * the server state cannot have moved, so no correction is warranted. */
+  deferred.resolve({ ok: false, state: "bad_request" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, readsAfterReentry,
+    "nothing changed on the server, so nothing needs correcting");
+  assertEqual(feedbackText(f.doc), "",
+    "and no message from a gone UI context is shown");
+});
+
+test("guards: a successful mutation completing while ANOTHER page is shown does not render (F1)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* Re-enter Calendar, then move AWAY to Schedule and stay there. */
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  const readsAway = f.data.calls.getAppointments.length;
+
+  /* Parked spare: a regressed guard consumes it and fails the count below
+   * as a clean assertion instead of crashing on an unscripted call. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getAppointments.length, readsAway,
+    "no background calendar work behind the page the office is actually on");
+  assertEqual(f.doc._elements["page-schedule"].hidden, false,
+    "and the Schedule page is undisturbed");
+});
+
+test("guards: a mutation completing after a week change does not reopen the old panel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  queueWeek(f, [], [], { start_day: "2026-08-31", end_day: "2026-09-06" },
+    { start_day: "2026-08-31", end_day: "2026-09-06" });
+  f.doc._elements["calendar-next"].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+
+  queueWeek(f, [], [], { start_day: "2026-08-31", end_day: "2026-09-06" },
+    { start_day: "2026-08-31", end_day: "2026-09-06" });
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "an appointment from the week just left is never reopened");
+  assertEqual(JSON.stringify(
+    f.data.calls.getSchedule[f.data.calls.getSchedule.length - 1]),
+    JSON.stringify({ start_day: "2026-08-31", end_day: "2026-09-06" }),
+    "and the refresh uses the CURRENT week bounds");
+});
+
+/* ------------------------------------------------------------------ */
+/* Failure outcomes                                                     */
+/* ------------------------------------------------------------------ */
+
+test("guards: navigating DIRECTLY away does no background calendar work (F3)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* 2. A Confirm is in flight... */
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* 3-4. ...and the office goes STRAIGHT to Schedule. No re-entry: the
+   * calendar lifecycle is untouched, so only the on-screen gate can stop
+   * the settler doing invisible work behind the page they are using. */
+  const parkedButtons = actionButtons(f.doc).slice();
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  /* Deliberately PARK a spare week response in the queue. If the guard ever
+   * regresses, the background read consumes it and the counts below fail as
+   * a clean assertion instead of crashing on an unscripted call - the
+   * failure should name the defect, not the harness. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+
+  /* 6. The mutation now succeeds. */
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+
+  /* 7. No combined calendar read, no render. */
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads,
+    "no background calendar Schedule read");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads,
+    "no background calendar Appointments read");
+  /* The panel was already open when the office navigated away, and it is
+   * hidden along with the whole page-calendar section - exactly like every
+   * other portal page's retained content. What matters here is that the
+   * settling mutation did NOT re-render it behind their back. */
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "the panel was not re-rendered by the background completion");
+  assertEqual(feedbackText(f.doc), "",
+    "and no success message was written into an unseen panel");
+  assert(actionButtons(f.doc).length === parkedButtons.length &&
+    actionButtons(f.doc)[0] === parkedButtons[0],
+    "the drawer action controls were not rebuilt behind another page (F6)");
+  /* 8. Schedule is still the page the office is on. */
+  assertEqual(f.doc._elements["page-schedule"].hidden, false, "Schedule active");
+  assertEqual(f.doc._elements["page-calendar"].hidden, true, "Calendar hidden");
+
+  /* 9. The ordinary next visit reads authoritatively and shows the truth. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "re-entry's ordinary fresh read shows the authoritative state");
+});
+
+test("guards: session loss still wipes and hands back from another page (F3)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+
+  /* The on-screen gate must NOT swallow a lost session. */
+  deferred.resolve({ ok: false, state: "unauthorized" });
+  await flush();
+  await flush();
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "control is handed back whichever page is visible");
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0,
+    "and the calendar is wiped");
+});
+
+test("guards: an in-flight lock survives page re-entry (F4)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* 1. Confirm A starts and stays in flight. */
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* 2-3. Leave, then re-enter while A is STILL pending authoritatively. */
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+
+  /* 4-5. Open A again: its controls must still say busy. A page visit does
+   * not stop an outstanding request from existing. */
+  openDrawerFor(f);
+  await flush();
+  assertEqual(actionButton(f.doc, "Confirm").disabled, true,
+    "Confirm stays disabled across re-entry while the request is in flight");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, true,
+    "and so does Cancel");
+
+  /* 6. No second Confirm can be submitted for the SAME appointment. */
+  actionButton(f.doc, "Confirm").trigger("click");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1,
+    "no duplicate submit survives a page visit");
+
+  /* 7. Cancel cannot overlap the in-flight Confirm either. */
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.cancelAppointment.length, 0,
+    "the two-click cancel cannot even arm against a busy appointment");
+
+  /* 8. The original mutation settles authoritatively. */
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "the calendar settles on authoritative state");
+
+  /* 9. Ownership is released: the refreshed panel is usable again. */
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false, "panel reopened");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
+    "the in-flight lock cleared once the request actually finished");
+});
+
+test("guards: a FAILED mutation across re-entry releases the lock without fabricating state (F4)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(actionButton(f.doc, "Confirm").disabled, true, "busy across re-entry");
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  /* The original request was rejected before any transition (400/422), the
+   * one outcome that proves nothing changed, so nothing is fetched - and
+   * nothing may be invented. */
+  deferred.resolve({ ok: false, state: "bad_request" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads,
+    "a failed pre-re-entry attempt triggers no read");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads,
+    "neither window is re-read");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "no server state is fabricated - A is still what the last read said");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "and neither is its block advanced");
+
+  /* And the panel must NOT stay permanently disabled. */
+  assertEqual(actionButton(f.doc, "Confirm").disabled, false,
+    "the released lock re-enables the already-authoritative controls");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
+    "both of them");
+
+  /* Proof it is genuinely usable: a fresh attempt now goes through. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 2,
+    "a second, deliberate attempt is accepted once the first has settled");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "and settles authoritatively");
+});
+
+/* ------------------------------------------------------------------ */
+/* F5: conflict / not_found mean the server MAY have moved                */
+/* ------------------------------------------------------------------ */
+
+test("F5: a conflict after re-entry refreshes rather than leaving the page Pending", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* Confirm begins while Pending and stays in flight. */
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* Calendar is re-entered and the re-entry read still returns Pending. */
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "precondition: the re-entered page shows PRE-mutation state");
+
+  /* The mutation returns 409 - which reports that the appointment changed
+   * SOMEWHERE ELSE. Treating that as "nothing happened" would leave the
+   * visible calendar wrong. The authoritative refresh reveals the truth. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: false, state: "conflict" });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads + 1,
+    "Schedule is re-read after a conflict");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads + 1,
+    "and so is Appointments");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "the calendar renders the authoritative changed state, not Pending");
+});
+
+test("F5: a not_found after re-entry refreshes so a disappearance is not left stale", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+  assertEqual(allBlocks(f.doc).length, 1, "precondition: still on screen");
+
+  /* The server no longer has it. The refresh must show that, not keep
+   * rendering a block for an appointment that is gone. */
+  queueWeek(f, [], []);
+  deferred.resolve({ ok: false, state: "not_found" });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads + 1, "Schedule re-read");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads + 1,
+    "Appointments re-read");
+  assertEqual(allBlocks(f.doc).length, 0,
+    "the disappearance is reflected rather than left stale");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+});
+
+test("F5: a conflict on a STALE GENERATION also refreshes", async () => {
+  const f = makePages();
+  queueWeek(f, [], twoPending("pending", "pending"));
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  await flush();
+  const deferredA = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* B opens a newer generation and settles. */
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f, 1);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], twoPending("pending", "confirmed"));
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+  const readsAfterB = f.data.calls.getSchedule.length;
+
+  /* A now conflicts - the server may have moved, so fetch the truth. */
+  queueWeek(f, [], twoPending("cancelled", "confirmed"));
+  deferredA.resolve({ ok: false, state: "conflict" });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, readsAfterB + 1,
+    "a conflicting older mutation still fetches the current truth");
+  assertEqual(f.data.calls.getAppointments.length, readsAfterB + 1,
+    "both windows");
+  assertEqual(allBlocks(f.doc).length, 1,
+    "A left the resting grid because the refresh says it is cancelled");
+  assertEqual(feedbackText(f.doc), "",
+    "and the older mutation wrote no feedback over the newer one's");
+});
+
+test("F5: a conflict while the Calendar is INACTIVE still does no background read", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  /* Parked spare: a regressed gate consumes it and fails cleanly below. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: false, state: "conflict" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads,
+    "the on-screen gate wins over the conflict-refresh rule");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads,
+    "no background work at all");
+
+  /* The next ordinary entry is the authoritative recovery. */
+  openCalendar(f);
+  await flush();
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "re-entry reads authoritatively and shows the truth");
+});
+
+/* ------------------------------------------------------------------ */
+/* F6: the drawer stays frozen until authoritative state lands           */
+/* ------------------------------------------------------------------ */
+
+test("F6: drawer actions stay disabled while the post-mutation read is in flight", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const pendingSet = actionButtons(f.doc).slice();
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Confirm", "Cancel appointment"]), "precondition");
+
+  /* The POST succeeds, but the authoritative combined read is DEFERRED. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  const deferredSchedule = f.data.queueDeferred("getSchedule");
+  const deferredAppointments = f.data.queueDeferred("getAppointments");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  /* --- the interval in which the Calendar does not yet know the truth --- */
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "precondition: the authoritative read really is in flight");
+  assertEqual(actionButton(f.doc, "Confirm").disabled, true,
+    "Confirm stays disabled until authoritative state lands");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, true,
+    "and so does Cancel");
+  assert(actionButtons(f.doc)[0] === pendingSet[0] &&
+    actionButtons(f.doc)[1] === pendingSet[1],
+    "the stale Pending action set was NOT rebuilt");
+
+  /* Parked spares: a regressed handler guard consumes these and fails the
+   * count below as a clean assertion rather than crashing the harness. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1,
+    "no second Confirm can be sent during the interval");
+
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assert(actionButton(f.doc, "Confirm cancel") === null,
+    "Cancel cannot even be ARMED during the interval");
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.cancelAppointment.length, 0,
+    "and no cancellation can be submitted");
+
+  /* --- authoritative state lands --- */
+  deferredSchedule.resolve({ ok: true, data: scheduleBody([]) });
+  deferredAppointments.resolve({ ok: true,
+    data: appointmentsBody([appointmentFixture({ appointment_id: "appt-a",
+      status: "confirmed" })]) });
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Cancel appointment"]),
+    "the rebuilt drawer offers exactly appointmentActionsFor('confirmed')");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
+    "and it is usable again");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "from the NEW appointment row");
+  assertEqual(feedbackText(f.doc), "Appointment confirmed.", "honest outcome");
+});
+
+test("F6: opening ANOTHER appointment during the interval also renders it frozen", async () => {
+  const f = makePages();
+  queueWeek(f, [], twoPending("pending", "pending"));
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  const deferredSchedule = f.data.queueDeferred("getSchedule");
+  const deferredAppointments = f.data.queueDeferred("getAppointments");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  /* B has NO request of its own in flight, so its per-appointment lock is
+   * clear - only the settling marker can stop the Calendar handing out live
+   * controls built from a row it already knows may be out of date. */
+  openDrawerFor(f, 1);
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Bravo Patient", "precondition: B's panel is open");
+  assertEqual(actionButton(f.doc, "Confirm").disabled, true,
+    "B's Confirm is frozen too while authoritative state is in flight");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, true,
+    "and B's Cancel");
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], twoPending("pending", "confirmed"));
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1,
+    "and no action against B can be submitted during the interval");
+
+  deferredSchedule.resolve({ ok: true, data: scheduleBody([]) });
+  deferredAppointments.resolve({ ok: true,
+    data: appointmentsBody(twoPending("confirmed", "pending")) });
+  await flush();
+  await flush();
+  assertEqual(actionButton(f.doc, "Confirm").disabled, false,
+    "once authoritative state lands, B is usable again");
+});
+
+/* ------------------------------------------------------------------ */
+/* F7: ambiguous mutation outcomes fail safe toward reading the truth    */
+/* ------------------------------------------------------------------ */
+
+test("F7: an 'unavailable' after re-entry still refreshes (the POST may have committed)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "precondition: the re-entered page shows PRE-mutation state");
+
+  /* The server committed and the RESPONSE was lost. The frontend sees a
+   * transport failure, which proves nothing about the server. Assuming it
+   * did nothing would leave the office looking at a stale Pending. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: false, state: "unavailable" });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads + 1,
+    "Schedule is re-read after an ambiguous outcome");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads + 1,
+    "and so is Appointments");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "the calendar shows the authoritative truth, not the stale Pending");
+});
+
+test("F7: an 'invalid_response' after re-entry has the same safety property", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  /* A 200 whose body failed validation: the transition very likely DID
+   * occur, the frontend just could not read the confirmation. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: false, state: "invalid_response" });
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads + 1, "Schedule re-read");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads + 1,
+    "Appointments re-read");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "the authoritative state is shown");
+});
+
+test("F7: an ambiguous outcome on a STALE GENERATION also refreshes", async () => {
+  const f = makePages();
+  queueWeek(f, [], twoPending("pending", "pending"));
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  await flush();
+  const deferredA = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f, 1);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], twoPending("pending", "confirmed"));
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+  const readsAfterB = f.data.calls.getSchedule.length;
+
+  queueWeek(f, [], twoPending("confirmed", "confirmed"));
+  deferredA.resolve({ ok: false, state: "unavailable" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, readsAfterB + 1,
+    "an ambiguous older outcome still fetches the current truth");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "and A turns out to have committed after all");
+  assertEqual(feedbackText(f.doc), "",
+    "without writing over the newer mutation's feedback");
+});
+
+test("F7: an ambiguous outcome while INACTIVE still does no background read", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.doc._elements["nav-schedule"].trigger("click");
+  await flush();
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: false, state: "unavailable" });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads,
+    "the on-screen gate still wins");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads,
+    "no background work");
+
+  openCalendar(f);
+  await flush();
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
+    "ordinary re-entry remains the recovery");
+});
+
+/* ------------------------------------------------------------------ */
+/* F8: a failed post-mutation read stays fail-closed                     */
+/* ------------------------------------------------------------------ */
+
+test("F8: a failed post-mutation read keeps actions frozen until new truth lands", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  /* 2-3. The POST succeeds; the combined authoritative read then FAILS. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: true, data: appointmentsBody([]) });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  /* 4. The office is told honestly, and no status is invented. */
+  assert(f.doc._elements["calendar-state"].textContent.indexOf(
+    "temporarily unavailable") !== -1,
+    "the honest read-failure message is shown: " +
+    f.doc._elements["calendar-state"].textContent);
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "no status is fabricated - it still says what the last read said");
+
+  /* 5-6. Closing and reopening must NOT hand back usable controls built
+   * from a row the Calendar itself knows is unresolved. */
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f);
+  await flush();
+  assertEqual(actionButton(f.doc, "Confirm").disabled, true,
+    "Confirm stays disabled after close/reopen");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, true,
+    "and so does Cancel");
+
+  /* Parked spares so a regressed guard fails cleanly rather than crashing. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  f.data.queue("cancelAppointment", { ok: true, data: {} });
+  actionButton(f.doc, "Confirm").trigger("click");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.confirmAppointment.length, 1,
+    "no second Confirm can be issued while the truth is unresolved");
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assert(actionButton(f.doc, "Confirm cancel") === null,
+    "Cancel cannot even be armed");
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.cancelAppointment.length, 0,
+    "and no cancellation can be issued");
+
+  /* 7-8. A NEW authoritative read is the recovery. */
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    status: "confirmed" })]);
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "the drawer is rebuilt from the NEW returned row");
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Cancel appointment"]),
+    "exposing exactly appointmentActionsFor('confirmed')");
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
+    "and usable again now that authoritative truth landed");
+});
+
+test("F8: page re-entry also clears a frozen post-mutation condition", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: true, data: appointmentsBody([]) });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  /* Re-entry closes the old surface and immediately performs its own fresh
+   * authoritative load, so there is no stale drawer to protect. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
+    "re-entry's own authoritative read clears the frozen condition");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "from the newly read row");
+});
+
+test("guards: a mutation from a WIPED session cannot read into the next one (wipeEpoch)", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const deferred = f.data.queueDeferred("confirmAppointment");
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+
+  /* Sign-out wipes everything, including calendar.active. Then the office
+   * signs back in and opens the Calendar again, so active is true once more
+   * and the lifecycle has moved on. Only the wipe epoch still remembers that
+   * the in-flight mutation belonged to a session that was torn down - and
+   * that session's request must never drive a read in this one. */
+  f.pages.reset();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  assertEqual(f.doc._elements["page-calendar"].hidden, false,
+    "precondition: the Calendar is on screen again");
+  const scheduleReads = f.data.calls.getSchedule.length;
+  const appointmentReads = f.data.calls.getAppointments.length;
+
+  /* Parked spare so a regressed guard fails cleanly rather than crashing. */
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, scheduleReads,
+    "the wiped session's mutation fires no read into the new session");
+  assertEqual(f.data.calls.getAppointments.length, appointmentReads,
+    "neither window");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "and reopens no panel");
+});
+
+test("F8: session loss during a frozen post-mutation state still wipes", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  f.data.queue("getSchedule", { ok: false, state: "unauthorized" });
+  f.data.queue("getAppointments", { ok: true, data: appointmentsBody([]) });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "the wipe path is unaffected by the frozen condition");
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0, "grid wiped");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+});
+
+test("failures: a 409 conflict shows honest wording and refreshes", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  const readsBefore = f.data.calls.getSchedule.length;
+
+  f.data.queue("confirmAppointment", { ok: false, state: "conflict" });
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(feedbackText(f.doc),
+    "That appointment changed somewhere else. Showing the latest appointments.",
+    "honest conflict wording, never a technical error");
+  assert(feedbackText(f.doc).indexOf("confirmed.") === -1,
+    "and never success wording");
+  assertEqual(f.data.calls.getSchedule.length, readsBefore + 1,
+    "a conflict still refreshes authoritative state");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "showing what the server actually holds now");
+});
+
+test("failures: a 404 shows not-found wording and refreshes", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: false, state: "not_found" });
+  queueWeek(f, [], []);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "That appointment could not be found. Showing the latest appointments.",
+    "honest not-found wording");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "and the panel closes because the row is gone");
+});
+
+test("failures: an unavailable outcome never claims success and changes nothing optimistically", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: false, state: "unavailable" });
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assert(feedbackText(f.doc).indexOf("temporarily unavailable") !== -1,
+    "the office is told the action did not complete: " + feedbackText(f.doc));
+  assert(feedbackText(f.doc).indexOf("confirmed.") === -1, "no success wording");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "the appointment is NOT optimistically advanced");
+  assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Pending",
+    "and neither is its block");
+});
+
+test("failures: an invalid response is reported without exposing internals", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: false, state: "invalid_response" });
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+  const text = feedbackText(f.doc);
+  assert(text.length > 0, "something honest is said");
+  for (const leak of ["500", "stack", "Error:", "SQL", "traceback"]) {
+    assert(text.indexOf(leak) === -1, "no backend internals leak: " + text);
+  }
+});
+
+test("failures: session loss during a mutation wipes the calendar and the panel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  f.data.queue("confirmAppointment", { ok: false, state: "unauthorized" });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0, "grid wiped");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+  assertEqual(drawerPairs(f.doc).length, 0, "patient details wiped");
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "control handed back through the existing session-loss path");
+});
+
+/* ------------------------------------------------------------------ */
+/* Ownership                                                            */
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* F9: session loss dominates either half of the paired Calendar read    */
+/* ------------------------------------------------------------------ */
+
+/* Open the Calendar with one appointment and its detail panel showing, so
+ * every wipe assertion below has real tenant data to lose. */
+async function calendarWithOpenDrawer(f) {
+  queueWeek(f, [slotFixture()], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assert(drawerPairs(f.doc).length > 0, "precondition: patient details shown");
+  assert(allBlocks(f.doc).length > 0, "precondition: a grid is rendered");
+}
+
+test("F9: an unauthorized Appointments half wins over an unavailable Schedule half", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  /* The credential is dead, but the SIBLING request merely failed in
+   * transport. A Schedule-first selector would report "unavailable" and
+   * leave the office's patient data on screen after the session ended. */
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: false, state: "unauthorized" });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0,
+    "the calendar grid is wiped");
+  assertEqual(drawerPairs(f.doc).length, 0,
+    "and every patient detail with it");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "",
+    "no patient name lingers");
+  assertEqual(f.doc._elements["calendar-timezone-note"].textContent, "",
+    "no tenant value lingers");
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "onSessionLost fires exactly once, with the session-loss state");
+  assertEqual(f.doc._elements["calendar-state"].textContent, "",
+    "the ordinary unavailable message never leaves the tenant surface active");
+});
+
+test("F9: the rule is order-independent - an unauthorized Schedule half also wins", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  f.data.queue("getSchedule", { ok: false, state: "unauthorized" });
+  f.data.queue("getAppointments", { ok: false, state: "unavailable" });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0, "grid wiped");
+  assertEqual(drawerPairs(f.doc).length, 0, "patient details wiped");
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "exactly one hand-back, whichever half reported it");
+  assertEqual(f.doc._elements["calendar-state"].textContent, "",
+    "no ordinary failure message survives the wipe");
+});
+
+test("F9: signed_out is covered by the same classifier as unauthorized", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: false, state: "signed_out" });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0, "grid wiped");
+  assertEqual(drawerPairs(f.doc).length, 0, "patient details wiped");
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["signed_out"]),
+    "the other session-loss value takes the same dominant path");
+});
+
+test("F9: session loss wins even while a mutation has the Calendar frozen (F8)", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  /* The POST succeeds, so the Calendar freezes waiting for authoritative
+   * truth - and THAT read is the one that discovers the dead session. The
+   * fail-closed freeze must never stand in the way of a wipe. */
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: false, state: "unauthorized" });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-grid"].children.length, 0, "grid wiped");
+  assertEqual(drawerPairs(f.doc).length, 0, "patient details wiped");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "panel closed");
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify(["unauthorized"]),
+    "the frozen post-mutation state does not block the hand-back");
+
+  /* And the wipe genuinely cleared the frozen condition rather than leaving
+   * a dead session's marker behind for the next one. */
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  assertEqual(actionButton(f.doc, "Confirm").disabled, false,
+    "a fresh session starts unfrozen");
+});
+
+test("F9: two ORDINARY failures still take the ordinary path, not a wipe", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  f.data.queue("getSchedule", { ok: false, state: "unavailable" });
+  f.data.queue("getAppointments", { ok: false, state: "not_found" });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify([]),
+    "no session was lost, so no hand-back");
+  assert(f.doc._elements["calendar-state"].textContent.length > 0,
+    "the office is told the read failed");
+  /* An ordinary failure does NOT wipe - only session loss does. The last
+   * good render stays exactly as it was, and nothing from the failed pair
+   * is applied. */
+  assertEqual(allBlocks(f.doc).length, 1,
+    "the last good render is left intact, not half-replaced");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Pending",
+    "and the panel still shows the last authoritative row");
+});
+
+test("F9: a single ordinary failure keeps its own honest message", async () => {
+  const f = makePages();
+  await calendarWithOpenDrawer(f);
+
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([]) });
+  f.data.queue("getAppointments", { ok: false, state: "unavailable" });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.sessionLost), JSON.stringify([]), "no wipe");
+  assert(f.doc._elements["calendar-state"].textContent.indexOf(
+    "temporarily unavailable") !== -1,
+    "the failing half's ordinary message is shown: " +
+    f.doc._elements["calendar-state"].textContent);
+  /* The Schedule half SUCCEEDED with an empty week. Applying it would have
+   * emptied the grid from a half-authoritative pair. It must not be
+   * rendered at all while its sibling failed. */
+  assertEqual(allBlocks(f.doc).length, 1,
+    "the successful half is NOT partially rendered");
+  assertEqual(allBands(f.doc).length, 1,
+    "its empty slot list did not replace the rendered availability either");
+});
+
+test("ownership: the calendar still calls only the existing data methods", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ status: "confirmed" })]);
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush();
+  await flush();
+
+  /* Across a full mutation cycle, exactly four data methods were used - all
+   * of them pre-existing. No new pathway was introduced. */
+  const used = Object.keys(f.data.calls)
+    .filter((name) => f.data.calls[name].length > 0).sort();
+  assertEqual(JSON.stringify(used),
+    JSON.stringify(["confirmAppointment", "getAppointments", "getSchedule"]),
+    "only existing read + action methods, nothing else");
 });
 
 /* ------------------------------------------------------------------ */

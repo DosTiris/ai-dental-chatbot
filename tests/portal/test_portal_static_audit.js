@@ -315,6 +315,39 @@ test("audit: portal-calendar sets geometry via CSSOM, never a style attribute", 
     "block height must be applied through CSSOM");
 });
 
+/* P2-A: the calendar drawer now performs the EXISTING P5-A appointment
+ * actions, but the pure renderer must stay entirely out of it. Mutation
+ * orchestration, the action vocabulary and the data methods all live in
+ * portal-pages.js; portal-calendar.js may not even name them. */
+test("audit: portal-calendar owns no mutation logic", () => {
+  const content = read("portal-calendar.js");
+  for (const name of ["confirmAppointment", "cancelAppointment",
+    "appointmentActionsFor", "actionBusy", "generation", "armed"]) {
+    assert(content.indexOf(name) === -1,
+      "portal-calendar.js must not reference " + name);
+  }
+});
+
+/* P2-A: the two action methods the drawer uses must be the ALREADY
+ * allow-listed P5-A ones. This is the byte-level proof that no new
+ * endpoint or network owner was introduced alongside the new capability. */
+test("audit: the drawer actions reuse the existing data-layer methods", () => {
+  const pages = read("portal-pages.js");
+  assert(pages.indexOf("data.confirmAppointment") !== -1,
+    "Confirm must go through the existing data owner");
+  assert(pages.indexOf("data.cancelAppointment") !== -1,
+    "Cancel must go through the existing data owner");
+  /* portal-data.js is untouched: it still declares exactly these two
+   * appointment action endpoints and no others. */
+  const dataFile = read("portal-data.js");
+  const posts = dataFile.match(/\/portal\/appointments\/[^"\x27]*/g) || [];
+  for (const path of posts) {
+    assert(path.indexOf("confirm") !== -1 || path.indexOf("cancel") !== -1 ||
+      path.indexOf("{") !== -1 || path === "/portal/appointments",
+      "unexpected appointment endpoint in the data owner: " + path);
+  }
+});
+
 /* Final polish: the calendar must not grow its own vertical scroll box.
  * The page scrolls; a nested vertical scroller would hide the early and
  * late hours the expanding window exists to reveal. */
