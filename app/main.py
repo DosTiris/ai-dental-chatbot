@@ -68,6 +68,12 @@ from app.routes import portal_notification_settings as portal_notification_setti
 # router adds no new auth path and no new tenant selector. Migration 010 adds
 # the one concurrency-token column and MUST run before this code deploys.
 from app.routes import portal_recurring_schedule as portal_recurring_schedule_routes
+# PHASE 3A Slice 2 (Portal Staff Booking): transport/auth wiring lives in
+# app/routes/portal_staff_booking.py; the booking rule is REUSED, unchanged,
+# from the frozen Slice 1 single owner booking_service.finalize_staff_booking
+# - this router adds no new auth path, no new tenant selector, no
+# notification, and no second booking pathway.
+from app.routes import portal_staff_booking as portal_staff_booking_routes
 
 app = FastAPI(title="AI Dental Chatbot API")  # ✅ Create the FastAPI app instance FIRST
 
@@ -119,6 +125,7 @@ app.include_router(portal_schedule_routes.router)  # P4-A: portal slot schedule 
 app.include_router(portal_appointment_actions_routes.router)  # P5-A: portal appointment Confirm/Cancel
 app.include_router(portal_notification_settings_routes.router)  # P6-A: portal notification destination settings
 app.include_router(portal_recurring_schedule_routes.router)  # P4-B: portal recurring schedule (weekly hours + closures -> materialization)
+app.include_router(portal_staff_booking_routes.router)  # Phase 3A Slice 2: portal staff slot booking
 
 # --- Database init ---
 Base.metadata.create_all(bind=engine)
