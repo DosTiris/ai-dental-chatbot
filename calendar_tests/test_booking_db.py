@@ -2589,3 +2589,988 @@ def test_cancel_route_status_mapping(engine, db, client_row, conversation_row):
     assert _appointment_snapshot(db, second) == malformed_before
     assert _appointment_snapshot(db, second)[0] == malformed  # not rewritten
     assert _slot_snapshot(db, second_slot) == malformed_slot_before
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3A SLICE 1 - staff booking (booking_service.finalize_staff_booking)
+#
+# The staff path books ONE existing authoritative slot for an authenticated
+# office employee: no conversation, no conversational hold, no public policy,
+# always CONFIRMED, always source portal_staff, never a notification.
+#
+# These tests use the SAME fixtures, the SAME _make_slot / _settings helpers
+# and the SAME threading.Barrier + SessionLocal convention as the frozen
+# concurrency tests above, so the staff path is judged by the rules that
+# already protect patient bookings rather than by a second set of its own.
+#
+# The frozen chatbot tests above are untouched: finalize_booking's signature
+# and body are unchanged by this slice.
+# ---------------------------------------------------------------------------
+
+STAFF_SOURCE = "portal_staff"
+
+
+def _staff_kwargs(name="Kevin", phone="516-555-1234", email=None):
+    """The patient details every staff-booking call in this section uses.
+    Mirrors _finalize_kwargs above, minus the chatbot-only policy context
+    (time_preference / service_key) that the staff path deliberately does
+    not accept."""
+    return dict(
+        patient_name=name, patient_phone=phone, patient_email=email,
+        new_or_returning="new", reason="cleaning/checkup", urgency="routine",
+    )
+
+
+def _staff_book(db, client, slot, now=None, **overrides):
+    from app.services import booking_service
+    kwargs = _staff_kwargs()
+    kwargs.update(overrides)
+    return booking_service.finalize_staff_booking(
+        db, client.id, slot.id, now_utc=now or _now(), **kwargs
+    )
+
+
+def _active_appointments_for_slot(slot_id):
+    """Count via an INDEPENDENT session, the frozen convention for verifying
+    a race outcome without reading a participant's own identity map."""
+    from app.database import SessionLocal
+    from app.calendar_models import Appointment, AppointmentStatus
+    verify = SessionLocal()
+    try:
+        return (
+            verify.query(Appointment)
+            .filter(
+                Appointment.slot_id == slot_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+            .count()
+        )
+    finally:
+        verify.close()
+
+
+def _active_appointment_conversation_id(slot_id):
+    """Read the surviving active appointment's PERSISTED conversation_id
+    through an INDEPENDENT session.
+
+    A BookingResult returned from a worker thread carries an ORM instance
+    bound to that thread's SessionLocal(), which the thread closes in its
+    finally block. Touching a lazy attribute on it afterwards raises
+    DetachedInstanceError - a test-lifetime bug, not a service defect.
+    Querying the committed row instead is also the stronger assertion: it
+    proves what the DATABASE holds rather than what an object remembers.
+    """
+    from app.database import SessionLocal
+    from app.calendar_models import Appointment, AppointmentStatus
+    verify = SessionLocal()
+    try:
+        row = (
+            verify.query(Appointment)
+            .filter(
+                Appointment.slot_id == slot_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+            .one()
+        )
+        return row.conversation_id
+    finally:
+        verify.close()
+
+
+def _slot_state(slot_id):
+    """Read a slot's post-race state through an independent session."""
+    from app.database import SessionLocal
+    from app.calendar_models import AppointmentSlot
+    verify = SessionLocal()
+    try:
+        row = verify.get(AppointmentSlot, slot_id)
+        return (row.status, row.held_until, row.held_by_conversation_id)
+    finally:
+        verify.close()
+
+
+# ----- S1: the normal staff booking ----------------------------------------
+
+def test_staff_booking_creates_one_confirmed_appointment(db, client_row):
+    """S1 - every authoritative property of a staff-created appointment."""
+    from app.calendar_models import Appointment, AppointmentStatus, SlotStatus
+    slot = _make_slot(db, client_row, 48)
+
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+
+    appointment = result.appointment
+    assert appointment is not None
+    # THE conversation invariant for staff bookings.
+    assert appointment.conversation_id is None
+    assert appointment.source == STAFF_SOURCE
+    assert appointment.status == AppointmentStatus.CONFIRMED
+    # D5: confirmed_at records STAFF CONFIRMATIONS only. A directly-confirmed
+    # appointment keeps NULL, exactly as an auto-confirmed one already does.
+    assert appointment.confirmed_at is None
+    # Tenant and times are DERIVED from the locked slot, never supplied.
+    assert appointment.client_id == client_row.id
+    assert appointment.slot_id == slot.id
+    assert appointment.start_datetime == slot.start_datetime
+    assert appointment.end_datetime == slot.end_datetime
+
+    db.expire_all()
+    refreshed = db.get(type(slot), slot.id)
+    assert refreshed.status == SlotStatus.BOOKED
+    assert refreshed.held_until is None
+    assert refreshed.held_by_conversation_id is None
+    assert _active_appointments_for_slot(slot.id) == 1
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == slot.id).count() == 1
+
+
+# ----- S2 / S3: staff bypasses the PUBLIC policy rules ----------------------
+
+def test_staff_bypasses_public_minimum_notice(db, client_row):
+    """S2 - the public rule genuinely refuses this slot; staff books it."""
+    from app.services.availability_rules import evaluate_slot_policy
+    # The fixture configures minimum_notice_minutes = 60.
+    slot = _make_slot(db, client_row, 0.5)      # 30 minutes from now
+
+    policy = evaluate_slot_policy(
+        slot, now_utc=_now(), settings=_settings(client_row),
+        time_preference="any", service_key=None,
+    )
+    assert not policy.eligible and policy.reason == "too_soon"
+
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+
+
+def test_staff_bypasses_public_booking_horizon(db, client_row):
+    """S3 - beyond max_booking_days for the public, bookable by staff."""
+    from app.services.availability_rules import evaluate_slot_policy
+    settings = _shrink_horizon(db, client_row, 1)   # public horizon: tomorrow
+    slot = _make_slot(db, client_row, 24 * 45)      # ~45 days out
+
+    policy = evaluate_slot_policy(
+        slot, now_utc=_now(), settings=settings,
+        time_preference="any", service_key=None,
+    )
+    assert not policy.eligible and policy.reason == "beyond_horizon"
+
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+
+
+def test_staff_ignores_service_and_preference_filters(db, client_row):
+    """S3b - a service-keyed slot outside any patient preference bucket is
+    still bookable by staff: D3 removes those filters entirely, and the
+    slot's own provider/service remain authoritative and untouched."""
+    from app.repositories.appointment_repository import create_slot
+    start = _now() + timedelta(hours=48)
+    slot = create_slot(db, client_row.id, start, start + timedelta(minutes=45),
+                       provider_name="Dr. Sorrentino", service_key="implant")
+    db.commit()
+
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+    db.expire_all()
+    refreshed = db.get(type(slot), slot.id)
+    assert refreshed.provider_name == "Dr. Sorrentino"
+    assert refreshed.service_key == "implant"
+
+
+# ----- S4: the one time rule staff may NOT bypass --------------------------
+
+def test_staff_cannot_book_a_started_or_past_slot(db, client_row):
+    """S4 - notice and horizon are bypassed; the past is not. Mutation-free."""
+    from app.calendar_models import Appointment, SlotStatus
+    past = _make_slot(db, client_row, -2)          # started two hours ago
+
+    result = _staff_book(db, client_row, past)
+    assert not result.success and result.reason == "slot_started"
+    assert result.appointment is None
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == past.id).count() == 0
+    db.expire_all()
+    assert db.get(type(past), past.id).status == SlotStatus.AVAILABLE
+
+    # Boundary: a slot whose start is exactly "now" has begun.
+    boundary = _make_slot(db, client_row, 6)
+    exact = _staff_book(db, client_row, boundary,
+                        now=boundary.start_datetime)
+    assert not exact.success and exact.reason == "slot_started"
+    assert _active_appointments_for_slot(boundary.id) == 0
+
+
+# ----- S5: an ACTIVE chatbot hold is never stolen ---------------------------
+
+def test_staff_cannot_steal_an_active_chatbot_hold(db, client_row,
+                                                   conversation_row):
+    """S5 - a patient mid-booking owns the slot; staff loses safely and the
+    hold is left exactly as it was."""
+    from app.calendar_models import Appointment, SlotStatus
+    from app.services.appointment_hold_service import place_hold
+    slot = _make_slot(db, client_row, 48)
+
+    assert place_hold(db, client_row.id, slot.id, conversation_row.id,
+                      settings=_settings(client_row), time_preference="any",
+                      service_key=None, now_utc=_now()).success
+    db.commit()
+    held_until_before = db.get(type(slot), slot.id).held_until
+
+    result = _staff_book(db, client_row, slot)
+    assert not result.success and result.reason == "slot_taken"
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == slot.id).count() == 0
+
+    status, held_until, held_by = _slot_state(slot.id)
+    assert status == SlotStatus.HELD
+    assert held_by == conversation_row.id
+    assert held_until == held_until_before
+
+
+def test_staff_may_reclaim_an_expired_hold(db, client_row, conversation_row):
+    """S5b - D4: an EXPIRED hold is treated as available EVERYWHERE (the
+    established lazy-reclaim rule that place_hold already applies). Staff
+    reuses hold_is_active rather than defining 'expired' a second time, and
+    clears the stale owner when it books."""
+    from app.calendar_models import SlotStatus
+    from app.services.appointment_hold_service import place_hold
+    slot = _make_slot(db, client_row, 48)
+
+    assert place_hold(db, client_row.id, slot.id, conversation_row.id,
+                      settings=_settings(client_row), time_preference="any",
+                      service_key=None, now_utc=_now()).success
+    slot.held_until = _now() - timedelta(minutes=1)   # walked away
+    db.commit()
+
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+    status, held_until, held_by = _slot_state(slot.id)
+    assert status == SlotStatus.BOOKED
+    assert held_until is None and held_by is None
+
+
+# ----- S6: tenant isolation -------------------------------------------------
+
+def test_staff_booking_is_tenant_isolated(db, client_row):
+    """S6 - office B booking office A's slot is INDISTINGUISHABLE from a
+    missing slot, and mutates nothing."""
+    from app.models import Client
+    from app.calendar_models import Appointment, SlotStatus
+    slot = _make_slot(db, client_row, 48)
+    office_b = Client(id=uuid.uuid4(), practice_name="Other Dental",
+                      api_key=f"key-{uuid.uuid4()}", active=True)
+    db.add(office_b)
+    db.commit()
+
+    foreign = _staff_book(db, office_b, slot)
+    assert not foreign.success and foreign.reason == "slot_missing"
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == slot.id).count() == 0
+    db.expire_all()
+    assert db.get(type(slot), slot.id).status == SlotStatus.AVAILABLE
+
+    # An id that does not exist AT ALL yields the SAME reason - the two are
+    # deliberately not distinguishable to a caller.
+    class _Missing:
+        id = uuid.uuid4()
+    missing = _staff_book(db, client_row, _Missing())
+    assert not missing.success and missing.reason == foreign.reason
+
+
+# ----- S7: sequential duplicate + occupied slot -----------------------------
+
+def test_staff_second_booking_of_same_slot_refused(db, client_row):
+    """S7 - the slot is already BOOKED; the second attempt is refused with
+    slot_taken and exactly one active appointment survives."""
+    first = _make_slot(db, client_row, 48)
+    assert _staff_book(db, client_row, first).success
+
+    second = _staff_book(db, client_row, first, patient_name="Second Patient")
+    assert not second.success and second.reason == "slot_taken"
+    assert _active_appointments_for_slot(first.id) == 1
+
+
+def test_staff_refuses_a_blocked_slot(db, client_row):
+    """S7b - staff-blocked inventory is not bookable by staff either; the
+    refusal is the frozen slot_blocked word, not slot_taken."""
+    from app.calendar_models import Appointment, SlotStatus
+    slot = _make_slot(db, client_row, 48)
+    slot.status = SlotStatus.BLOCKED
+    db.commit()
+
+    result = _staff_book(db, client_row, slot)
+    assert not result.success and result.reason == "slot_blocked"
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == slot.id).count() == 0
+    db.expire_all()
+    assert db.get(type(slot), slot.id).status == SlotStatus.BLOCKED
+
+
+# ----- S8: REAL concurrency, staff vs staff --------------------------------
+
+def test_concurrent_staff_booking_same_slot_exactly_one_winner(
+    engine, db, client_row
+):
+    """S8 - two receptionists claim the same slot at the same instant.
+
+    Genuine PostgreSQL concurrency, using the frozen convention: two
+    SessionLocal sessions in two threads meeting at a Barrier. The slot row
+    lock serializes them; the loser must resolve to the CONTRACT reason
+    slot_taken rather than raising, and exactly one appointment may exist.
+    """
+    from app.database import SessionLocal
+    from app.calendar_models import SlotStatus
+    from app.services import booking_service
+
+    slot = _make_slot(db, client_row, 48)
+    client_id, slot_id = client_row.id, slot.id
+    barrier = threading.Barrier(2, timeout=15)
+    results, errors = {}, {}
+
+    def attempt(name):
+        session = SessionLocal()
+        try:
+            barrier.wait()   # Maximize overlap of the two claims.
+            results[name] = booking_service.finalize_staff_booking(
+                session, client_id, slot_id, now_utc=_now(),
+                **_staff_kwargs(name=name),
+            )
+        except Exception as exc:
+            errors[name] = exc
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=attempt, args=(n,))
+               for n in ("Receptionist A", "Receptionist B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"staff booking raised instead of returning: {errors}"
+    winners = [n for n, r in results.items() if r.success]
+    losers = [n for n, r in results.items() if not r.success]
+    assert len(winners) == 1, results
+    assert len(losers) == 1, results
+    # THE contract assertion: the loser is classified, not surfaced raw.
+    assert results[losers[0]].reason == "slot_taken", results
+    assert results[losers[0]].appointment is None
+
+    assert _active_appointments_for_slot(slot_id) == 1
+    status, held_until, held_by = _slot_state(slot_id)
+    assert status == SlotStatus.BOOKED
+    assert held_until is None and held_by is None
+
+
+# ----- S9: REAL concurrency, staff vs chatbot ------------------------------
+
+def test_concurrent_chat_finalize_beats_staff_on_already_held_slot(
+    engine, db, client_row, conversation_row
+):
+    """S9 - concurrent, but from an ALREADY-HELD starting state.
+
+    The hold is placed and COMMITTED before the Barrier, so when both
+    threads start an active conversational hold already owns the slot.
+    The outcome is therefore DETERMINISTIC, not a coin toss: the holder
+    finalizes and staff must refuse. Claiming staff could legitimately win
+    from this state would be claiming staff can steal a live hold.
+
+    What this proves is that the two paths still serialize correctly on
+    the same row lock when they collide - not who wins a fair race. The
+    genuine cross-path race starts from an AVAILABLE slot and is the
+    separate test below.
+    """
+    from app.database import SessionLocal
+    from app.calendar_models import SlotStatus
+    from app.services import booking_service
+    from app.services.appointment_hold_service import place_hold
+
+    settings = _settings(client_row)
+    slot = _make_slot(db, client_row, 48)
+    assert place_hold(db, client_row.id, slot.id, conversation_row.id,
+                      settings=settings, time_preference="any",
+                      service_key=None, now_utc=_now()).success
+    db.commit()
+
+    client_id, slot_id, conversation_id = (
+        client_row.id, slot.id, conversation_row.id)
+    barrier = threading.Barrier(2, timeout=15)
+    results, errors = {}, {}
+
+    def chat_attempt():
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            results["chat"] = booking_service.finalize_booking(
+                session, client_id, slot_id, conversation_id,
+                settings=settings, now_utc=_now(), **_finalize_kwargs(),
+            )
+        except Exception as exc:
+            errors["chat"] = exc
+        finally:
+            session.close()
+
+    def staff_attempt():
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            results["staff"] = booking_service.finalize_staff_booking(
+                session, client_id, slot_id, now_utc=_now(),
+                **_staff_kwargs(name="Walk-in Patient"),
+            )
+        except Exception as exc:
+            errors["staff"] = exc
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=chat_attempt),
+               threading.Thread(target=staff_attempt)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"a booking raised instead of returning: {errors}"
+    # DETERMINISTIC: the holder owns the slot before either thread runs.
+    assert results["chat"].success is True, results
+    assert results["chat"].reason == "ok", results
+    assert results["staff"].success is False, results
+    assert results["staff"].reason == "slot_taken", results
+    assert results["staff"].appointment is None
+
+    assert _active_appointments_for_slot(slot_id) == 1
+    # Verified against the COMMITTED row through an independent session -
+    # the worker thread has already closed the session its BookingResult's
+    # ORM instance was bound to.
+    assert _active_appointment_conversation_id(slot_id) == conversation_id
+
+    status, held_until, held_by = _slot_state(slot_id)
+    assert status == SlotStatus.BOOKED
+    assert held_until is None and held_by is None
+
+
+
+def test_concurrent_place_hold_versus_staff_booking_on_available_slot(
+    engine, db, client_row, conversation_row
+):
+    """S9c - THE cross-path race, and the primary proof that the new staff
+    path and the existing patient hold path share ONE inventory lock.
+
+    Both threads start against an initially AVAILABLE slot and meet at the
+    Barrier. Thread A calls appointment_hold_service.place_hold; thread B
+    calls booking_service.finalize_staff_booking. Neither is pre-committed,
+    so EITHER may legitimately win - and exactly one must.
+
+    Forbidden final states, asserted explicitly below:
+      - both operations reporting success
+      - a BOOKED appointment while the slot is still HELD
+      - an active appointment coexisting with an active foreign hold
+      - more than one active appointment
+      - an uncaught exception from either participant
+    """
+    from app.database import SessionLocal
+    from app.calendar_models import SlotStatus
+    from app.services import booking_service
+    from app.services.appointment_hold_service import place_hold
+
+    settings = _settings(client_row)
+    slot = _make_slot(db, client_row, 48)
+    db.commit()
+    assert _slot_state(slot.id)[0] == SlotStatus.AVAILABLE
+
+    client_id, slot_id, conversation_id = (
+        client_row.id, slot.id, conversation_row.id)
+    barrier = threading.Barrier(2, timeout=15)
+    results, errors = {}, {}
+
+    def hold_attempt():
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            results["hold"] = place_hold(
+                session, client_id, slot_id, conversation_id,
+                settings=settings, time_preference="any",
+                service_key=None, now_utc=_now(),
+            )
+        except Exception as exc:
+            errors["hold"] = exc
+        finally:
+            session.close()
+
+    def staff_attempt():
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            results["staff"] = booking_service.finalize_staff_booking(
+                session, client_id, slot_id, now_utc=_now(),
+                **_staff_kwargs(name="Walk-in Patient"),
+            )
+        except Exception as exc:
+            errors["staff"] = exc
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=hold_attempt),
+               threading.Thread(target=staff_attempt)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # FORBIDDEN: an uncaught exception from either participant.
+    assert not errors, f"a participant raised instead of returning: {errors}"
+
+    # FORBIDDEN: both reporting success. Exactly one claim wins.
+    winners = [name for name, r in results.items() if r.success]
+    assert len(winners) == 1, results
+
+    status, held_until, held_by = _slot_state(slot_id)
+    active = _active_appointments_for_slot(slot_id)
+
+    if winners == ["hold"]:
+        assert results["hold"].success is True
+        assert results["staff"].success is False, results
+        assert results["staff"].reason == "slot_taken", results
+        assert results["staff"].appointment is None
+        # The patient owns the slot: no appointment exists yet at all.
+        assert active == 0
+        assert status == SlotStatus.HELD
+        assert held_by == conversation_id
+        assert held_until is not None
+    else:
+        assert winners == ["staff"], results
+        assert results["staff"].success is True
+        assert results["hold"].success is False, results
+        assert results["hold"].reason == "slot_taken", results
+        assert active == 1
+        assert status == SlotStatus.BOOKED
+        # FORBIDDEN: a booked slot still carrying hold bookkeeping.
+        assert held_until is None
+        assert held_by is None
+
+    # FORBIDDEN in BOTH branches, restated as unconditional invariants:
+    #   a BOOKED slot with no appointment, or an appointment on a HELD slot,
+    #   or an active appointment beside an active foreign hold.
+    assert not (status == SlotStatus.BOOKED and active != 1), (status, active)
+    assert not (status == SlotStatus.HELD and active != 0), (status, active)
+    assert not (active >= 1 and held_by is not None), (active, held_by)
+    assert active <= 1
+
+
+def test_chatbot_hold_refused_after_staff_books_the_slot(db, client_row,
+                                                         conversation_row):
+    """S9d - the staff-first serial ordering, mirroring S5's chatbot-first.
+
+    S5 proves a chatbot hold blocks staff. This proves the reverse: once
+    staff has booked, a later place_hold is refused with the frozen
+    slot_taken word, the slot stays BOOKED, and no hold bookkeeping appears
+    on a slot that already has an appointment.
+    """
+    from app.calendar_models import SlotStatus
+    from app.services.appointment_hold_service import place_hold
+
+    slot = _make_slot(db, client_row, 48)
+    booked = _staff_book(db, client_row, slot, patient_name="Walk-in")
+    assert booked.success and booked.reason == "ok"
+
+    later_hold = place_hold(db, client_row.id, slot.id, conversation_row.id,
+                            settings=_settings(client_row),
+                            time_preference="any", service_key=None,
+                            now_utc=_now())
+    assert not later_hold.success
+    assert later_hold.reason == "slot_taken"
+    assert later_hold.held_until is None
+
+    status, held_until, held_by = _slot_state(slot.id)
+    assert status == SlotStatus.BOOKED
+    assert held_until is None and held_by is None
+    assert _active_appointments_for_slot(slot.id) == 1
+
+def test_staff_wins_when_chatbot_hold_already_expired(
+    engine, db, client_row, conversation_row
+):
+    """S9b - the OTHER meaningful ordering, made deterministic: the patient
+    walked away and the hold expired, so staff legitimately reclaims the slot
+    and the patient's later finalize is refused by its own frozen rule."""
+    from app.calendar_models import SlotStatus
+    from app.services import booking_service
+    from app.services.appointment_hold_service import place_hold
+
+    settings = _settings(client_row)
+    slot = _make_slot(db, client_row, 48)
+    assert place_hold(db, client_row.id, slot.id, conversation_row.id,
+                      settings=settings, time_preference="any",
+                      service_key=None, now_utc=_now()).success
+    slot.held_until = _now() - timedelta(minutes=1)
+    db.commit()
+
+    staff = _staff_book(db, client_row, slot, patient_name="Walk-in")
+    assert staff.success and staff.reason == "ok"
+
+    late = booking_service.finalize_booking(
+        db, client_row.id, slot.id, conversation_row.id,
+        settings=settings, now_utc=_now(), **_finalize_kwargs(),
+    )
+    assert not late.success
+    assert late.reason == "hold_lost"
+    assert _active_appointments_for_slot(slot.id) == 1
+    assert _slot_state(slot.id)[0] == SlotStatus.BOOKED
+
+
+# ----- S10: the index is still the final arbiter ---------------------------
+
+def test_staff_slot_unique_index_enforced_when_lock_bypassed_sequential(
+    engine, db, client_row
+):
+    """S10 - database correctness must not depend on the service pre-checks.
+
+    A staff-shaped appointment (conversation_id NULL) is inserted directly
+    through the repository WITHOUT the slot lock, twice. The first commits;
+    only uq_active_appointment_per_slot can refuse the second. This also
+    proves the partial index still fires when conversation_id IS NULL, where
+    uq_active_appointment_per_conversation cannot apply at all.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from app.database import SessionLocal
+    from app.calendar_models import AppointmentSlot, AppointmentStatus
+    from app.repositories import appointment_repository
+    from app.services import booking_service
+
+    slot = _make_slot(db, client_row, 48)
+    slot_id = slot.id
+
+    def bypass_insert(patient):
+        session = SessionLocal()
+        try:
+            raw_slot = session.get(AppointmentSlot, slot_id)  # No FOR UPDATE.
+            appointment_repository.create_appointment_from_slot(
+                session, slot=raw_slot, conversation_id=None,
+                status=AppointmentStatus.CONFIRMED,
+                patient_name=patient, patient_phone="516-555-1234",
+                patient_email=None, new_or_returning="new",
+                reason="cleaning/checkup", urgency="routine",
+                source=booking_service.STAFF_BOOKING_SOURCE,
+            )
+            session.commit()
+        finally:
+            session.close()
+
+    bypass_insert("First")
+    with pytest.raises(IntegrityError) as excinfo:
+        bypass_insert("Second")
+
+    driver_error = excinfo.value.orig
+    assert getattr(driver_error, "pgcode", None) == "23505"
+    assert getattr(driver_error.diag, "constraint_name", None) == (
+        "uq_active_appointment_per_slot"
+    )
+    assert _active_appointments_for_slot(slot_id) == 1
+
+
+
+def test_staff_booking_maps_slot_index_violation_to_slot_taken(
+    engine, db, client_row
+):
+    """S10c - ADVERSARIAL: prove the unique index is the FINAL arbiter even
+    when slot state and appointment state have been left inconsistent, and
+    that finalize_staff_booking CLASSIFIES the resulting IntegrityError
+    rather than letting it escape.
+
+    Why this test has to exist. In a normal staff-vs-staff race the row lock
+    serializes the two callers, so the loser reads slot.status == BOOKED and
+    returns slot_taken from the pre-check - the IntegrityError handler is
+    never reached. That is correct behaviour, but it means the handler needs
+    its own proof, because a mutation that deletes it survives every ordinary
+    race test.
+
+    The adversarial state is manufactured deliberately: an independent
+    session inserts and COMMITS one active appointment for the slot through
+    the repository primitive WITHOUT updating the slot to BOOKED - exactly
+    what a future bug, a mis-ordered code path, or a manual database edit
+    would leave behind. Because the locked slot still reads AVAILABLE, every
+    service pre-check passes and the staff path reaches its INSERT. From
+    there, only uq_active_appointment_per_slot can refuse it.
+
+    Both pre-existing and new appointments carry conversation_id NULL, so
+    uq_active_appointment_per_conversation (partial on IS NOT NULL) cannot
+    fire: the SLOT index is provably the constraint under test.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from app.database import SessionLocal
+    from app.calendar_models import (
+        Appointment, AppointmentSlot, AppointmentStatus, SlotStatus,
+    )
+    from app.repositories import appointment_repository
+    from app.services import booking_service
+
+    slot = _make_slot(db, client_row, 48)
+    slot_id = slot.id
+
+    # Manufacture the inconsistency: an ACTIVE appointment for this slot,
+    # committed by another writer, while the slot row is left AVAILABLE.
+    planted = SessionLocal()
+    try:
+        raw_slot = planted.get(AppointmentSlot, slot_id)   # No FOR UPDATE.
+        appointment_repository.create_appointment_from_slot(
+            planted, slot=raw_slot, conversation_id=None,
+            status=AppointmentStatus.CONFIRMED,
+            patient_name="Planted Patient", patient_phone="516-555-0000",
+            patient_email=None, new_or_returning="new",
+            reason="cleaning/checkup", urgency="routine",
+            source=booking_service.STAFF_BOOKING_SOURCE,
+        )
+        planted.commit()
+    finally:
+        planted.close()
+
+    # PRECONDITIONS - these are what force the INSERT branch. If either ever
+    # stopped holding, this test would silently stop proving anything.
+    status_before, held_until_before, held_by_before = _slot_state(slot_id)
+    assert status_before == SlotStatus.AVAILABLE, (
+        "the slot must still read AVAILABLE, otherwise the staff path would "
+        "refuse from the pre-check and never reach the INSERT")
+    assert held_until_before is None and held_by_before is None
+    assert _active_appointments_for_slot(slot_id) == 1
+
+    # The staff path now runs completely normally against that slot.
+    db.expire_all()
+    try:
+        result = _staff_book(db, client_row, slot, patient_name="Walk-in")
+    except IntegrityError:
+        pytest.fail(
+            "finalize_staff_booking let an IntegrityError ESCAPE instead of "
+            "classifying uq_active_appointment_per_slot as slot_taken",
+            pytrace=False,
+        )
+
+    # THE assertion M8 exists to break: the violation is classified, not raised.
+    assert result.success is False
+    assert result.reason == "slot_taken"
+    assert result.appointment is None
+
+    # The refused transaction rolled back completely: no second appointment,
+    # and the slot was NOT left mutated to BOOKED by the failed attempt.
+    assert _active_appointments_for_slot(slot_id) == 1
+    status_after, held_until_after, held_by_after = _slot_state(slot_id)
+    assert status_after == SlotStatus.AVAILABLE
+    assert held_until_after is None and held_by_after is None
+
+    # The surviving appointment is the PLANTED one, untouched.
+    verify = SessionLocal()
+    try:
+        survivor = (
+            verify.query(Appointment)
+            .filter(
+                Appointment.slot_id == slot_id,
+                Appointment.status != AppointmentStatus.CANCELLED,
+            )
+            .one()
+        )
+        assert survivor.patient_name == "Planted Patient"
+        assert survivor.conversation_id is None
+    finally:
+        verify.close()
+
+def test_staff_booking_after_cancellation_is_allowed(db, client_row):
+    """S10b - the per-slot index is PARTIAL on status <> 'cancelled', so
+    cancelled history never blocks rebooking the same slot. This is what lets
+    the Phase 2B cancelled ghost and a new live appointment coexist."""
+    from app.calendar_models import AppointmentStatus, SlotStatus
+    from app.services.booking_service import cancel_appointment
+    slot = _make_slot(db, client_row, 48)
+
+    first = _staff_book(db, client_row, slot, patient_name="Maria Lopez")
+    assert first.success
+    cancelled = cancel_appointment(db, client_row.id, first.appointment.id)
+    assert cancelled.success
+    db.expire_all()
+    assert db.get(type(slot), slot.id).status == SlotStatus.AVAILABLE
+
+    second = _staff_book(db, client_row, slot, patient_name="New Patient")
+    assert second.success and second.reason == "ok"
+    assert _active_appointments_for_slot(slot.id) == 1
+    # The cancelled row is preserved, not rewritten.
+    db.expire_all()
+    assert db.get(type(first.appointment), first.appointment.id).status == (
+        AppointmentStatus.CANCELLED)
+
+
+# ----- S11 / S12: patient data --------------------------------------------
+
+def test_staff_booking_email_is_optional(db, client_row):
+    """S11 - email is optional and stays optional. None and blank both
+    persist as NULL; nothing in this path requires an email."""
+    from app.calendar_models import Appointment
+    none_slot = _make_slot(db, client_row, 48)
+    none_result = _staff_book(db, client_row, none_slot, patient_email=None)
+    assert none_result.success
+    assert none_result.appointment.patient_email is None
+
+    blank_slot = _make_slot(db, client_row, 50)
+    blank_result = _staff_book(db, client_row, blank_slot,
+                               patient_email="   ")
+    assert blank_result.success
+    assert blank_result.appointment.patient_email is None
+
+    typed_slot = _make_slot(db, client_row, 52)
+    typed = _staff_book(db, client_row, typed_slot,
+                        patient_email="rosa@example.test")
+    assert typed.success
+    assert typed.appointment.patient_email == "rosa@example.test"
+    assert db.query(Appointment).filter(
+        Appointment.patient_email.is_(None)).count() >= 2
+
+
+@pytest.mark.parametrize("name,phone", [
+    ("   ", "516-555-1234"),
+    ("Kevin", "   "),
+    ("", ""),
+])
+def test_staff_booking_requires_name_and_phone(db, client_row, name, phone):
+    """S12 - the SHARED insert primitive's validation still applies, and a
+    refusal is mutation-free."""
+    from app.calendar_models import Appointment, SlotStatus
+    slot = _make_slot(db, client_row, 48)
+
+    result = _staff_book(db, client_row, slot,
+                         patient_name=name, patient_phone=phone)
+    assert not result.success and result.reason == "invalid_patient_data"
+    assert result.appointment is None
+    assert db.query(Appointment).filter(
+        Appointment.slot_id == slot.id).count() == 0
+    db.expire_all()
+    assert db.get(type(slot), slot.id).status == SlotStatus.AVAILABLE
+
+
+# ----- S13: no notification side effects ------------------------------------
+
+def test_staff_booking_sends_no_notification(db, client_row, monkeypatch):
+    """S13 - D7: staff booking notifies nobody. Proven at the boundary by
+    making every notification entry point explode; the booking must still
+    succeed, which it can only do by never calling them."""
+    from app.services import notification_service
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("staff booking must not send any notification")
+
+    monkeypatch.setattr(notification_service, "send_booking_notifications",
+                        _explode)
+    monkeypatch.setattr(notification_service, "_send_sms", _explode)
+    monkeypatch.setattr(notification_service, "_send_email", _explode)
+
+    slot = _make_slot(db, client_row, 48)
+    result = _staff_book(db, client_row, slot)
+    assert result.success and result.reason == "ok"
+
+    # And the per-channel bookkeeping is untouched: nothing was attempted.
+    appointment = result.appointment
+    assert appointment.office_sms_sent is False
+    assert appointment.office_email_sent is False
+    assert appointment.patient_sms_sent is False
+    assert appointment.notify_error is None
+
+
+def test_staff_booking_records_no_notification_attempt_rows(db, client_row):
+    """S13b - the migration-006 ledger is the durable record of any send
+    attempt. A staff booking must leave it completely empty."""
+    from sqlalchemy import text
+    slot = _make_slot(db, client_row, 48)
+    result = _staff_book(db, client_row, slot)
+    assert result.success
+
+    attempts = db.execute(
+        text("SELECT count(*) FROM notification_attempts "
+             "WHERE appointment_id = :appointment_id"),
+        {"appointment_id": str(result.appointment.id)},
+    ).scalar()
+    assert attempts == 0
+
+
+# ----- S14: structural reuse + the chatbot freeze ---------------------------
+
+def test_staff_path_reuses_the_shared_primitives_structurally(db, client_row):
+    """S14 - the staff path must go THROUGH the shared locking and insert
+    primitives, not beside them. Proven by monkeypatching each shared owner
+    and asserting the staff path observes it.
+
+    This is the source-level companion to the concurrency tests above: those
+    prove the invariant holds, this proves it holds for the RIGHT reason.
+    """
+    from app.repositories import appointment_repository
+    from app.services import booking_service
+    calls = {"lock": 0, "insert": 0}
+
+    real_lock = appointment_repository.get_slot_for_update
+    real_insert = appointment_repository.create_appointment_from_slot
+
+    def counting_lock(*args, **kwargs):
+        calls["lock"] += 1
+        return real_lock(*args, **kwargs)
+
+    def counting_insert(*args, **kwargs):
+        calls["insert"] += 1
+        return real_insert(*args, **kwargs)
+
+    slot = _make_slot(db, client_row, 48)
+    original_lock = booking_service.appointment_repository.get_slot_for_update
+    original_insert = (
+        booking_service.appointment_repository.create_appointment_from_slot)
+    booking_service.appointment_repository.get_slot_for_update = counting_lock
+    booking_service.appointment_repository.create_appointment_from_slot = (
+        counting_insert)
+    try:
+        result = _staff_book(db, client_row, slot)
+    finally:
+        booking_service.appointment_repository.get_slot_for_update = (
+            original_lock)
+        booking_service.appointment_repository.create_appointment_from_slot = (
+            original_insert)
+
+    assert result.success
+    assert calls["lock"] == 1, "staff booking must take the SHARED row lock"
+    assert calls["insert"] == 1, "staff booking must use the SHARED insert"
+
+
+def test_frozen_chatbot_finalize_signature_is_unchanged(db, client_row):
+    """S14b - Slice 1 must not have touched the chatbot contract. The exact
+    positional/keyword shape the frozen suite and booking_conversation both
+    depend on is pinned here."""
+    import inspect
+    from app.services.booking_service import finalize_booking, \
+        finalize_staff_booking
+
+    frozen = list(inspect.signature(finalize_booking).parameters)
+    assert frozen == [
+        "db", "client_id", "slot_id", "conversation_id",
+        "settings", "now_utc", "time_preference", "service_key",
+        "patient_name", "patient_phone", "patient_email",
+        "new_or_returning", "reason", "urgency",
+    ]
+    positional = [
+        name for name, p in
+        inspect.signature(finalize_booking).parameters.items()
+        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+    assert positional == ["db", "client_id", "slot_id", "conversation_id"]
+
+    # And the staff path deliberately accepts NONE of the server-owned or
+    # chatbot-only inputs - it cannot be told who to be or when to be.
+    staff = inspect.signature(finalize_staff_booking).parameters
+    for forbidden in ("conversation_id", "source", "status", "settings",
+                      "time_preference", "service_key", "start_datetime",
+                      "end_datetime", "provider_name", "service"):
+        assert forbidden not in staff, forbidden
+
+
+def test_staff_booking_source_constant_is_server_owned(db, client_row):
+    """S14c - D6: the source value is a named service constant. A caller
+    cannot choose it, and the constant is the one thing a typo would have to
+    get past."""
+    from app.services import booking_service
+    assert booking_service.STAFF_BOOKING_SOURCE == STAFF_SOURCE
+
+    slot = _make_slot(db, client_row, 48)
+    result = _staff_book(db, client_row, slot)
+    assert result.appointment.source == booking_service.STAFF_BOOKING_SOURCE
+    # The chatbot default is a DIFFERENT value; the two provenances stay
+    # distinguishable in the appointments table.
+    assert booking_service.STAFF_BOOKING_SOURCE != "mia_widget"

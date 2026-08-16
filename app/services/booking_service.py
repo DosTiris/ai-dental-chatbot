@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.calendar_models import Appointment, AppointmentStatus, SlotStatus
 from app.repositories import appointment_repository
-from app.services.availability_rules import evaluate_slot_policy
+from app.services.availability_rules import evaluate_slot_policy, hold_is_active
 from app.services.calendar_settings_service import CalendarSettings, ensure_utc
 
 
@@ -41,7 +41,14 @@ class BookingResult:
                            # already_cancelled / not_cancellable (cancel
                            # path; not_cancellable is PATCH 7) /
                            # PATCH 4: appointment_missing / already_confirmed
-                           # (an idempotent SUCCESS) / not_confirmable
+                           # (an idempotent SUCCESS) / not_confirmable /
+                           # PHASE 3A staff path: slot_taken / slot_blocked
+                           # - the SAME words appointment_hold_service
+                           # already uses for the SAME slot states, so the
+                           # portal never learns a second vocabulary - plus
+                           # slot_started, the one NEW reason (see
+                           # finalize_staff_booking for why it cannot
+                           # honestly reuse slot_ineligible/too_soon).
     appointment: Optional[Appointment] = None
     detail: Optional[str] = None   # For slot_ineligible: the exact policy
                                    # reason from evaluate_slot_policy.
@@ -50,6 +57,14 @@ class BookingResult:
 # The two unique-violation sources this service is allowed to translate into
 # booking outcomes. Defined once, matching migrations/002 and calendar_models
 # exactly (Rule 3). Anything else re-raises (Rule 16 — failure must be visible).
+# PHASE 3A (owner decision D6): the appointments.source value for a booking
+# an authenticated office employee entered themselves. Declared HERE, in
+# the service, and never accepted from a caller - a future route or browser
+# cannot choose or spoof the provenance of an appointment. The column has
+# no CHECK constraint (verified across migrations 001-010), so a typo would
+# persist silently; a named constant is that typo resistance.
+STAFF_BOOKING_SOURCE = "portal_staff"
+
 _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _CONVERSATION_UNIQUE_INDEX = "uq_active_appointment_per_conversation"
 _SLOT_UNIQUE_INDEX = "uq_active_appointment_per_slot"
@@ -251,6 +266,205 @@ def finalize_booking(
         db.rollback()  # No partial completion, ever (Rule 16).
         raise
 
+
+
+def finalize_staff_booking(
+    db: Session,
+    client_id: uuid.UUID,
+    slot_id: uuid.UUID,
+    *,
+    now_utc: datetime,
+    patient_name: str,
+    patient_phone: str,
+    patient_email: Optional[str],
+    new_or_returning: Optional[str],
+    reason: Optional[str],
+    urgency: str,
+) -> BookingResult:
+    """
+    Purpose: PHASE 3A Slice 1 - book ONE existing authoritative slot on behalf
+             of an authenticated office employee, with no chatbot
+             conversation and no conversational hold.
+
+    WHY A SEPARATE FUNCTION (locked architecture decision): finalize_booking
+    is the frozen chatbot path and its signature, semantics, hold-ownership
+    rules, public policy behaviour and status selection are unchanged by this
+    slice. Staff booking differs from it in exactly four ways - no
+    conversation, no hold to verify, no public policy, and a fixed CONFIRMED
+    status - and every one of those is a REMOVAL. Threading four flags through
+    the frozen function would have put those removals inside the path that
+    protects patients. They live here instead.
+
+    WHAT IS DELIBERATELY SHARED (this is what makes the split safe - the two
+    paths must never become two different ways to claim a slot):
+      - appointment_repository.get_slot_for_update: the SAME SELECT ... FOR
+        UPDATE row lock, with the same populate_existing identity-map
+        correction, and the same (client_id, slot_id) tenant filter.
+      - appointment_repository.create_appointment_from_slot: the SAME INSERT
+        primitive, so start/end/client_id are copied off the LOCKED row and
+        the same required-field validation applies.
+      - availability_rules.hold_is_active: the SAME single definition of an
+        active hold (D4) - this function does not restate what "expired"
+        means.
+      - _classify_booking_unique_violation and uq_active_appointment_per_slot:
+        the SAME final database arbiter for a concurrent claim.
+    There is no second lock, no second INSERT, and no second expiry rule.
+
+    Inputs: ids, then KEYWORD-ONLY context following the Patch 2C convention
+        (no permissive defaults). now_utc is INJECTED - this function never
+        reads the clock - so tests stay deterministic.
+        Deliberately NOT accepted, because all of them are server-owned and a
+        caller must not be able to influence them: conversation_id (always
+        NULL), source (always STAFF_BOOKING_SOURCE), status (always
+        CONFIRMED), start/end datetimes, client_id inside patient data,
+        provider_name and service_key (properties of the authoritative slot).
+        There is also NO settings parameter: the public policy rules staff
+        bypass are the only thing settings carried into the booking decision,
+        and the CONFIRMED status is fixed rather than derived from
+        require_staff_confirmation (D5). A staff booking therefore cannot be
+        altered by a settings edit racing the request.
+
+    Owner product decisions implemented here:
+        D1 - the public minimum-notice rule is NOT applied. The only time
+             rule that survives is that a slot which has already started
+             cannot be booked; a past slot is refused as slot_started.
+        D2 - the public maximum-horizon rule is NOT applied. Staff may book
+             any existing future slot, and cannot manufacture one: the slot
+             must already exist for this tenant.
+        D3 - patient time-preference and service filtering are NOT applied,
+             and no preference is accepted. Provider/service remain whatever
+             the authoritative slot already carries.
+        D4 - slot state, tenant, and concurrency rules are MANDATORY and are
+             all evaluated under the row lock.
+        D5 - the appointment is created CONFIRMED. confirmed_at stays NULL:
+             booking_service.confirm_appointment remains its only writer, and
+             NULL continues to mean "never staff-confirmed via that action",
+             exactly as it already does for auto-confirmed appointments.
+        D6 - source is STAFF_BOOKING_SOURCE.
+        D7 - NO notification of any kind. This function calls no notification
+             code, and the module imports none.
+
+    Returns: BookingResult. The reason vocabulary reuses the existing words
+        wherever they are honestly equivalent:
+        ok               - one CONFIRMED appointment exists and the slot is
+                           BOOKED, committed together.
+        slot_missing     - no such slot FOR THIS CLIENT. An unknown id and
+                           another office's id are deliberately
+                           indistinguishable (Rule 15) because the repository
+                           filters on both columns.
+        slot_taken       - the slot is already BOOKED, or an ACTIVE hold
+                           belongs to a conversation. Staff never steals a
+                           live hold. ALSO returned when
+                           uq_active_appointment_per_slot rejects a
+                           concurrent insert: to the office it is the same
+                           outcome, so it reuses the same word.
+        slot_blocked     - staff blocked or cancelled the slot.
+        slot_started     - the slot's start time is not in the future. This
+                           is the ONE new reason. It could not honestly reuse
+                           slot_ineligible/too_soon: that reason means "inside
+                           the configured minimum notice", which is precisely
+                           the rule staff bypass. Reporting a past slot with
+                           the name of a bypassed rule would be a misleading
+                           map of a materially different condition.
+        invalid_patient_data - missing name/phone, surfaced loudly by the
+                           shared INSERT primitive rather than stored
+                           half-empty. patient_email is optional and a blank
+                           one is normalized to NULL by that same primitive;
+                           nothing here requires an email.
+
+    Database effects: ONE transaction. On success: appointment INSERT + slot
+        UPDATE to booked with the hold columns cleared, committed together.
+        EVERY refusal path rolls back before returning, so no refusal can
+        leave a partial mutation, a half-cleared hold, or an open transaction
+        holding the slot lock. Unlike the chatbot path there is no committed
+        hold-release branch, because this path never owns a hold.
+    External effects: none.
+    """
+    try:
+        # THE lock. Everything below is judged on the locked row, never on
+        # anything the caller displayed or believed earlier (Rule 15).
+        slot = appointment_repository.get_slot_for_update(db, client_id, slot_id)
+        if slot is None:
+            db.rollback()
+            return BookingResult(False, "slot_missing")
+
+        if slot.status == SlotStatus.BOOKED:
+            db.rollback()
+            return BookingResult(False, "slot_taken")
+
+        if slot.status in (SlotStatus.BLOCKED, SlotStatus.CANCELLED):
+            db.rollback()
+            return BookingResult(False, "slot_blocked")
+
+        # D4: a hold that is STILL ACTIVE belongs to a patient conversation
+        # mid-booking and may not be taken. hold_is_active is the single
+        # owner of that definition; an EXPIRED hold is treated as available
+        # here for exactly the same reason place_hold already re-takes one -
+        # lazy reclaim is the established production rule, and inventing a
+        # second meaning of "expired" for staff would be a Rule 3 violation.
+        if hold_is_active(slot, now_utc):
+            db.rollback()
+            return BookingResult(False, "slot_taken")
+
+        # D1/D2: notice and horizon are bypassed, but the past is not
+        # bookable. Both sides are normalized to aware UTC by the single
+        # owner before comparison, so this is never a naive/aware mix.
+        if ensure_utc(slot.start_datetime) <= ensure_utc(now_utc):
+            db.rollback()
+            return BookingResult(False, "slot_started")
+
+        try:
+            appointment = appointment_repository.create_appointment_from_slot(
+                db,
+                slot=slot,
+                # THE conversation invariant: a staff appointment has no
+                # conversation. NULL is exempt from
+                # uq_active_appointment_per_conversation (a partial index on
+                # conversation_id IS NOT NULL) while remaining fully bound by
+                # uq_active_appointment_per_slot, which is the index that
+                # actually arbitrates a slot race.
+                conversation_id=None,
+                patient_name=patient_name,
+                patient_phone=patient_phone,
+                patient_email=patient_email,
+                new_or_returning=new_or_returning,
+                reason=reason,
+                urgency=urgency,
+                status=AppointmentStatus.CONFIRMED,   # D5
+                source=STAFF_BOOKING_SOURCE,          # D6
+            )
+        except ValueError:
+            db.rollback()
+            return BookingResult(False, "invalid_patient_data")
+
+        slot.status = SlotStatus.BOOKED
+        # Clear any EXPIRED hold bookkeeping so a booked slot never carries a
+        # stale owner. An ACTIVE hold could not have reached this line.
+        slot.held_until = None
+        slot.held_by_conversation_id = None
+
+        db.commit()
+        return BookingResult(True, "ok", appointment=appointment)
+    except IntegrityError as integrity_error:
+        # The database refused the insert/commit. EXPECTED in exactly one
+        # situation: a concurrent claim raced past the checks above and the
+        # migration-002 partial unique index rejected the loser. Map ONLY
+        # that; anything else is a real bug and must propagate (Rule 16).
+        db.rollback()  # Releases the slot lock; nothing was persisted.
+        violated_index = _classify_booking_unique_violation(integrity_error)
+
+        if violated_index == _SLOT_UNIQUE_INDEX:
+            # Another appointment - staff or patient - owns this slot now.
+            return BookingResult(False, "slot_taken")
+
+        # uq_active_appointment_per_conversation cannot be violated by this
+        # path: it is partial on conversation_id IS NOT NULL and this path
+        # always inserts NULL. Reaching it would mean the invariant above was
+        # broken, so it must surface rather than be absorbed.
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
 def confirm_appointment(
     db: Session,
