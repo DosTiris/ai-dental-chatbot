@@ -419,6 +419,45 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
  * path must stay DERIVED from the one schedule literal - no new endpoint
  * literal may appear (the multi-segment shape would evade the single-
  * segment allow-list regex above, so it is pinned here explicitly). */
+/* v1.0.2 HOTFIX: the history and blocks layers span the whole canvas
+ * ABOVE the availability bands, and a full-canvas positioned layer wins
+ * real-browser hit-testing even where it is fully transparent - Node
+ * .click() dispatch cannot model that, which is how v1.0.1 shipped Open
+ * bands a mouse could not reach. This bite pins the invariant: every
+ * full-canvas FOREGROUND layer must opt out of hit-testing, every real
+ * control inside one must opt back in, and the background bands layer
+ * keeps default hit-testing (its buttons need no re-enable, and blank
+ * canvas stays inert because the layer itself has no handler). */
+test("audit: foreground calendar layers never consume clicks meant for layers beneath", () => {
+  const css = read("portal.css");
+  function ruleOf(selector) {
+    const at = css.indexOf(selector);
+    assert(at !== -1, selector + " rule must exist");
+    return css.slice(at, css.indexOf("}", at));
+  }
+  for (const layer of [".portal-calendar-history {",
+    ".portal-calendar-blocks {", ".portal-calendar-history-strips {"]) {
+    assert(ruleOf(layer).indexOf("pointer-events: none") !== -1,
+      layer + " is a full-canvas foreground layer and must not hit-test");
+  }
+  assert(ruleOf(".portal-calendar-block {").indexOf("pointer-events: auto") !== -1,
+    "live appointments AND cancelled ghosts share this class and must re-enable clicks");
+  assert(ruleOf(".portal-calendar-history-strip {").indexOf("pointer-events: auto") !== -1,
+    "the history strip control must stay clickable (frozen pattern)");
+  assert(ruleOf(".portal-calendar-bands {").indexOf("pointer-events") === -1,
+    "the BACKGROUND bands layer keeps default hit-testing - making it " +
+    "none would orphan the Open-band buttons unless they re-enabled, " +
+    "and making the whole canvas clickable is equally forbidden");
+  /* The z-order priority is a stated rule, not an accident: the fix must
+   * never be a re-stack. */
+  assert(ruleOf(".portal-calendar-history {").indexOf("z-index: 1") !== -1,
+    "history stays above bands");
+  assert(ruleOf(".portal-calendar-blocks {").indexOf("z-index: 2") !== -1,
+    "live appointments stay above history");
+  assert(ruleOf(".portal-calendar-history-strips {").indexOf("z-index: 3") !== -1,
+    "strips stay above live appointments");
+});
+
 /* v1.0.1 F2: turning the Open band into a <button> added a (0,1,1) reset
  * with border: 0, which silently out-specified the (0,1,0) availability
  * rule and erased the approved thin left accent. The availability

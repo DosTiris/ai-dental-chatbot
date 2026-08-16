@@ -4723,3 +4723,43 @@ test("booking F1: Close during flight wipes for privacy but does NOT release own
   deferred.resolve({ ok: true, data: {} });
   await flush(); await flush();
 });
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 3 v1.0.2: pointer-events layering (structural half)  */
+/* ------------------------------------------------------------------ */
+/* The audited CSS re-enables hit-testing per-control by CLASS. This
+ * suite cannot model real browser hit-testing (disclosed in the test
+ * evidence) - what it CAN pin is the structural coupling: every
+ * interactive element is a real <button> rendered INSIDE the exact
+ * layer whose class the CSS bite governs, so the audited selectors
+ * provably attach to the rendered DOM. */
+
+test("hotfix: every interactive element is a button inside its audited layer", async () => {
+  const f = makePages();
+  const ghost = appointmentFixture({
+    appointment_id: "gggggggg-gggg-gggg-gggg-gggggggggggg",
+    status: "cancelled",
+    start_datetime: "2026-08-24T16:00:00Z",
+    end_datetime: "2026-08-24T17:00:00Z" });
+  queueWeek(f, threeSlotWeek(), [appointmentFixture(), ghost]);
+  openCalendar(f);
+  await flush();
+  const column = columns(f.doc)[0];
+
+  const bands = bandsIn(column);
+  assertEqual(bands.length, 1, "the Open band rendered in the bands layer");
+  assertEqual(bands[0].tagName, "BUTTON", "and it is a real button");
+
+  const liveBlocks = blocksIn(column);
+  assertEqual(liveBlocks.length, 1, "the live appointment is in the blocks layer");
+  assertEqual(liveBlocks[0].tagName, "BUTTON", "and it is a real button");
+
+  const ghosts = historyIn(column);
+  assertEqual(ghosts.length, 1, "the cancelled ghost is in the history layer");
+  assertEqual(ghosts[0].tagName, "BUTTON", "and it is a real button");
+  assert(ghosts[0].className.indexOf("portal-calendar-block") !== -1,
+    "the ghost carries the shared block class the CSS re-enables");
+  assert(liveBlocks[0].className.indexOf("portal-calendar-block") !== -1,
+    "so does the live appointment - one re-enabling class, two layers");
+});

@@ -516,8 +516,17 @@ body {
    rather than an accident of DOM order - and because the history layer
    forms its own stacking context, even a SELECTED ghost stays beneath a
    live appointment. */
-.portal-calendar-history { position: absolute; inset: 0; z-index: 1; }
-.portal-calendar-blocks { position: absolute; inset: 0; z-index: 2; }
+/* v1.0.2 HOTFIX: these two layers span the WHOLE canvas above the
+   availability bands, and a full-canvas positioned layer wins browser
+   hit-testing even where it is fully transparent - so a real mouse click
+   on an Open band (or on a ghost beneath the blocks layer) landed on the
+   empty layer and did nothing. The layers therefore stop hit-testing
+   entirely and ONLY their real controls re-enable it - exactly the
+   pattern the history-strips layer below has always used. The z-order
+   priority (bands < history < blocks < strips) is deliberately
+   UNCHANGED: this is a pointer-events correction, not a re-stack. */
+.portal-calendar-history { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.portal-calendar-blocks { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 /* The one thing that sits ABOVE the live appointments: the history strip.
    It is the only way a cancelled appointment stays reachable when a live one
    has covered its readable top - an inset on the history layer cannot help,
@@ -625,6 +634,10 @@ button.portal-calendar-band {
   line-height: 1.25;
   color: var(--portal-text);
   cursor: pointer;
+  /* v1.0.2: the block's layer no longer hit-tests, so the CONTROL itself
+     re-enables it - both live appointments and cancelled ghosts carry
+     this class (the history-strip rule below follows the same pattern). */
+  pointer-events: auto;
 }
 
 /* A small lift so appointment blocks read as the foreground layer. */
