@@ -314,12 +314,30 @@ function columnHead(column) {
   return column.children[0].children.map((s) => s.textContent).join(" ");
 }
 
+/* Canvas layer order (bottom to top): hour lines, availability bands,
+ * cancelled history, live appointments. The accessors find their layer BY
+ * CLASS rather than by index, so a change to the layer ORDER is reported by
+ * the one test that owns that rule instead of cascading through the suite. */
+function canvasLayer(column, className) {
+  const canvas = column.children[1];
+  const layer = canvas.children.filter((el) => el.className === className)[0];
+  return layer ? layer.children : [];
+}
+
 function bandsIn(column) {
-  return column.children[1].children[1].children;
+  return canvasLayer(column, "portal-calendar-bands");
+}
+
+function historyIn(column) {
+  return canvasLayer(column, "portal-calendar-history");
 }
 
 function blocksIn(column) {
-  return column.children[1].children[2].children;
+  return canvasLayer(column, "portal-calendar-blocks");
+}
+
+function historyStripsIn(column) {
+  return canvasLayer(column, "portal-calendar-history-strips");
 }
 
 function blockTexts(block) {
@@ -330,6 +348,22 @@ function allBlocks(doc) {
   const out = [];
   for (const column of columns(doc)) {
     for (const block of blocksIn(column)) { out.push(block); }
+  }
+  return out;
+}
+
+function allHistoryStrips(doc) {
+  const out = [];
+  for (const column of columns(doc)) {
+    for (const strip of historyStripsIn(column)) { out.push(strip); }
+  }
+  return out;
+}
+
+function allHistory(doc) {
+  const out = [];
+  for (const column of columns(doc)) {
+    for (const ghost of historyIn(column)) { out.push(ghost); }
   }
   return out;
 }
@@ -940,7 +974,7 @@ test("calendar: an empty week says so rather than rendering a silent blank", asy
 /* Presentation filtering                                               */
 /* ------------------------------------------------------------------ */
 
-test("calendar: cancelled, completed and no_show never reach the resting calendar", async () => {
+test("calendar: completed and no_show never reach the resting calendar", async () => {
   const f = makePages();
   queueWeek(f, [
     slotFixture({ slot_id: "ok", status: "available" }),
@@ -949,9 +983,6 @@ test("calendar: cancelled, completed and no_show never reach the resting calenda
       end_datetime: "2026-08-24T16:30:00Z" })
   ], [
     appointmentFixture({ appointment_id: "keep", status: "confirmed" }),
-    appointmentFixture({ appointment_id: "x1", status: "cancelled",
-      start_datetime: "2026-08-24T17:00:00Z",
-      end_datetime: "2026-08-24T17:30:00Z" }),
     appointmentFixture({ appointment_id: "x2", status: "no_show",
       start_datetime: "2026-08-24T18:00:00Z",
       end_datetime: "2026-08-24T18:30:00Z" }),
@@ -962,9 +993,699 @@ test("calendar: cancelled, completed and no_show never reach the resting calenda
   openCalendar(f);
   await flush();
   assertEqual(allBlocks(f.doc).length, 1, "only the confirmed appointment");
+  assertEqual(allHistory(f.doc).length, 0,
+    "completed and no_show are not history either - they stay hidden");
   assertEqual(allBands(f.doc).length, 1, "only the open slot band");
   assertEqual(allBands(f.doc)[0].children[0].textContent, "Open",
-    "and it is the open band, not a cancelled one");
+    "a cancelled SLOT is still filtered out of the inventory bands");
+});
+
+/* ------------------------------------------------------------------ */
+/* Phase 2B: cancelled appointments remain visible as demoted history    */
+/* ------------------------------------------------------------------ */
+
+function cancelledFixture(overrides) {
+  return appointmentFixture(Object.assign({
+    appointment_id: "appt-cancelled",
+    patient_name: "Maria Lopez",
+    status: "cancelled",
+    start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z"
+  }, overrides || {}));
+}
+
+test("2B: a cancelled appointment stays visible in the resting calendar", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+
+  assertEqual(allHistory(f.doc).length, 1,
+    "the cancelled appointment is still on the calendar");
+  assertEqual(allBlocks(f.doc).length, 0,
+    "but NOT as a live appointment");
+  const ghost = allHistory(f.doc)[0];
+  const texts = blockTexts(ghost);
+  assertEqual(texts[0], "10:30 AM", "at its original time");
+  assertEqual(texts[1], "Maria Lopez", "with the patient the office may call");
+  assertEqual(texts[texts.length - 1], "Cancelled",
+    "and the status word printed explicitly");
+  assertEqual(f.doc._elements["calendar-state"].textContent, "",
+    "a week containing only history is not an empty week");
+});
+
+test("2B: a cancelled block carries the demoted history class and no service line", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture({
+    start_datetime: "2026-08-24T14:00:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })]);
+  openCalendar(f);
+  await flush();
+  const ghost = allHistory(f.doc)[0];
+  assert(ghost.className.indexOf("portal-calendar-block-history") !== -1,
+    "a dedicated history class the styling can subdue: " + ghost.className);
+  assert(ghost.className.indexOf("portal-calendar-appointment-cancelled") !== -1,
+    "plus its authoritative status class");
+  /* A full-hour ACTIVE block would carry a service line here; the ghost
+   * deliberately does not, so it reads lighter than any live appointment. */
+  assertEqual(blockTexts(ghost).length, 3,
+    "time, patient and status only - no service line on a ghost");
+});
+
+test("2B: a cancelled block stays clickable and keyboard reachable", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  const ghost = allHistory(f.doc)[0];
+  assertEqual(ghost.tagName, "BUTTON", "an activatable control");
+  assertEqual(ghost.type, "button", "never a submit control");
+
+  const callsBefore = f.data.totalCalls();
+  ghost.trigger("click");
+  await flush();
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "opening a ghost issues no request");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false, "panel opens");
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Maria Lopez", "titled by the patient who cancelled");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
+    "the panel states the status plainly");
+});
+
+test("2B: the cancelled drawer exposes NO actions", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  assertEqual(actionButtons(f.doc).length, 0,
+    "appointmentActionsFor('cancelled') offers nothing");
+  assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent,
+    "No actions are available for this appointment.", "and says so");
+  /* No follow-up workflow is being introduced in this phase. */
+  const markup = [f.doc._elements["calendar-drawer-actions-note"].textContent,
+    f.doc._elements["calendar-drawer-title"].textContent].join(" ");
+  for (const word of ["Reactivate", "Reschedule", "Follow up", "Duplicate",
+    "Book Again", "Confirm", "Cancel"]) {
+    assert(markup.indexOf(word) === -1,
+      "no unauthorized action vocabulary appears: " + word);
+  }
+});
+
+test("2B: the cancelled drawer still carries the full read-only record", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  assertEqual(drawerValue(f.doc, "Patient"), "Maria Lopez", "patient");
+  assertEqual(drawerValue(f.doc, "Phone"), "516-555-0134", "phone for follow-up");
+  assertEqual(drawerValue(f.doc, "Service"), "implant consultation", "service");
+  assertEqual(drawerValue(f.doc, "Status"), "Cancelled", "status");
+  assert(String(drawerValue(f.doc, "Starts")).indexOf("2026") !== -1,
+    "the ORIGINAL appointment time is preserved in the record");
+});
+
+/* ---- inventory independence ---- */
+
+test("2B: authoritative Open availability renders at the same time as a ghost", async () => {
+  const f = makePages();
+  /* The Schedule says 10:30 is open again; the Appointments read says Maria
+   * was booked there and cancelled. Both are true, and both are shown. */
+  queueWeek(f, [slotFixture({
+    start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 1, "the authoritative availability band renders");
+  assertEqual(bands[0].children[0].textContent, "Open",
+    "saying the time is open NOW");
+  assertEqual(bands[0].style.top, allHistory(f.doc)[0].style.top,
+    "at exactly the same position as the historical entry");
+  assertEqual(allHistory(f.doc).length, 1,
+    "while the history remains visible as context");
+});
+
+test("2B: a ghost never CREATES an Open band", async () => {
+  const f = makePages();
+  /* The Schedule returns no slot at all for that time. */
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  assertEqual(allBands(f.doc).length, 0,
+    "availability is never inferred from a cancelled appointment");
+  assertEqual(allHistory(f.doc).length, 1, "only the history is drawn");
+});
+
+test("2B: a ghost never SUPPRESSES an Open band", async () => {
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ slot_id: "s1", start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    slotFixture({ slot_id: "s2", start_datetime: "2026-08-24T15:00:00Z",
+      end_datetime: "2026-08-24T15:30:00Z" })
+  ], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 1, "the two adjacent openings still consolidate");
+  assert(bands[0].title.indexOf("2 slots") !== -1,
+    "and both authoritative slots are still represented: " + bands[0].title);
+});
+
+test("2B: a ghost does not make a BLOCKED time look open", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture({ status: "blocked",
+    start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 1, "one inventory band");
+  assertEqual(bands[0].children[0].textContent, "Blocked",
+    "inventory stays exactly what the Schedule said");
+});
+
+/* ---- geometry: history never distorts active appointments ---- */
+
+test("2B: a ghost does not push an overlapping ACTIVE appointment into a lane", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "live", patient_name: "Live Patient",
+      status: "confirmed",
+      start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    cancelledFixture()   /* overlaps the live appointment exactly */
+  ]);
+  openCalendar(f);
+  await flush();
+
+  const live = blocksIn(columns(f.doc)[0])[0];
+  assertEqual(live.style.width, "100%",
+    "the live appointment keeps the full column - history took no lane");
+  assertEqual(live.style.left, "0%", "and the left edge");
+  assert(live.className.indexOf("portal-calendar-block-narrow") === -1,
+    "and is not marked narrow");
+  const ghost = allHistory(f.doc)[0];
+  assertEqual(ghost.style.width, "100%", "the ghost also spans the column");
+  assert(ghost.className.indexOf("portal-calendar-block-narrow") === -1,
+    "history is never laned");
+});
+
+/* ---- exact overlap: history must stay reachable ---- */
+
+/* The realistic case: 10:30-11:00 was cancelled and the slot was later
+ * rebooked for exactly the same half hour. */
+function exactOverlapWeek(f) {
+  queueWeek(f, [], [
+    cancelledFixture({ appointment_id: "appt-cancelled",
+      patient_name: "Maria Lopez",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-live",
+      patient_name: "New Patient", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+}
+
+test("2B exact overlap: the live appointment keeps normal geometry", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+
+  const live = blocksIn(columns(f.doc)[0]);
+  assertEqual(live.length, 1, "exactly ONE live appointment is drawn");
+  assertEqual(live[0].style.width, "100%",
+    "it keeps the full column - no second active lane was created");
+  assertEqual(live[0].style.left, "0%", "and the left edge");
+  assert(live[0].className.indexOf("portal-calendar-block-narrow") === -1,
+    "and is not marked narrow");
+  assertEqual(blockTexts(live[0])[1], "New Patient", "it is the live patient");
+});
+
+test("2B exact overlap: a fully occluded ghost gets ONE compact history strip", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+
+  /* The live appointment covers the ghost's own first line, so the ghost can
+   * no longer speak for itself and a strip is drawn above the live layer. */
+  assertEqual(allHistory(f.doc).length, 1, "the ghost is still rendered");
+  const strips = allHistoryStrips(f.doc);
+  assertEqual(strips.length, 1, "exactly one history affordance");
+  const strip = strips[0];
+  assertEqual(strip.tagName, "BUTTON", "a real control, not decoration");
+  assertEqual(strip.type, "button", "never a submit control");
+  assertEqual(strip.className, "portal-calendar-history-strip",
+    "the horizontal strip treatment, not the old vertical marker");
+});
+
+test("2B exact overlap: the strip reads as patient + CANCELLED, with no x glyph", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+  const strip = allHistoryStrips(f.doc)[0];
+
+  const parts = strip.children.map((s) => s.textContent);
+  assertEqual(parts[0], "Maria Lopez", "the patient who cancelled reads first");
+  assertEqual(parts[1], "Cancelled",
+    "then the frozen status word - CSS uppercases it for display");
+  /* The ORIGINAL time stays in the accessible name without eating width. */
+  assert(parts[2].indexOf("10:30 AM") !== -1,
+    "and the original time is part of the control's text: " + parts[2]);
+  assert(strip.title.indexOf("Cancelled") !== -1 &&
+    strip.title.indexOf("Maria Lopez") !== -1 &&
+    strip.title.indexOf("10:30 AM") !== -1,
+    "the full label is echoed on the hover title: " + strip.title);
+
+  /* No close/delete-looking glyph anywhere on the calendar surface. */
+  for (const part of parts) {
+    assertEqual(part.indexOf("x") === 0, false,
+      "no x glyph is rendered: " + part);
+  }
+  for (const cls of strip.children.map((s) => s.className)) {
+    assert(cls.indexOf("history-mark") === -1 || cls.indexOf("strip") !== -1,
+      "no remnant of the old vertical marker markup: " + cls);
+  }
+});
+
+test("2B exact overlap: the strip sits on the BOTTOM edge, above the live layer", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+
+  const canvas = columns(f.doc)[0].children[1];
+  const stripsIndex = canvas.children.findIndex(
+    (layer) => layer.className === "portal-calendar-history-strips");
+  const blocksIndex = canvas.children.findIndex(
+    (layer) => layer.className === "portal-calendar-blocks");
+  const historyIndex = canvas.children.findIndex(
+    (layer) => layer.className === "portal-calendar-history");
+  assert(historyIndex < blocksIndex,
+    "the full ghost still paints beneath the live appointment");
+  assert(stripsIndex > blocksIndex,
+    "but the strip paints above it, so it can never be covered");
+
+  /* Bottom-aligned, so it covers only the live block's LAST line. */
+  const live = blocksIn(columns(f.doc)[0])[0];
+  const strip = allHistoryStrips(f.doc)[0];
+  const liveTop = parseFloat(live.style.top);
+  const liveHeight = parseFloat(live.style.height);
+  const stripTop = parseFloat(strip.style.top);
+  const stripHeight = parseFloat(strip.style.height);
+  assertEqual(stripHeight, 14, "one thin line");
+  assertEqual(stripTop, liveTop + liveHeight - stripHeight,
+    "flush with the bottom edge, leaving the live time and patient visible");
+  assert(stripTop > liveTop, "and never across the live block's first line");
+});
+
+test("2B exact overlap: activating the strip opens Maria's cancelled drawer", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+
+  const callsBefore = f.data.totalCalls();
+  allHistoryStrips(f.doc)[0].trigger("click");
+  await flush();
+  assertEqual(f.data.totalCalls(), callsBefore, "no request is issued");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false, "the panel opens");
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Maria Lopez",
+    "on the CANCELLED patient, not the live one");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
+    "showing the cancelled status");
+  assertEqual(actionButtons(f.doc).length, 0,
+    "and offering no action, exactly as appointmentActionsFor('cancelled') says");
+});
+
+test("2B exact overlap: the live appointment still opens its own drawer", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+
+  blocksIn(columns(f.doc)[0])[0].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "New Patient",
+    "the live block still opens the live patient");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
+    "with its own status");
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Cancel appointment"]),
+    "and its own allowed actions");
+});
+
+test("2B exact overlap: availability is neither inferred nor altered", async () => {
+  const f = makePages();
+  exactOverlapWeek(f);
+  openCalendar(f);
+  await flush();
+  assertEqual(allBands(f.doc).length, 0,
+    "no availability is invented from either appointment");
+  assertEqual(JSON.stringify(f.data.calls.getSchedule[0]), "{}",
+    "and the Schedule request is unchanged");
+});
+
+test("2B exact overlap: an authoritative Open band still renders alongside both", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture({ start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })], [
+    cancelledFixture(),
+    appointmentFixture({ appointment_id: "appt-live",
+      patient_name: "New Patient", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  assertEqual(allBands(f.doc).length, 1,
+    "the Schedule remains the only source of availability");
+  assertEqual(allBands(f.doc)[0].children[0].textContent, "Open", "and it says Open");
+  assertEqual(allHistory(f.doc).length, 1, "the ghost is still there");
+  assertEqual(allHistoryStrips(f.doc).length, 1, "and so is its strip");
+});
+
+test("2B: a ghost with clear air around it gets NO strip", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "later", status: "confirmed",
+      start_datetime: "2026-08-24T16:00:00Z",
+      end_datetime: "2026-08-24T17:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  assertEqual(allHistory(f.doc).length, 1, "the ghost renders normally");
+  assertEqual(allHistoryStrips(f.doc).length, 0,
+    "nothing covers it, so the approved presentation is untouched");
+});
+
+test("2B: a PARTIALLY overlapped ghost that still reads gets NO strip", async () => {
+  const f = makePages();
+  /* Ghost 10:30-11:30; the live appointment starts at 11:00, so the ghost's
+   * own first line - patient and CANCELLED - is fully readable. It IS the
+   * affordance, and a second control beside it would be clutter. */
+  queueWeek(f, [], [
+    cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:30:00Z" }),
+    appointmentFixture({ appointment_id: "appt-live",
+      patient_name: "Robert Miller", status: "confirmed",
+      start_datetime: "2026-08-24T15:00:00Z",
+      end_datetime: "2026-08-24T16:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  assertEqual(allHistoryStrips(f.doc).length, 0,
+    "no extra affordance beside a ghost that already reads");
+  const ghost = allHistory(f.doc)[0];
+  assertEqual(blockTexts(ghost)[1], "Maria Lopez", "the ghost shows the patient");
+  assertEqual(blockTexts(ghost)[blockTexts(ghost).length - 1], "Cancelled",
+    "and the status word");
+  /* And that visible ghost is still the working control. */
+  ghost.trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Maria Lopez",
+    "clicking the visible ghost opens the cancelled drawer");
+  assertEqual(actionButtons(f.doc).length, 0, "read-only");
+  /* The live appointment keeps its geometry either way. */
+  assertEqual(blocksIn(columns(f.doc)[0])[0].style.width, "100%",
+    "the live appointment keeps the full column");
+});
+
+test("2B: the Aisha/Robert case - top covered, tail exposed - gets NO strip", async () => {
+  const f = makePages();
+  /* The exact case the office reported in the browser:
+   *   Robert Miller, confirmed  11:00-12:00
+   *   Aisha Khan,    cancelled  11:30-12:30
+   * Aisha's first line is covered, but her whole 12:00-12:30 tail is exposed
+   * and reads as "Aisha Khan / CANCELLED". That IS the affordance; a second
+   * control beside it is clutter. */
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "appt-live",
+      patient_name: "Robert Miller", status: "confirmed",
+      start_datetime: "2026-08-24T15:00:00Z",
+      end_datetime: "2026-08-24T16:00:00Z" }),
+    cancelledFixture({ appointment_id: "appt-aisha",
+      patient_name: "Aisha Khan",
+      start_datetime: "2026-08-24T15:30:00Z",
+      end_datetime: "2026-08-24T16:30:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  assertEqual(allHistoryStrips(f.doc).length, 0,
+    "no extra strip beside a ghost with a readable exposed tail");
+  const ghost = allHistory(f.doc)[0];
+  const texts = blockTexts(ghost);
+  assertEqual(texts[1], "Aisha Khan", "the ghost still names the patient");
+  assertEqual(texts[texts.length - 1], "Cancelled", "and prints the status");
+
+  /* The ghost remains the working control. */
+  ghost.trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Aisha Khan",
+    "clicking the visible ghost opens HER cancelled drawer");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
+    "read-only, cancelled");
+  assertEqual(actionButtons(f.doc).length, 0, "and offering no action");
+
+  /* Robert keeps his normal geometry and his own drawer. */
+  const live = blocksIn(columns(f.doc)[0])[0];
+  assertEqual(live.style.width, "100%", "Robert keeps the full column");
+  assertEqual(live.style.left, "0%", "and the left edge");
+  assert(live.className.indexOf("portal-calendar-block-narrow") === -1,
+    "and is not laned by the cancelled row");
+  live.trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Robert Miller", "and still opens his own drawer");
+});
+
+test("2B: only a TINY exposed fragment still uses the strip", async () => {
+  const f = makePages();
+  /* Ghost 10:30-11:00; the live appointment covers 10:30-10:55, leaving a
+   * five-minute sliver - below the minimum meaningful display height, so
+   * nothing readable remains and the strip is warranted. */
+  queueWeek(f, [], [
+    cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-live",
+      patient_name: "Robert Miller", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T14:55:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  assertEqual(allHistoryStrips(f.doc).length, 1,
+    "an unreadable sliver still needs the strip");
+  assertEqual(blocksIn(columns(f.doc)[0])[0].style.width, "100%",
+    "and the live appointment still keeps its geometry");
+});
+
+test("2B: no live block reserves padding for a history affordance", () => {
+  const css = fs.readFileSync(path.join(PORTAL_DIR, "portal.css"), "utf8");
+  /* The old vertical tab needed room reserved on EVERY live block, in every
+   * week, whether or not any cancellation was involved. The bottom strip
+   * needs none, so that reservation is gone. */
+  assert(css.indexOf("padding-right: 20px") === -1,
+    "no global live-block padding survives");
+  assert(css.indexOf("portal-calendar-history-marker") === -1,
+    "and no rule for the old vertical marker survives");
+  assert(css.indexOf("portal-calendar-history-strip") !== -1,
+    "the horizontal strip is styled instead");
+});
+
+test("2B: largestVisibleSpanMinutes measures exposure ANYWHERE in the entry", () => {
+  const f = makePages();
+  const largest = f.calendarHelpers.largestVisibleSpanMinutes;
+  const ghost = { startMinutes: 630, endMinutes: 690 };   /* 10:30-11:30 */
+
+  assertEqual(largest(ghost, []), 60, "nothing overlapping: the whole entry");
+  assertEqual(largest(ghost, [{ startMinutes: 660, endMinutes: 720 }]), 30,
+    "covered at the BOTTOM: the top half is exposed");
+  /* The case the office reported: the top is covered, but the tail reads. */
+  assertEqual(largest(ghost, [{ startMinutes: 600, endMinutes: 660 }]), 30,
+    "covered at the TOP: the bottom half is still a real exposed span");
+  assertEqual(largest(ghost, [{ startMinutes: 630, endMinutes: 690 }]), 0,
+    "exact coincidence exposes nothing");
+  assertEqual(largest(ghost, [{ startMinutes: 540, endMinutes: 720 }]), 0,
+    "and neither does an appointment that swallows it whole");
+  assertEqual(largest(ghost, [{ startMinutes: 500, endMinutes: 630 }]), 60,
+    "an appointment ending where the ghost starts covers nothing");
+  /* Two actives leaving a gap in the middle: the LARGEST run wins, and the
+   * gaps before, between and after are all candidates. */
+  assertEqual(largest(ghost, [
+    { startMinutes: 630, endMinutes: 645 },
+    { startMinutes: 665, endMinutes: 690 }
+  ]), 20, "the 645-665 gap is the largest exposed run");
+  assertEqual(largest(ghost, [
+    { startMinutes: 660, endMinutes: 670 },
+    { startMinutes: 640, endMinutes: 650 }
+  ]), 20, "unordered actives are handled, and the tail 670-690 wins");
+  /* Overlapping actives must not be double-counted into a phantom gap. */
+  assertEqual(largest(ghost, [
+    { startMinutes: 630, endMinutes: 675 },
+    { startMinutes: 650, endMinutes: 690 }
+  ]), 0, "overlapping actives merge rather than leaving a false gap");
+  /* NESTED actives are the shape that catches a naive merge: a short
+   * appointment sitting inside a long one must not rewind the coverage
+   * frontier and invent exposure that is not there. */
+  assertEqual(largest(ghost, [
+    { startMinutes: 630, endMinutes: 690 },
+    { startMinutes: 650, endMinutes: 660 }
+  ]), 0, "a nested active never re-exposes what the outer one covers");
+  assertEqual(largest(ghost, [
+    { startMinutes: 630, endMinutes: 670 },
+    { startMinutes: 640, endMinutes: 650 }
+  ]), 20, "and the real tail after the OUTER interval is what is measured");
+});
+
+test("2B: isHistoryOccluded is the single visible/occluded rule", () => {
+  const f = makePages();
+  const occluded = f.calendarHelpers.isHistoryOccluded;
+  const ghost = { startMinutes: 630, endMinutes: 690 };
+
+  assert(!occluded(ghost, []), "Case 1: no overlap is never occluded");
+  assert(!occluded(ghost, [{ startMinutes: 660, endMinutes: 720 }]),
+    "Case 2: an exposed span at the top means the ghost speaks for itself");
+  assert(!occluded(ghost, [{ startMinutes: 600, endMinutes: 660 }]),
+    "Case 2 again: an exposed span at the BOTTOM counts just as much");
+  assert(occluded(ghost, [{ startMinutes: 630, endMinutes: 690 }]),
+    "Case 3: exact coincidence is occluded");
+  assert(occluded(ghost, [{ startMinutes: 630, endMinutes: 685 }]),
+    "and so is a 5-minute fragment, below the meaningful threshold");
+  /* A short ghost with nothing over it is still not occluded - the rule is
+   * about coverage, never about being small. */
+  assert(!occluded({ startMinutes: 630, endMinutes: 640 }, []),
+    "a brief cancelled entry with clear air needs no strip");
+});
+
+test("2B: entries that merely touch end-to-start do not count as overlapping", () => {
+  const f = makePages();
+  const overlaps = f.calendarHelpers.overlapsAnyActive;
+  assert(!overlaps({ startMinutes: 600, endMinutes: 630 },
+    [{ startMinutes: 630, endMinutes: 660 }]),
+    "a ghost ending exactly where an appointment starts is not covered");
+  assert(!overlaps({ startMinutes: 630, endMinutes: 660 },
+    [{ startMinutes: 600, endMinutes: 630 }]),
+    "and neither is the reverse");
+  assert(overlaps({ startMinutes: 600, endMinutes: 630 },
+    [{ startMinutes: 600, endMinutes: 630 }]), "exact coincidence overlaps");
+  assert(overlaps({ startMinutes: 600, endMinutes: 660 },
+    [{ startMinutes: 630, endMinutes: 690 }]), "partial overlap counts");
+  assert(!overlaps({ startMinutes: 600, endMinutes: 630 }, []),
+    "nothing to overlap with");
+});
+
+test("2B: two ACTIVE appointments still lane normally alongside a ghost", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "a1", status: "confirmed",
+      start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "a2", patient_name: "Second Live",
+      status: "pending",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:30:00Z" }),
+    cancelledFixture()
+  ]);
+  openCalendar(f);
+  await flush();
+
+  const live = blocksIn(columns(f.doc)[0]);
+  assertEqual(live.length, 2, "two live appointments");
+  assertEqual(live[0].style.width, "50%",
+    "they lane against EACH OTHER exactly as before");
+  assertEqual(live[1].style.left, "50%", "second lane");
+  assertEqual(allHistory(f.doc)[0].style.width, "100%",
+    "the ghost is unaffected and takes no lane");
+});
+
+test("2B: assignLanes is never given a historical entry (helper level)", () => {
+  const f = makePages();
+  const H = f.calendarHelpers;
+  /* Three entries at the same time; if history participated, the two live
+   * ones would be squeezed to a third of the column each. */
+  const laned = H.assignLanes([
+    { startMinutes: 540, endMinutes: 600 },
+    { startMinutes: 540, endMinutes: 600 }
+  ]);
+  assertEqual(laned[0].laneCount, 2,
+    "two live appointments produce exactly two lanes, never three");
+});
+
+test("2B: live appointments are layered ABOVE cancelled history", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    appointmentFixture({ appointment_id: "live", status: "confirmed" }),
+    cancelledFixture({ start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  const canvas = columns(f.doc)[0].children[1];
+  const historyIndex = canvas.children.findIndex(
+    (layer) => layer.className === "portal-calendar-history");
+  const blocksIndex = canvas.children.findIndex(
+    (layer) => layer.className === "portal-calendar-blocks");
+  assert(historyIndex !== -1 && blocksIndex !== -1, "both layers exist");
+  assert(blocksIndex > historyIndex,
+    "the live layer paints after - and therefore above - the history layer");
+});
+
+/* ---- the Phase 2A cancel flow now leaves a ghost behind ---- */
+
+test("2B: after the Phase 2A Cancel flow, the returned cancelled row stays visible", async () => {
+  const f = makePages();
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-a",
+    patient_name: "Maria Lopez", status: "confirmed",
+    start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+
+  actionButton(f.doc, "Cancel appointment").trigger("click");
+  f.data.queue("cancelAppointment", { ok: true, data: {} });
+  /* The authoritative refresh frees the slot AND returns the cancelled row. */
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([slotFixture({
+    start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })]) });
+  f.data.queue("getAppointments", { ok: true, data: appointmentsBody([
+    appointmentFixture({ appointment_id: "appt-a", patient_name: "Maria Lopez",
+      status: "cancelled",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })]) });
+  actionButton(f.doc, "Confirm cancel").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(allBlocks(f.doc).length, 0, "no live appointment remains");
+  assertEqual(allHistory(f.doc).length, 1,
+    "the cancelled row remains as follow-up context");
+  assertEqual(blockTexts(allHistory(f.doc)[0])[1], "Maria Lopez", "the patient");
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 1, "and the freed time shows as authoritative open");
+  assertEqual(bands[0].children[0].textContent, "Open",
+    "exactly the visual the office needs: open NOW, Maria cancelled here");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
+    "the panel settles on the authoritative cancelled state");
+  assertEqual(actionButtons(f.doc).length, 0, "offering no action");
 });
 
 test("calendar: no rescheduled status is invented", () => {
@@ -972,8 +1693,18 @@ test("calendar: no rescheduled status is invented", () => {
   const H = f.calendarHelpers;
   assert(!H.isVisibleAppointmentStatus("rescheduled"),
     "the grid recognises no status the backend does not define");
+  assert(!H.isActiveAppointmentStatus("rescheduled") &&
+    !H.isHistoryAppointmentStatus("rescheduled"),
+    "and it belongs to neither presentation role");
+  assertEqual(JSON.stringify(H.ACTIVE_APPOINTMENT_STATUSES),
+    JSON.stringify(["pending", "confirmed"]),
+    "ACTIVE - the statuses that occupy time - is unchanged by Phase 2B");
+  assertEqual(JSON.stringify(H.HISTORY_APPOINTMENT_STATUSES),
+    JSON.stringify(["cancelled"]),
+    "HISTORY is exactly cancelled: completed and no_show stay hidden");
   assertEqual(JSON.stringify(H.VISIBLE_APPOINTMENT_STATUSES),
-    JSON.stringify(["pending", "confirmed"]), "exactly the Phase 1 scope");
+    JSON.stringify(["pending", "confirmed", "cancelled"]),
+    "and visible is the union of the two roles");
   assertEqual(JSON.stringify(H.VISIBLE_SLOT_STATUSES),
     JSON.stringify(["available", "held", "blocked"]), "exactly the slot scope");
 });
@@ -1342,8 +2073,12 @@ test("calendar: each day column carries head, canvas, lines, bands and blocks", 
     "the canvas is exactly as tall as the displayed hour window");
   assertEqual(canvas.children[0].className, "portal-calendar-lines", "lines");
   assertEqual(canvas.children[1].className, "portal-calendar-bands", "bands");
-  assertEqual(canvas.children[2].className, "portal-calendar-blocks",
-    "blocks layer sits above the bands");
+  assertEqual(canvas.children[2].className, "portal-calendar-history",
+    "cancelled history sits above the bands");
+  assertEqual(canvas.children[3].className, "portal-calendar-blocks",
+    "and live appointments sit above the history");
+  assertEqual(canvas.children[4].className, "portal-calendar-history-strips",
+    "with the cancelled-history strips as the only layer above them");
   assertEqual(canvas.children[0].children.length, 10, "one hour line per hour");
 });
 
@@ -2688,7 +3423,9 @@ test("F5: a conflict on a STALE GENERATION also refreshes", async () => {
   assertEqual(f.data.calls.getAppointments.length, readsAfterB + 1,
     "both windows");
   assertEqual(allBlocks(f.doc).length, 1,
-    "A left the resting grid because the refresh says it is cancelled");
+    "A left the LIVE layer because the refresh says it is cancelled");
+  assertEqual(allHistory(f.doc).length, 1,
+    "and reappears as demoted history (Phase 2B)");
   assertEqual(feedbackText(f.doc), "",
     "and the older mutation wrote no feedback over the newer one's");
 });

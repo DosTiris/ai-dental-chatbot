@@ -74,6 +74,7 @@
   /* Below this duration a block drops its secondary line and renders on one
    * compact row. */
   var COMPACT_BLOCK_MINUTES = 45;
+  var MIN_VISIBLE_HISTORY_MINUTES = MIN_BLOCK_MINUTES;
 
   var WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   var MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -83,9 +84,38 @@
    * "cancelled" is deliberately absent (presentation filtering). */
   var VISIBLE_SLOT_STATUSES = ["available", "held", "blocked"];
 
-  /* The closed set of appointment statuses the resting calendar displays.
-   * cancelled / completed / no_show are deliberately absent. */
-  var VISIBLE_APPOINTMENT_STATUSES = ["pending", "confirmed"];
+  /* Appointment statuses split into two presentation roles.
+   *
+   * ACTIVE occupies time: it is laid out in overlap lanes, it competes for
+   * the office's attention, and it means a patient is expected.
+   *
+   * HISTORY does NOT occupy time. A cancelled appointment is context the
+   * office may want (who was booked here, so we can follow up) but it is
+   * emphatically not occupancy: whether the time is open now is a question
+   * only the authoritative Schedule response answers, and this module never
+   * infers availability from an appointment row.
+   *
+   * completed and no_show stay hidden: neither is follow-up context, and
+   * nothing in the current source argues for surfacing them. */
+  var ACTIVE_APPOINTMENT_STATUSES = ["pending", "confirmed"];
+  var HISTORY_APPOINTMENT_STATUSES = ["cancelled"];
+  var VISIBLE_APPOINTMENT_STATUSES =
+    ACTIVE_APPOINTMENT_STATUSES.concat(HISTORY_APPOINTMENT_STATUSES);
+
+  /* The compact horizontal history strip: the affordance that keeps a
+   * cancelled appointment reachable when a live one is drawn over it.
+   * It is only ever rendered when the ghost itself has become unreadable.
+   *
+   * HISTORY_STRIP_HEIGHT_PX is one thin line, sat on the BOTTOM edge of the
+   * occluded region. That placement is deliberate: a live block renders its
+   * time and patient on its first lines, so a strip along the bottom covers
+   * only its least important line and the live appointment stays dominant.
+   *
+   * MIN_VISIBLE_HISTORY_MINUTES is how much clear air the TOP of a ghost
+   * needs before it counts as readable on its own. It reuses the minimum
+   * block height the renderer already guarantees every entry - roughly one
+   * line of text - rather than inventing a second magic number. */
+  var HISTORY_STRIP_HEIGHT_PX = 14;
 
   var KIND_SLOT = "slot";
   var KIND_APPOINTMENT = "appointment";
@@ -281,6 +311,15 @@
     return VISIBLE_APPOINTMENT_STATUSES.indexOf(status) !== -1;
   }
 
+  function isActiveAppointmentStatus(status) {
+    return ACTIVE_APPOINTMENT_STATUSES.indexOf(status) !== -1;
+  }
+
+  /* A rendered appointment that is HISTORY rather than occupancy. */
+  function isHistoryAppointmentStatus(status) {
+    return HISTORY_APPOINTMENT_STATUSES.indexOf(status) !== -1;
+  }
+
   /*
    * Purpose: the RESPONSE CONSISTENCY GUARD. The grid combines two
    * independent authoritative reads; it may only do so when both describe
@@ -337,6 +376,7 @@
       durationMinutes: endMinutes - start.minutes,
       caption: start.caption,
       endCaption: end === null ? "" : end.caption,
+      historical: false,
       payload: payload || null
     };
   }
@@ -370,10 +410,96 @@
         appointment.start_datetime, appointment.end_datetime, timeZone,
         appointment);
       if (apptEntry !== null) {
+        /* Decided ONCE, here, from the authoritative status - so the layer
+         * an entry lands in and the lane maths it is excluded from can
+         * never disagree. */
+        apptEntry.historical = isHistoryAppointmentStatus(appointment.status);
         entries.push(apptEntry);
       }
     }
     return entries;
+  }
+
+  /*
+   * Purpose: does this entry share any minute with an ACTIVE appointment?
+   * Half-open on both sides, so entries that merely touch end-to-start do
+   * NOT count as overlapping. Pure.
+   * Used only to decide whether a cancelled entry needs a marker: a ghost
+   * that nothing is drawn over stays perfectly visible on its own.
+   */
+  function overlapsAnyActive(entry, activeEntries) {
+    for (var i = 0; i < activeEntries.length; i++) {
+      var active = activeEntries[i];
+      if (entry.startMinutes < active.endMinutes &&
+          active.startMinutes < entry.endMinutes) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /*
+   * Purpose: the LARGEST contiguous run of minutes anywhere inside this
+   * entry that no active appointment covers.
+   *
+   * "Anywhere" is the point. An earlier rule looked only at the entry's top,
+   * which failed the real case the office reported: a cancelled 11:30-12:30
+   * sitting under an active 11:00-12:00 has its first line covered, yet the
+   * whole 12:00-12:30 tail is exposed and reads perfectly well as
+   * "Aisha Khan / CANCELLED". A ghost like that is its own affordance and
+   * must not be given a second one.
+   *
+   * Overlapping actives are clipped to this entry, merged, and the gaps
+   * between them measured - including the gap before the first and after the
+   * last. Pure; reads nothing but the minutes already computed for layout.
+   */
+  function largestVisibleSpanMinutes(entry, activeEntries) {
+    var covered = [];
+    for (var i = 0; i < activeEntries.length; i++) {
+      var active = activeEntries[i];
+      var from = Math.max(active.startMinutes, entry.startMinutes);
+      var to = Math.min(active.endMinutes, entry.endMinutes);
+      if (from < to) {
+        covered.push({ from: from, to: to });
+      }
+    }
+    covered.sort(function (left, right) { return left.from - right.from; });
+
+    var largest = 0;
+    var cursor = entry.startMinutes;
+    for (var c = 0; c < covered.length; c++) {
+      if (covered[c].from > cursor && covered[c].from - cursor > largest) {
+        largest = covered[c].from - cursor;
+      }
+      if (covered[c].to > cursor) {
+        cursor = covered[c].to;
+      }
+    }
+    if (entry.endMinutes - cursor > largest) {
+      largest = entry.endMinutes - cursor;
+    }
+    return largest;
+  }
+
+  /*
+   * Purpose: THE rule that decides whether a cancelled ghost still speaks
+   * for itself, or needs a separate affordance.
+   *   no overlap at all              -> never occluded (Case 1)
+   *   a meaningful exposed span left -> not occluded, the ghost IS the
+   *                                     affordance and nothing extra is
+   *                                     drawn, wherever that span sits
+   *                                     within the entry (Case 2)
+   *   nothing meaningful exposed     -> effectively occluded, so a compact
+   *                                     horizontal history strip is drawn
+   *                                     (Case 3)
+   * Presentation only: it changes no geometry and reads no inventory. Pure.
+   */
+  function isHistoryOccluded(entry, activeEntries) {
+    if (!overlapsAnyActive(entry, activeEntries)) {
+      return false;
+    }
+    return largestVisibleSpanMinutes(entry, activeEntries) <
+      MIN_VISIBLE_HISTORY_MINUTES;
   }
 
   /*
@@ -619,22 +745,31 @@
       var element = doc.createElement("button");
       element.type = "button";
       var compact = entry.durationMinutes < COMPACT_BLOCK_MINUTES;
+      /* A history block is DEMOTED: it never joins a lane, never shows the
+       * service line, and carries its own class so the styling can subdue
+       * it without touching any active treatment. */
+      var historical = entry.historical === true;
       /* A laned block is only a fraction of the column wide, so it drops
        * the secondary line and truncates with an ellipsis rather than
        * wrapping into unreadable fragments. The patient name is the
        * highest-priority line and is always kept; the complete record is
        * one click away in the detail panel, and the title carries it on
        * hover. The grid is never widened to fit text. */
-      var narrow = entry.laneCount > 1;
+      var narrow = !historical && entry.laneCount > 1;
       element.className = "portal-calendar-block portal-calendar-appointment-" +
         entry.status + (compact ? " portal-calendar-block-compact" : "") +
-        (narrow ? " portal-calendar-block-narrow" : "");
+        (narrow ? " portal-calendar-block-narrow" : "") +
+        (historical ? " portal-calendar-block-history" : "");
       var box = geometryFor(entry.startMinutes, entry.endMinutes, firstHour);
       element.style.top = box.top + "px";
       element.style.height = box.height + "px";
-      var laneCount = entry.laneCount > 0 ? entry.laneCount : 1;
+      /* History spans the full column: it took no part in the active lane
+       * assignment, so it has no lane of its own to occupy. */
+      var laneCount = (!historical && entry.laneCount > 0)
+        ? entry.laneCount : 1;
+      var lane = historical ? 0 : entry.lane;
       var width = 100 / laneCount;
-      element.style.left = (entry.lane * width) + "%";
+      element.style.left = (lane * width) + "%";
       element.style.width = width + "%";
 
       var statusWord = appointmentStatusLabel(entry.status);
@@ -643,7 +778,9 @@
 
       element.appendChild(span("portal-calendar-block-time", entry.caption));
       element.appendChild(span("portal-calendar-block-name", name));
-      if (!compact && service !== "") {
+      /* History omits the service line - the drawer carries the full
+       * record, and less ink is exactly the point. */
+      if (!compact && !historical && service !== "") {
         element.appendChild(span("portal-calendar-block-service", service));
       }
       /* The status word ships in the markup on every block, so the visual
@@ -678,6 +815,61 @@
       return rail;
     }
 
+    /*
+     * Purpose: the HISTORY STRIP - a compact horizontal badge drawn ABOVE the
+     * live appointments, keeping a cancelled appointment reachable when a
+     * live one has rendered its ghost unreadable.
+     *
+     * Why it exists: history is deliberately painted BENEATH live work, so a
+     * live appointment covering the ghost's first line leaves it neither
+     * readable nor clickable, and the office loses the follow-up context this
+     * phase exists to keep. Insetting the history layer cannot help - that
+     * whole layer sits below.
+     *
+     * Why it is only sometimes drawn: when the ghost still shows a readable
+     * top of its own, it IS the affordance and nothing is added. A second
+     * control beside a perfectly visible ghost is clutter.
+     *
+     * Why it sits on the BOTTOM edge: a live block renders its time and
+     * patient on its first lines, so a thin strip along the bottom covers
+     * only its least important line. The live appointment stays dominant and
+     * no padding has to be reserved on blocks that have no history at all.
+     *
+     * It is a real button: keyboard reachable, opening exactly the same
+     * read-only cancelled drawer the ghost opens. Patient, status word and
+     * original time are all present in its text and on the hover title.
+     */
+    function buildHistoryStrip(entry, firstHour) {
+      var element = doc.createElement("button");
+      element.type = "button";
+      element.className = "portal-calendar-history-strip";
+      var box = geometryFor(entry.startMinutes, entry.endMinutes, firstHour);
+      var top = box.top + box.height - HISTORY_STRIP_HEIGHT_PX;
+      if (top < box.top) {
+        top = box.top;
+      }
+      element.style.top = top + "px";
+      element.style.height = HISTORY_STRIP_HEIGHT_PX + "px";
+
+      var statusWord = appointmentStatusLabel(entry.status);
+      var name = (entry.payload && entry.payload.patient_name) || "";
+      element.appendChild(span("portal-calendar-history-strip-name", name));
+      element.appendChild(span("portal-calendar-history-strip-status",
+        statusWord));
+      /* Visually clipped, so the strip stays compact while the ORIGINAL time
+       * remains part of the control's accessible name. */
+      element.appendChild(span("portal-calendar-history-strip-time",
+        "at " + entry.caption));
+      element.title = statusWord + (name === "" ? "" : " - " + name) +
+        " at " + entry.caption;
+
+      element.addEventListener("click", function () {
+        onAppointmentSelect(entry.payload);
+      });
+      renderedBlocks.push({ payload: entry.payload, element: element });
+      return element;
+    }
+
     function buildColumn(dayText, dayEntries, window) {
       var column = doc.createElement("div");
       column.className = "portal-calendar-col";
@@ -706,12 +898,15 @@
       canvas.appendChild(lines);
 
       var slotEntries = [];
-      var appointmentEntries = [];
+      var activeEntries = [];
+      var historyEntries = [];
       for (var i = 0; i < dayEntries.length; i++) {
-        if (dayEntries[i].kind === KIND_APPOINTMENT) {
-          appointmentEntries.push(dayEntries[i]);
-        } else {
+        if (dayEntries[i].kind !== KIND_APPOINTMENT) {
           slotEntries.push(dayEntries[i]);
+        } else if (dayEntries[i].historical) {
+          historyEntries.push(dayEntries[i]);
+        } else {
+          activeEntries.push(dayEntries[i]);
         }
       }
 
@@ -723,14 +918,46 @@
       }
       canvas.appendChild(bandLayer);
 
+      /* History sits in its OWN layer, between the availability bands and
+       * the active appointments. Two consequences, both deliberate:
+       *   - an active appointment always paints ON TOP of a cancelled one,
+       *     so the office is never asked which of two patients is real;
+       *   - history is excluded from assignLanes entirely, so a cancelled
+       *     row can never squeeze a live Pending or Confirmed appointment
+       *     into a half-width lane. */
+      var historyLayer = doc.createElement("div");
+      historyLayer.className = "portal-calendar-history";
+      var orderedHistory = historyEntries.slice().sort(function (l, r) {
+        return l.startMinutes - r.startMinutes;
+      });
+      for (var h = 0; h < orderedHistory.length; h++) {
+        historyLayer.appendChild(buildAppointmentBlock(orderedHistory[h],
+          window.firstHour));
+      }
+      canvas.appendChild(historyLayer);
+
       var blockLayer = doc.createElement("div");
       blockLayer.className = "portal-calendar-blocks";
-      var laned = assignLanes(appointmentEntries);
+      var laned = assignLanes(activeEntries);
       for (var a = 0; a < laned.length; a++) {
         blockLayer.appendChild(buildAppointmentBlock(laned[a],
           window.firstHour));
       }
       canvas.appendChild(blockLayer);
+
+      /* The ONLY thing drawn above the live appointments, and ONLY for the
+       * ghosts that a live appointment has actually rendered unreadable.
+       * A ghost that still shows a readable top - overlapped or not - speaks
+       * for itself and gets nothing extra. */
+      var stripLayer = doc.createElement("div");
+      stripLayer.className = "portal-calendar-history-strips";
+      for (var m = 0; m < orderedHistory.length; m++) {
+        if (isHistoryOccluded(orderedHistory[m], activeEntries)) {
+          stripLayer.appendChild(buildHistoryStrip(orderedHistory[m],
+            window.firstHour));
+        }
+      }
+      canvas.appendChild(stripLayer);
 
       column.appendChild(canvas);
       return column;
@@ -751,7 +978,8 @@
         var refusal = {
           ok: false, reason: REASON_RANGE_MISMATCH, element: null,
           dayCount: 0, visibleCount: 0, outsideCount: 0,
-          bandCount: 0, appointmentCount: 0, firstHour: 0, lastHour: 0
+          bandCount: 0, appointmentCount: 0, historyCount: 0,
+          firstHour: 0, lastHour: 0
         };
         if (!rangesAgree(scheduleBody, appointmentsBody)) {
           renderedBlocks = [];
@@ -800,12 +1028,16 @@
         days.className = "portal-calendar-days";
         var bandCount = 0;
         var appointmentCount = 0;
+        var historyCount = 0;
         for (var d = 0; d < columns.length; d++) {
           var dayEntries = byDay[columns[d]];
           days.appendChild(buildColumn(columns[d], dayEntries, window));
           for (var e = 0; e < dayEntries.length; e++) {
             if (dayEntries[e].kind === KIND_APPOINTMENT) {
               appointmentCount += 1;
+              if (dayEntries[e].historical) {
+                historyCount += 1;
+              }
             }
           }
           bandCount += consolidateBands(dayEntries.filter(function (entry) {
@@ -822,6 +1054,7 @@
           outsideCount: outsideCount,
           bandCount: bandCount,
           appointmentCount: appointmentCount,
+          historyCount: historyCount,
           firstHour: window.firstHour,
           lastHour: window.lastHour
         };
@@ -914,10 +1147,15 @@
     hourCaption: hourCaption,
     isVisibleSlotStatus: isVisibleSlotStatus,
     isVisibleAppointmentStatus: isVisibleAppointmentStatus,
+    isActiveAppointmentStatus: isActiveAppointmentStatus,
+    isHistoryAppointmentStatus: isHistoryAppointmentStatus,
     rangesAgree: rangesAgree,
     positionEntry: positionEntry,
     collectEntries: collectEntries,
     consolidateBands: consolidateBands,
+    overlapsAnyActive: overlapsAnyActive,
+    largestVisibleSpanMinutes: largestVisibleSpanMinutes,
+    isHistoryOccluded: isHistoryOccluded,
     assignLanes: assignLanes,
     hourWindow: hourWindow,
     geometryFor: geometryFor,
@@ -928,7 +1166,9 @@
     DEFAULT_FIRST_HOUR: DEFAULT_FIRST_HOUR,
     DEFAULT_LAST_HOUR: DEFAULT_LAST_HOUR,
     VISIBLE_SLOT_STATUSES: VISIBLE_SLOT_STATUSES,
-    VISIBLE_APPOINTMENT_STATUSES: VISIBLE_APPOINTMENT_STATUSES
+    VISIBLE_APPOINTMENT_STATUSES: VISIBLE_APPOINTMENT_STATUSES,
+    ACTIVE_APPOINTMENT_STATUSES: ACTIVE_APPOINTMENT_STATUSES,
+    HISTORY_APPOINTMENT_STATUSES: HISTORY_APPOINTMENT_STATUSES
   };
 
   /* Export for both the browser (window) and the Node test harness. */

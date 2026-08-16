@@ -511,7 +511,23 @@ body {
 .portal-calendar-line { border-bottom: 1px solid var(--portal-border); }
 
 .portal-calendar-bands { position: absolute; inset: 0; }
-.portal-calendar-blocks { position: absolute; inset: 0; }
+/* Cancelled history sits between the availability bands and the live
+   appointments. The explicit z-index makes the priority a stated rule
+   rather than an accident of DOM order - and because the history layer
+   forms its own stacking context, even a SELECTED ghost stays beneath a
+   live appointment. */
+.portal-calendar-history { position: absolute; inset: 0; z-index: 1; }
+.portal-calendar-blocks { position: absolute; inset: 0; z-index: 2; }
+/* The one thing that sits ABOVE the live appointments: the history strip.
+   It is the only way a cancelled appointment stays reachable when a live one
+   has covered its readable top - an inset on the history layer cannot help,
+   because that whole layer is underneath. */
+.portal-calendar-history-strips {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
 
 /* Consolidated availability / held / blocked regions. Adjacent open slots
    read as one calm band instead of a stack of cards; the status WORD is
@@ -648,6 +664,106 @@ body {
   border-left-color: #7c3aed;
   border-style: dashed;
   border-left-style: solid;
+}
+
+/* Phase 2B: a cancelled appointment stays visible as HISTORY - context for
+   a follow-up call - without ever reading as occupied time. It is muted,
+   translucent, struck through and dashed, so Pending and Confirmed keep the
+   office's attention first. Whether the time is bookable is answered only
+   by the authoritative availability band, which renders independently. */
+.portal-calendar-block-history {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  border-left-color: #fb7185;
+  border-style: dashed;
+  border-left-style: solid;
+  box-shadow: none;
+  opacity: 0.62;
+  color: var(--portal-muted);
+}
+
+.portal-calendar-block-history:hover { opacity: 0.9; filter: none; }
+
+.portal-calendar-block-history .portal-calendar-block-name {
+  font-weight: 500;
+  text-decoration: line-through;
+}
+
+/* The status WORD is never hidden on a ghost, even on a short block: the
+   whole point is that the office can read "Cancelled" at a glance. This
+   deliberately overrides the compact clip rule above (equal specificity,
+   later in the sheet). */
+.portal-calendar-block-history .portal-calendar-block-status {
+  position: static;
+  display: block;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  color: #be123c;
+  font-weight: 600;
+}
+
+/* A compact HORIZONTAL history badge, sat on the bottom edge of the region a
+   live appointment has covered. Muted rose, one thin line, clearly secondary:
+   historical context, never a second active appointment. No close or delete
+   glyph - it simply reads "Aisha Khan CANCELLED".
+
+   pointer-events are re-enabled on the strip itself so the transparent layer
+   around it never intercepts a click meant for the live appointment. */
+.portal-calendar-history-strip {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 5px;
+  border: 1px dashed #fda4af;
+  border-left: 3px solid #fb7185;
+  border-radius: 4px;
+  background: #fff1f2;
+  color: #9f1239;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.portal-calendar-history-strip:hover { background: #ffe4e6; }
+.portal-calendar-history-strip:focus-visible {
+  outline: 2px solid var(--portal-primary);
+}
+
+/* The patient takes the room; the status word never truncates away. */
+.portal-calendar-history-strip-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portal-calendar-history-strip-status {
+  flex: 0 0 auto;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #be123c;
+}
+
+/* The ORIGINAL time stays part of the control's accessible name without
+   spending any of the strip's very limited width. */
+.portal-calendar-history-strip-time {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* The block whose detail panel is open. A ring plus a lift: obvious at a
