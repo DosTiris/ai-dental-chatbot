@@ -1679,3 +1679,84 @@ test("P6-A: no session means NO settings request at all", async () => {
   assertEqual(putOutcome.state, "signed_out", "PUT signed_out");
   assertEqual(env.fetch.seen().length, 0, "no request was made");
 });
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 3: bookScheduleSlot (POST /portal/schedule/slots/     */
+/* <id>/book). The path is DERIVED from the one schedule literal; the   */
+/* body is the caller's patient-entered fields VERBATIM (never a        */
+/* tenant, status, source, provider, service, datetime or urgency);     */
+/* the success body is the SAME exact-key appointment shape the P5-A    */
+/* actions return, judged by the SAME validator.                        */
+/* ------------------------------------------------------------------ */
+
+test("Slice 3: bookScheduleSlot POSTs the fields VERBATIM to the URI-encoded book path", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/slots/slot%20one/book", method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" },
+      bodyJson: { patient_name: "Kevin Alvarado",
+        patient_phone: "516-555-1234" } },
+    { status: 200, json: validAppointmentMember({ source: "portal_staff" }) }
+  );
+  const outcome = await env.data.bookScheduleSlot("slot one",
+    { patient_name: "Kevin Alvarado", patient_phone: "516-555-1234" });
+  assert(outcome.ok, "a valid booked-appointment body is accepted");
+  assertEqual(outcome.data.appointment_id,
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "the appointment came through");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("Slice 3: optional patient fields ride along verbatim - and nothing else", async () => {
+  const env = makeData();
+  seedSession(env);
+  const fields = { patient_name: "Kevin Alvarado",
+    patient_phone: "516-555-1234", patient_email: "kevin@example.test",
+    new_or_returning: "new", reason: "implant consultation" };
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/slots/s1/book", method: "POST",
+      bodyJson: fields },
+    { status: 200, json: validAppointmentMember() }
+  );
+  const outcome = await env.data.bookScheduleSlot("s1", fields);
+  assert(outcome.ok, "accepted");
+  assertEqual(env.fetch.remaining(), 0,
+    "the body was EXACTLY the caller's fields - deep-equal, so a grown " +
+    "tenant/status/source/urgency key would have failed the match");
+});
+
+test("Slice 3: book outcome mapping - 409 conflict, 404 not_found, 422 bad_request", async () => {
+  const cases = [
+    [409, "conflict", { detail: "Slot is no longer available." }],
+    [404, "not_found", { detail: "Slot not found." }],
+    [422, "bad_request", { detail: "patient_name and patient_phone are required." }]
+  ];
+  for (const [status, state, json] of cases) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule/slots/s1/book", method: "POST" },
+      { status, json }
+    );
+    const outcome = await env.data.bookScheduleSlot("s1",
+      { patient_name: "K", patient_phone: "5" });
+    assert(!outcome.ok, status + " is not ok");
+    assertEqual(outcome.state, state, status + " -> " + state);
+  }
+});
+
+test("Slice 3: a book success with an EXTRA key fails closed as invalid_response", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/slots/s1/book", method: "POST" },
+    { status: 200,
+      json: validAppointmentMember({ client_id: "tenant-leak" }) }
+  );
+  const outcome = await env.data.bookScheduleSlot("s1",
+    { patient_name: "K", patient_phone: "5" });
+  assert(!outcome.ok, "a leaked field is never rendered");
+  assertEqual(outcome.state, "invalid_response",
+    "the exact-key appointment contract fails the whole body closed");
+});

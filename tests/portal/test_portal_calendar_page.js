@@ -136,7 +136,13 @@ const PAGE_ELEMENT_IDS = [
   "calendar-drawer-fields", "calendar-drawer-close",
   "calendar-drawer-actions-note",
   /* P2-A drawer action region. */
-  "calendar-drawer-actions", "calendar-drawer-feedback"
+  "calendar-drawer-actions", "calendar-drawer-feedback",
+  /* PHASE 3A Slice 3: receptionist booking panel id contract. */
+  "calendar-book", "calendar-book-title", "calendar-book-times-note",
+  "calendar-book-times", "calendar-book-when",
+  "calendar-book-name", "calendar-book-phone", "calendar-book-email",
+  "calendar-book-patient-type", "calendar-book-reason",
+  "calendar-book-submit", "calendar-book-close", "calendar-book-feedback"
 ];
 
 function makeDocument() {
@@ -154,7 +160,8 @@ function makeFakeData() {
     "putLeadStatus", "putLeadNote", "getAppointments",
     "getSchedule", "publishScheduleDay", "blockScheduleSlot",
     "unblockScheduleSlot", "blockAllOpenSlots",
-    "confirmAppointment", "cancelAppointment"];
+    "confirmAppointment", "cancelAppointment",
+    "bookScheduleSlot" /* PHASE 3A Slice 3 */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -183,6 +190,8 @@ function makeFakeData() {
     blockAllOpenSlots: (day) => next("blockAllOpenSlots", day),
     confirmAppointment: (id) => next("confirmAppointment", id),
     cancelAppointment: (id) => next("cancelAppointment", id),
+    bookScheduleSlot: (slotId, fields) =>
+      next("bookScheduleSlot", { slotId, fields }),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -4169,3 +4178,548 @@ test("ownership: the calendar still calls only the existing data methods", async
   const summary = await h.runRegisteredTests("test_portal_calendar_page");
   process.exitCode = summary.failed === 0 ? 0 : 1;
 })();
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 3: receptionist booking from an Open band            */
+/* ------------------------------------------------------------------ */
+/* The booking panel must operate ENTIRELY from the slot rows the week
+ * read already returned (no request opens it), carry the REAL server
+ * slot_id as the only scheduling authority, send ONLY patient-entered
+ * fields, and settle through the SAME F1-F9 lifecycle discipline the
+ * drawer actions use. Bands never synthesize datetimes from pixels. */
+
+function threeSlotWeek() {
+  return [
+    slotFixture({ slot_id: "s1", start_datetime: "2026-08-24T13:00:00Z",
+      end_datetime: "2026-08-24T13:30:00Z" }),
+    slotFixture({ slot_id: "s2", start_datetime: "2026-08-24T13:30:00Z",
+      end_datetime: "2026-08-24T14:00:00Z" }),
+    slotFixture({ slot_id: "s3", start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T14:30:00Z" })
+  ];
+}
+
+function openBookingFor(f, slots) {
+  queueWeek(f, slots, []);
+  openCalendar(f);
+  return flush().then(() => {
+    bandsIn(columns(f.doc)[0])[0].trigger("click");
+  });
+}
+
+function fillBooking(f, overrides) {
+  const values = Object.assign({
+    "calendar-book-name": "Kevin Alvarado",
+    "calendar-book-phone": "516-555-1234"
+  }, overrides || {});
+  for (const id of Object.keys(values)) {
+    f.doc._elements[id].value = values[id];
+  }
+}
+
+function submitBooking(f) {
+  f.doc._elements["calendar-book-submit"].trigger("click");
+}
+
+function timeButtons(f) {
+  return f.doc._elements["calendar-book-times"].children;
+}
+
+test("booking: an Open band click opens the panel from loaded data with NO request", async () => {
+  const f = makePages();
+  await openBookingFor(f, threeSlotWeek());
+  assertEqual(f.doc._elements["calendar-book"].hidden, false,
+    "the booking panel opened");
+  assertEqual(timeButtons(f).length, 3,
+    "one time choice per REAL underlying slot");
+  assertEqual(f.doc._elements["calendar-book-times-note"].textContent,
+    "Choose a time:", "a multi-slot band asks the office to choose");
+  assertEqual(f.data.totalCalls(), 2,
+    "opening the panel issued NO request beyond the original week read");
+});
+
+test("booking: the band model retains the real underlying slot rows (pure)", () => {
+  const f = makePages();
+  const H = f.calendarHelpers;
+  const entries = H.collectEntries(scheduleBody(threeSlotWeek()),
+    appointmentsBody([]), TZ);
+  const bands = H.consolidateBands(entries);
+  assertEqual(bands.length, 1, "three adjacent slots consolidate to one band");
+  assertEqual(bands[0].slotCount, 3, "the count survives (frozen behavior)");
+  assertEqual(bands[0].slots.map((s) => s.slot_id).join(","), "s1,s2,s3",
+    "the AUTHORITATIVE rows themselves survive consolidation");
+});
+
+test("booking: a single-slot band skips Choose Time and books the real slot_id", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "only-slot" })]);
+  assertEqual(f.doc._elements["calendar-book"].hidden, false, "panel open");
+  assertEqual(timeButtons(f).length, 0, "no Choose Time step for one slot");
+  assert(f.doc._elements["calendar-book-when"].textContent !== "",
+    "the chosen time is echoed in office-local wording");
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture()]);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1, "exactly one POST");
+  assertEqual(f.data.calls.bookScheduleSlot[0].slotId, "only-slot",
+    "the REAL server slot_id was the booking authority");
+});
+
+test("booking: choosing a time carries the real slot_id of THAT time", async () => {
+  const f = makePages();
+  await openBookingFor(f, threeSlotWeek());
+  timeButtons(f)[1].trigger("click");   /* the 13:30Z slot: s2 */
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.data.calls.bookScheduleSlot[0].slotId, "s2",
+    "the chosen time button carried its own authoritative slot_id");
+});
+
+test("booking: the body carries ONLY the patient-entered fields", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(JSON.stringify(f.data.calls.bookScheduleSlot[0].fields),
+    JSON.stringify({ patient_name: "Kevin Alvarado",
+      patient_phone: "516-555-1234" }),
+    "blank optionals are OMITTED; no tenant/status/source/urgency/datetime");
+});
+
+test("booking: filled optionals ride along; server-owned keys never appear", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, {
+    "calendar-book-email": " kevin@example.test ",
+    "calendar-book-patient-type": "new",
+    "calendar-book-reason": "implant consultation"
+  });
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  const fields = f.data.calls.bookScheduleSlot[0].fields;
+  assertEqual(JSON.stringify(Object.keys(fields).sort()),
+    JSON.stringify(["new_or_returning", "patient_email", "patient_name",
+      "patient_phone", "reason"]),
+    "exactly the five patient-entered keys, nothing server-owned");
+  assertEqual(fields.patient_email, "kevin@example.test", "values trimmed");
+});
+
+test("booking: held and blocked bands are inert", async () => {
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ slot_id: "h1", status: "held",
+      start_datetime: "2026-08-24T13:00:00Z",
+      end_datetime: "2026-08-24T13:30:00Z" }),
+    slotFixture({ slot_id: "b1", status: "blocked",
+      start_datetime: "2026-08-24T15:00:00Z",
+      end_datetime: "2026-08-24T15:30:00Z" })
+  ], []);
+  openCalendar(f);
+  await flush();
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 2, "both non-open bands rendered");
+  for (const band of bands) {
+    assertEqual(band.tagName, "DIV",
+      "a non-open band is a plain region, not a control");
+    band.trigger("click");
+  }
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "no panel opened from a held or blocked band");
+  assertEqual(f.data.totalCalls(), 2, "and no request was made");
+});
+
+test("booking: an Open band renders as a real activatable control", async () => {
+  const f = makePages();
+  await openBookingFor(f, threeSlotWeek());
+  assertEqual(bandsIn(columns(f.doc)[0])[0].tagName, "BUTTON",
+    "the Open band is keyboard-activatable");
+});
+
+test("booking: submit without a chosen time asks for one and sends nothing", async () => {
+  const f = makePages();
+  await openBookingFor(f, threeSlotWeek());
+  fillBooking(f);
+  submitBooking(f);
+  await flush();
+  assertEqual(f.doc._elements["calendar-book-feedback"].textContent,
+    "Choose a time:", "the office is asked to choose");
+  assertEqual(f.data.calls.bookScheduleSlot.length, 0, "nothing was sent");
+});
+
+test("booking: blank required fields never leave the browser", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-name": "   " });
+  submitBooking(f);
+  await flush();
+  assertEqual(f.doc._elements["calendar-book-feedback"].textContent,
+    "Patient name and phone are required.",
+    "the required-field precheck speaks plainly");
+  assertEqual(f.data.calls.bookScheduleSlot.length, 0, "no request was made");
+});
+
+test("booking: success closes the panel and refreshes through the guarded read", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  /* The settle refresh: the slot is now booked and an appointment exists. */
+  queueWeek(f, [], [appointmentFixture({ source: "portal_staff",
+    notification_outcome: "pending" })]);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "the panel closed on the authoritative refresh");
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "Appointment booked.", "the honest outcome survives the re-render");
+  assertEqual(f.data.totalCalls(), 5,
+    "one POST plus exactly one combined authoritative re-read");
+  assertEqual(blocksIn(columns(f.doc)[0]).length, 1,
+    "the new appointment renders from the refreshed truth");
+});
+
+test("booking: a 409 shows honest wording and refreshes (F5)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: false, state: "conflict" });
+  queueWeek(f, [slotFixture({ slot_id: "s1", status: "held" })], []);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book"].hidden, true, "panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "That time is no longer available. Showing the latest calendar.",
+    "honest conflict wording, never success");
+  assertEqual(f.data.totalCalls(), 5, "the truth was re-read");
+});
+
+test("booking: a 404 shows not-found wording and refreshes (F5)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: false, state: "not_found" });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "That time could not be found. Showing the latest calendar.",
+    "a vanished slot is reported honestly");
+  assertEqual(f.data.totalCalls(), 5, "and the truth was re-read");
+});
+
+test("booking: an ambiguous transport outcome refreshes and never claims failure (F7)", async () => {
+  for (const state of ["unavailable", "invalid_response"]) {
+    const f = makePages();
+    await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+    fillBooking(f);
+    f.data.queue("bookScheduleSlot", { ok: false, state });
+    queueWeek(f, [], []);
+    submitBooking(f);
+    await flush(); await flush();
+    const message = f.doc._elements["calendar-state"].textContent;
+    assert(message.indexOf("did not confirm") !== -1,
+      state + ": the wording admits uncertainty");
+    assert(message.toLowerCase().indexOf("fail") === -1,
+      state + ": failure is never claimed with certainty - the POST may " +
+      "have committed");
+    assertEqual(f.data.totalCalls(), 5, state + ": the truth was re-read");
+  }
+});
+
+test("booking: a bad_request keeps the form open with its typed values (F7 no-effect)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-name": "Kevin Alvarado" });
+  f.data.queue("bookScheduleSlot", { ok: false, state: "bad_request" });
+  /* Deliberately NO week queued: a refresh here would be an unscripted
+   * call and fail the test - a proven no-op re-reads nothing. */
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book"].hidden, false,
+    "the form survives a proven no-op");
+  assertEqual(f.doc._elements["calendar-book-name"].value, "Kevin Alvarado",
+    "typed values survive");
+  assertEqual(f.doc._elements["calendar-book-feedback"].textContent,
+    "The portal could not accept those patient details. Please review them and try again.",
+    "the rejection is stated inline");
+  assertEqual(f.doc._elements["calendar-book-submit"].disabled, false,
+    "the controls are usable again");
+  assertEqual(f.data.totalCalls(), 3, "no refresh followed a proven no-op");
+});
+
+test("booking: duplicate submit while in flight is suppressed (F4)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  submitBooking(f);   /* second click while the first is in flight */
+  await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1,
+    "the duplicate submit never became a second POST");
+  assertEqual(f.doc._elements["calendar-book-submit"].disabled, true,
+    "the controls are visibly locked while in flight");
+  queueWeek(f, [], []);
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book"].hidden, true, "then settled");
+});
+
+test("booking: session loss during a booking wipes and hands back (F9)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: false, state: "unauthorized" });
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.sessionLost.length, 1, "the sign-in flow was handed back");
+  assertEqual(f.doc._elements["calendar-book-name"].value, "",
+    "typed patient details were WIPED, not merely hidden");
+  assertEqual(f.doc._elements["calendar-book"].hidden, true, "panel gone");
+});
+
+test("booking: completing after page re-entry corrects the stale page (F1)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  await flush();
+  /* Re-entry: the office leaves and returns; the re-entry read may have
+   * been answered BEFORE the booking committed. */
+  queueWeek(f, [slotFixture({ slot_id: "s1" })], []);
+  openCalendar(f);
+  await flush();
+  /* The booking now commits: the visible page is stale and must be
+   * corrected by ONE authoritative re-read - with no feedback, because
+   * that attempt's UI context is gone. */
+  queueWeek(f, [], [appointmentFixture()]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+  assertEqual(f.data.totalCalls(), 7,
+    "open(2) + POST(1) + re-entry read(2) + correcting read(2)");
+  assertEqual(f.doc._elements["calendar-state"].textContent, "",
+    "an older attempt writes no feedback after re-entry");
+});
+
+test("booking: resolving while ANOTHER page is shown does no background work (F3)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  await flush();
+  f.data.queue("getDashboard", { ok: true, data: { total_conversations: 0,
+    total_leads: 0, urgent_leads: 0, recent_leads: [] } });
+  f.doc._elements["nav-dashboard"].trigger("click");
+  await flush();
+  const callsBefore = f.data.totalCalls();
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "no calendar read fired behind the page the office is actually using");
+});
+
+test("booking: opening the drawer closes the booking panel and vice versa", async () => {
+  const f = makePages();
+  queueWeek(f, threeSlotWeek(), [appointmentFixture()]);
+  openCalendar(f);
+  await flush();
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, false, "booking open");
+  openDrawerFor(f, 0);
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "opening details closed the booking panel");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false, "drawer open");
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "opening the booking panel closed the drawer");
+  assertEqual(f.doc._elements["calendar-book"].hidden, false, "booking open");
+});
+
+test("booking: week navigation closes and WIPES the panel", async () => {
+  const f = makePages();
+  await openBookingFor(f, threeSlotWeek());
+  fillBooking(f);
+  queueWeek(f, [], []);
+  f.doc._elements["calendar-prev"].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-book"].hidden, true, "panel closed");
+  assertEqual(f.doc._elements["calendar-book-name"].value, "",
+    "typed patient details never survive leaving the week");
+});
+
+test("booking: reset/sign-out wipes typed patient details", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.pages.reset();
+  assertEqual(f.doc._elements["calendar-book-name"].value, "",
+    "no patient detail lingers behind the login view");
+  assertEqual(f.doc._elements["calendar-book"].hidden, true, "panel gone");
+});
+
+test("booking: a settled mutation still in flight refuses a new panel (F6)", async () => {
+  const f = makePages();
+  queueWeek(f, threeSlotWeek(), [appointmentFixture({ status: "pending" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  await flush();
+  f.data.queue("confirmAppointment", { ok: true, data: {} });
+  const settleRead = f.data.queueDeferred("getSchedule");
+  f.data.queue("getAppointments",
+    { ok: true, data: appointmentsBody([appointmentFixture()]) });
+  actionButton(f.doc, "Confirm").trigger("click");
+  await flush(); await flush();
+  /* The authoritative refresh is still in flight: the calendar is frozen. */
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "no booking panel opens while authoritative state is in flight");
+  settleRead.resolve({ ok: true, data: scheduleBody(threeSlotWeek()) });
+  await flush(); await flush();
+});
+
+test("booking: ownership - a full booking cycle uses only the existing owners", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f);
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture()]);
+  submitBooking(f);
+  await flush(); await flush();
+  const used = Object.keys(f.data.calls)
+    .filter((name) => f.data.calls[name].length > 0).sort();
+  assertEqual(JSON.stringify(used),
+    JSON.stringify(["bookScheduleSlot", "getAppointments", "getSchedule"]),
+    "the one new data method plus the two frozen reads - nothing else");
+});
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 3 v1.0.1 F1: booking-wide in-flight ownership        */
+/* ------------------------------------------------------------------ */
+/* Per-slot ownership alone let a SECOND staff booking start for a
+ * DIFFERENT slot while the first POST was unresolved - and two
+ * different-slot bookings can both legitimately commit server-side,
+ * which no later refresh can undo. At most ONE receptionist booking may
+ * be in flight from this surface at a time, whatever the slot_id. */
+
+function twoBandWeek() {
+  /* Two NON-adjacent open slots, so consolidation yields TWO bands. */
+  return [
+    slotFixture({ slot_id: "slot-a", start_datetime: "2026-08-24T13:00:00Z",
+      end_datetime: "2026-08-24T13:30:00Z" }),
+    slotFixture({ slot_id: "slot-b", start_datetime: "2026-08-24T19:00:00Z",
+      end_datetime: "2026-08-24T19:30:00Z" })
+  ];
+}
+
+test("booking F1: a DIFFERENT-slot booking cannot start while one is in flight", async () => {
+  const f = makePages();
+  queueWeek(f, twoBandWeek(), []);
+  openCalendar(f);
+  await flush();
+  const bands = bandsIn(columns(f.doc)[0]);
+  assertEqual(bands.length, 2, "two separate Open bands rendered");
+  bands[0].trigger("click");            /* open Slot A */
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1, "A is in flight");
+
+  /* While A is unresolved, activate the OTHER Open band. */
+  bands[1].trigger("click");
+  assertEqual(f.doc._elements["calendar-book-name"].value, "Kevin Alvarado",
+    "the in-flight surface was NOT wiped or re-armed for Slot B");
+  submitBooking(f);                     /* try to book B anyway */
+  await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1,
+    "a second booking POST can NEVER start while one is unresolved");
+
+  /* A settles and releases its ownership; B then books normally. */
+  queueWeek(f, [twoBandWeek()[1]], [appointmentFixture()]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+  bandsIn(columns(f.doc)[0])[0].trigger("click");   /* the surviving band */
+  fillBooking(f, { "calendar-book-name": "Rosa Delgado" });
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture()]);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 2,
+    "after settle-and-release, the next booking proceeds normally");
+  assertEqual(f.data.calls.bookScheduleSlot[1].slotId, "slot-b",
+    "and it carries Slot B's own authoritative id");
+});
+
+test("booking F1: re-entry while a booking is unresolved cannot start another (F4 principle)", async () => {
+  const f = makePages();
+  queueWeek(f, twoBandWeek(), []);
+  openCalendar(f);
+  await flush();
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  await flush();
+
+  /* Page re-entry: a real network request does not cease to exist. */
+  queueWeek(f, twoBandWeek(), []);
+  openCalendar(f);
+  await flush();
+  bandsIn(columns(f.doc)[0])[1].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "no booking surface opens behind the unresolved request");
+  submitBooking(f);
+  await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1,
+    "re-entry never launders a second in-flight booking");
+
+  /* A commits after re-entry: the stale page is corrected (F1) and the
+   * ownership is released, so a booking can start again. */
+  queueWeek(f, twoBandWeek(), [appointmentFixture()]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+  bandsIn(columns(f.doc)[0])[1].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, false,
+    "after the owning request settled, the panel opens normally");
+});
+
+test("booking F1: Close during flight wipes for privacy but does NOT release ownership", async () => {
+  const f = makePages();
+  queueWeek(f, twoBandWeek(), []);
+  openCalendar(f);
+  await flush();
+  const bands = bandsIn(columns(f.doc)[0]);
+  bands[0].trigger("click");
+  fillBooking(f);
+  const deferred = f.data.queueDeferred("bookScheduleSlot");
+  submitBooking(f);
+  await flush();
+  f.doc._elements["calendar-book-close"].trigger("click");
+  assertEqual(f.doc._elements["calendar-book-name"].value, "",
+    "Close stays usable and wipes the patient details (privacy)");
+  bands[1].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "but closing released NOTHING: no other band may open a surface");
+  submitBooking(f);
+  await flush();
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1,
+    "and no second booking can start until the owning request settles");
+  queueWeek(f, twoBandWeek(), [appointmentFixture()]);
+  deferred.resolve({ ok: true, data: {} });
+  await flush(); await flush();
+});

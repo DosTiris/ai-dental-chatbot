@@ -266,6 +266,50 @@
                  aria-live="polite"></p>
             </div>
           </aside>
+          <!-- PHASE 3A Slice 3: receptionist booking panel. Opened by an
+               Open availability band and populated ENTIRELY from slot rows
+               the week read already returned, so opening it issues no
+               request. The chosen time is a real server slot_id - pixels
+               never become datetimes - and the form carries ONLY
+               patient-entered fields: tenant, status, source, provider,
+               service, datetime and urgency are all server-owned. No
+               patient or office notification is sent. It reuses the drawer
+               frame classes wholesale (one panel framework, not two). -->
+          <aside id="calendar-book" class="portal-calendar-drawer"
+                 aria-label="Book appointment" hidden>
+            <div class="portal-calendar-drawer-head">
+              <h3 id="calendar-book-title"
+                  class="portal-calendar-drawer-title">Book appointment</h3>
+              <button id="calendar-book-close"
+                      class="portal-button portal-button-secondary"
+                      type="button">Close</button>
+            </div>
+            <p id="calendar-book-times-note" class="portal-muted"></p>
+            <div id="calendar-book-times" class="portal-book-times"></div>
+            <p id="calendar-book-when" class="portal-muted"></p>
+            <label class="portal-label" for="calendar-book-name">Patient name</label>
+            <input class="portal-input" id="calendar-book-name" type="text"
+                   autocomplete="off">
+            <label class="portal-label" for="calendar-book-phone">Patient phone</label>
+            <input class="portal-input" id="calendar-book-phone" type="tel"
+                   autocomplete="off">
+            <label class="portal-label" for="calendar-book-email">Email (optional)</label>
+            <input class="portal-input" id="calendar-book-email" type="email"
+                   autocomplete="off">
+            <label class="portal-label" for="calendar-book-patient-type">New or returning (optional)</label>
+            <select class="portal-input" id="calendar-book-patient-type">
+              <option value="">Not stated</option>
+              <option value="new">New patient</option>
+              <option value="returning">Returning patient</option>
+            </select>
+            <label class="portal-label" for="calendar-book-reason">Reason (optional)</label>
+            <input class="portal-input" id="calendar-book-reason" type="text"
+                   autocomplete="off">
+            <button id="calendar-book-submit" class="portal-button"
+                    type="button">Book appointment</button>
+            <p id="calendar-book-feedback" class="portal-muted"
+               aria-live="polite"></p>
+          </aside>
         </div>
       </section>
 

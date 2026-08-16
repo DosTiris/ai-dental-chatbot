@@ -839,6 +839,25 @@
             "/block-all-open",
           undefined, isValidBlockAllOpenBody);
       },
+      /* PHASE 3A Slice 3 - POST /portal/schedule/slots/<id>/book: book ONE
+       * authoritative slot for a patient the office is speaking with. The
+       * path derives from the ONE schedule literal with a URI-encoded slot
+       * id segment (no new endpoint literal), and slot_id is the ONLY
+       * scheduling authority the browser supplies. The body is passed
+       * VERBATIM and carries only the patient-entered fields the caller
+       * built - never a tenant, status, source, provider, service,
+       * datetime, or urgency value: all of those are server-owned, and the
+       * backend's strict model rejects any undeclared key with 422. The
+       * success body is the SAME exact-key appointment shape the P5-A
+       * actions return, judged by the SAME validator (one contract, one
+       * output-boundary owner - a leaked extra field fails the whole body
+       * closed as invalid_response). */
+      bookScheduleSlot: function (slotId, fields) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/slots/" + encodeURIComponent(String(slotId)) +
+            "/book",
+          fields, isValidAppointmentActionBody);
+      },
       /* P4-B - GET /portal/schedule/recurring: the office's recurring config
        * (weekly hours + slot_minutes + closures) and the opaque token. */
       getRecurringSchedule: function () {

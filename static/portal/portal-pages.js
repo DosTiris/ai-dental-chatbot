@@ -103,7 +103,24 @@
      * control group where the drawer needs a sentence. */
     calendar_drawer_no_actions:
       "No actions are available for this appointment.",
-    calendar_drawer_untitled: "Appointment"
+    calendar_drawer_untitled: "Appointment",
+    /* PHASE 3A Slice 3: receptionist booking from an Open band.
+     * Deliberately NOT prefixed schedule_* (that vocabulary is separately
+     * audited) and carrying NO channel claim of any kind: no patient or
+     * office notification is sent by a staff booking, so none is promised.
+     * booking_uncertain deliberately never claims failure: a response lost
+     * in transport can arrive AFTER the booking committed (Rule 16). */
+    booking_choose_time: "Choose a time:",
+    booking_fields_required: "Patient name and phone are required.",
+    booking_success: "Appointment booked.",
+    booking_conflict:
+      "That time is no longer available. Showing the latest calendar.",
+    booking_slot_gone:
+      "That time could not be found. Showing the latest calendar.",
+    booking_rejected:
+      "The portal could not accept those patient details. Please review them and try again.",
+    booking_uncertain:
+      "The portal did not confirm whether the booking went through. Showing the latest calendar - please check it before trying again."
   };
 
   /* ------------------------------------------------------------------ */
@@ -472,6 +489,28 @@
       /* A settled mutation message that must survive the authoritative
        * re-render which immediately follows it. */
       pendingFeedback: "",
+      /* PHASE 3A Slice 3 - booking panel state. bookSlots holds REFERENCES
+       * to slot rows the week read already returned (never fetched
+       * separately, never derived from pixels); bookSelectedId is the ONE
+       * server slot id the office chose. Both are UI state scoped to one
+       * panel and are wiped with it. */
+      bookSlots: [],
+      bookSelectedId: null,
+      /* v1.0.1 F1 - the BOOKING-WIDE in-flight owner: the unique token of
+       * the ONE receptionist booking POST currently unresolved, or null.
+       * Per-slot ownership alone let a SECOND booking start for a
+       * DIFFERENT slot while the first was still in flight - and two
+       * different-slot bookings can both legitimately commit server-side,
+       * which no later refresh can undo. So at most ONE staff booking may
+       * be in flight from this surface at a time, whatever the slot_id.
+       * It follows the F4 principle exactly: page re-entry does not make
+       * a real network request cease to exist, so re-entry does NOT clear
+       * it; only the promise holding the token may release it, and only
+       * resetContent (sign-out / independent reset - the one event
+       * entitled to declare the request irrelevant) may wipe it. It is
+       * DEDICATED state: Confirm/Cancel actionBusy semantics are
+       * untouched. */
+      bookBusy: null,
       lifecycle: 0
     };
 
@@ -579,6 +618,13 @@
          * of any kind and cannot mutate anything. */
         onAppointmentSelect: function (appointment) {
           openCalendarDrawer(appointment);
+        },
+        /* SLICE 3: an Open band click hands over the ALREADY-LOADED
+         * authoritative slot rows. Everything after the click - choose
+         * time, the form, the mutation lifecycle - is owned HERE; the
+         * renderer stays pure. */
+        onOpenBandSelect: function (slots) {
+          openCalendarBook(slots);
         }
       });
     }
@@ -1941,6 +1987,10 @@
      * right-hand drawer (desktop) or a near-full-screen sheet (mobile).
      */
     function openCalendarDrawer(appointment) {
+      /* SLICE 3: one surface at a time - opening appointment details
+       * closes (and wipes) the booking panel, exactly as opening the
+       * booking panel closes the drawer. */
+      closeCalendarBook();
       if (!appointment || calendarRenderer === null) {
         return;
       }
@@ -2022,6 +2072,288 @@
       }
       return null;
     }
+
+    /* ---------------------------------------------------------------- */
+    /* PHASE 3A Slice 3: receptionist booking from an Open band          */
+    /* ---------------------------------------------------------------- */
+
+    /* Every input the booking panel owns. Named once so open/close/disable
+     * can never drift apart on which fields exist (Rule 4). */
+    var BOOK_INPUT_IDS = ["calendar-book-name", "calendar-book-phone",
+      "calendar-book-email", "calendar-book-patient-type",
+      "calendar-book-reason"];
+
+    function setBookControlsDisabled(disabled) {
+      for (var i = 0; i < BOOK_INPUT_IDS.length; i++) {
+        var el = byId(BOOK_INPUT_IDS[i]);
+        if (el) { el.disabled = disabled; }
+      }
+      var submitEl = byId("calendar-book-submit");
+      if (submitEl) { submitEl.disabled = disabled; }
+      var times = byId("calendar-book-times");
+      if (times) {
+        for (var t = 0; t < times.children.length; t++) {
+          times.children[t].disabled = disabled;
+        }
+      }
+    }
+
+    /*
+     * Purpose (Slice 3): close AND WIPE the booking panel. The form carries
+     * patient contact details, so - exactly the drawer rule - it is never
+     * merely hidden: every typed value, the chosen slot, the rendered time
+     * choices and the feedback are all cleared, so nothing can linger on a
+     * shared front-desk computer or leak into the next booking.
+     */
+    function closeCalendarBook() {
+      calendar.bookSlots = [];
+      calendar.bookSelectedId = null;
+      var panel = byId("calendar-book");
+      if (panel) { panel.hidden = true; }
+      for (var i = 0; i < BOOK_INPUT_IDS.length; i++) {
+        var el = byId(BOOK_INPUT_IDS[i]);
+        if (el) { el.value = ""; el.disabled = false; }
+      }
+      var submitEl = byId("calendar-book-submit");
+      if (submitEl) { submitEl.disabled = false; }
+      var times = byId("calendar-book-times");
+      if (times) { clearChildren(times); }
+      setCalendarText("calendar-book-times-note", "");
+      setCalendarText("calendar-book-when", "");
+      setCalendarText("calendar-book-feedback", "");
+    }
+
+    /* Render one time-choice button per underlying slot (only when there is
+     * a real choice to make). Each button is bound to its OWN authoritative
+     * slot row, so the selection can never be positional guesswork. */
+    function renderBookTimes() {
+      var times = byId("calendar-book-times");
+      if (!times) { return; }
+      clearChildren(times);
+      if (calendar.bookSlots.length < 2) { return; }
+      for (var i = 0; i < calendar.bookSlots.length; i++) {
+        (function (slot) {
+          var button = doc.createElement("button");
+          button.type = "button";
+          button.className = "portal-button portal-button-secondary " +
+            "portal-book-time" +
+            (calendar.bookSelectedId === slot.slot_id
+              ? " portal-book-time-selected" : "");
+          /* The portal's ONE formatter, in the OFFICE timezone the agreed
+           * envelopes declared - never the device timezone. */
+          button.textContent = formatInTimeZone(slot.start_datetime,
+            calendar.timezoneName);
+          button.addEventListener("click", function () {
+            selectBookSlot(slot);
+          });
+          times.appendChild(button);
+        }(calendar.bookSlots[i]));
+      }
+    }
+
+    /* Adopt ONE chosen slot: its server slot_id becomes the ONLY scheduling
+     * authority the browser will send, and its full office-local time is
+     * echoed so the receptionist confirms a real instant, never a pixel. */
+    function selectBookSlot(slot) {
+      calendar.bookSelectedId = slot.slot_id;
+      setCalendarText("calendar-book-when",
+        formatInTimeZone(slot.start_datetime, calendar.timezoneName));
+      renderBookTimes();
+    }
+
+    /*
+     * Purpose (Slice 3): open the booking panel for the REAL slots behind a
+     * clicked Open band. The rows are references into the week read's
+     * authoritative response, so opening this panel issues NO request (the
+     * drawer rule). Exactly one slot skips Choose Time; several render one
+     * time button each. Pixels never become datetimes: the only scheduling
+     * value that will ever leave the browser is a server slot_id.
+     */
+    function openCalendarBook(slots) {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight - not even a panel */
+      }
+      if (calendar.bookBusy !== null) {
+        /* v1.0.1 F1: a receptionist booking POST is still unresolved.
+         * Opening (and thereby wiping/re-arming) the shared form for a
+         * DIFFERENT slot would allow a second booking to start before the
+         * first settles - and both could commit. The panel opens again
+         * the moment the owning request settles. */
+        return;
+      }
+      if (!Array.isArray(slots) || slots.length === 0) {
+        return;
+      }
+      /* One surface at a time: the drawer and the booking panel are
+       * mutually exclusive over the same grid. */
+      closeCalendarDrawer();
+      closeCalendarBook();
+      /* ISO-8601 UTC instants compare lexicographically in time order, so
+       * the choices always read earliest-first whatever the band held. */
+      var ordered = slots.slice().sort(function (left, right) {
+        if (left.start_datetime < right.start_datetime) { return -1; }
+        if (left.start_datetime > right.start_datetime) { return 1; }
+        return 0;
+      });
+      calendar.bookSlots = ordered;
+      var panel = byId("calendar-book");
+      if (panel) { panel.hidden = false; }
+      if (ordered.length === 1) {
+        selectBookSlot(ordered[0]);
+      } else {
+        setCalendarText("calendar-book-times-note",
+          MESSAGES.booking_choose_time);
+        renderBookTimes();
+      }
+    }
+
+    /*
+     * Purpose (Slice 3): submit ONE receptionist booking through the
+     * EXISTING data owner, under the SAME mutation discipline the drawer
+     * actions use: F4 token ownership (v1.0.1: held in the DEDICATED
+     * booking-wide calendar.bookBusy owner - at most ONE staff booking in
+     * flight from this surface, whatever the slot_id - minted by the same
+     * calendar.actionSeq source), a
+     * new mutation generation so any week read issued before now can never
+     * roll the calendar back, lifecycle/wipe capture, and F6 settling. The
+     * body carries ONLY the patient-entered fields - blank optionals are
+     * omitted entirely - and the required-field precheck mirrors the
+     * schedule page's day_required convention: a plainly incomplete form
+     * never leaves the browser, while everything beyond presence stays the
+     * backend's judgment (no booking-policy duplication).
+     */
+    function onCalendarBookSubmit() {
+      if (calendar.settling > 0) {
+        return; /* F6: a settled mutation is still awaiting the truth */
+      }
+      var slotId = calendar.bookSelectedId;
+      if (slotId === null) {
+        setCalendarText("calendar-book-feedback",
+          MESSAGES.booking_choose_time);
+        return;
+      }
+      if (calendar.bookBusy !== null) {
+        /* v1.0.1 F1: at most ONE staff booking may be in flight from this
+         * surface, whatever the slot_id - a duplicate submit for the SAME
+         * slot and a fresh submit for a DIFFERENT slot are refused by the
+         * same booking-wide owner. */
+        return;
+      }
+      var nameEl = byId("calendar-book-name");
+      var phoneEl = byId("calendar-book-phone");
+      var name = String(nameEl ? nameEl.value : "").trim();
+      var phone = String(phoneEl ? phoneEl.value : "").trim();
+      if (name === "" || phone === "") {
+        setCalendarText("calendar-book-feedback",
+          MESSAGES.booking_fields_required);
+        return;
+      }
+      var fields = { patient_name: name, patient_phone: phone };
+      var emailEl = byId("calendar-book-email");
+      var email = String(emailEl ? emailEl.value : "").trim();
+      if (email !== "") { fields.patient_email = email; }
+      var typeEl = byId("calendar-book-patient-type");
+      var patientType = String(typeEl ? typeEl.value : "").trim();
+      if (patientType !== "") { fields.new_or_returning = patientType; }
+      var reasonEl = byId("calendar-book-reason");
+      var reason = String(reasonEl ? reasonEl.value : "").trim();
+      if (reason !== "") { fields.reason = reason; }
+
+      /* v1.0.1 F1: acquire the booking-wide ownership BEFORE the request
+       * is issued. The token still comes from the ONE monotonic actionSeq
+       * source (never reset, so tokens can never collide), but it is held
+       * in the DEDICATED bookBusy owner - Confirm/Cancel per-appointment
+       * ownership is a different capability and keeps its own semantics. */
+      var token = ++calendar.actionSeq;
+      calendar.bookBusy = token;
+      calendar.generation += 1;   /* a mutation begins */
+      var lifecycleAtIssue = calendar.lifecycle;
+      var generationAtIssue = calendar.generation;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      setBookControlsDisabled(true);
+      setCalendarText("calendar-book-feedback", "");
+      data.bookScheduleSlot(slotId, fields).then(function (outcome) {
+        /* Only the promise that OWNS the booking token may release it: a
+         * stale completion after a reset (which wiped bookBusy to null)
+         * or after a wholesale wipe-and-reacquire can never free a newer
+         * owner (the F4 release rule, applied to the dedicated owner). */
+        if (calendar.bookBusy === token) {
+          calendar.bookBusy = null;
+        }
+        settleCalendarBooking(lifecycleAtIssue, generationAtIssue,
+          wipeEpochAtIssue, outcome, slotId);
+      });
+    }
+
+    /*
+     * Purpose (Slice 3): THE settling point for a receptionist booking -
+     * the settleCalendarMutation guard order applied to the booking panel.
+     *   1. WIPED while in flight: render nothing, fire nothing.
+     *   2. Session loss (the F9 classifier): wipe and hand back.
+     *   3. NOT ON SCREEN (F3): nothing now - openCalendar reads
+     *      authoritatively on the next visit, so a committed booking is
+     *      seen then. No background work behind another page.
+     *   4. STALE lifecycle or generation (F1/F5): a superseded attempt
+     *      never writes feedback, but when the server MAY have moved (F7:
+     *      success, conflict, disappearance, or ANY ambiguous transport
+     *      outcome - a response can be lost AFTER the booking committed)
+     *      the visible calendar is corrected with one authoritative
+     *      re-read. A proven no-op is simply dropped.
+     *   5. Current, PROVEN no-op (bad_request - the strict transport model
+     *      or the patient-data owner refused before any transition, the F7
+     *      allow-list): nothing on the server is stale, so the form stays
+     *      open with its typed values and says so inline. If the panel was
+     *      closed meanwhile, there is nothing to correct and nothing to say.
+     *   6. Every other current outcome closes the panel, records the honest
+     *      message, and re-reads the week authoritatively: success because
+     *      the calendar must show the new appointment; conflict / gone /
+     *      ambiguity because the truth may have moved - and a lost response
+     *      may still mean a committed booking, so failure is NEVER claimed
+     *      with certainty (Rule 16).
+     */
+    function settleCalendarBooking(lifecycleAtIssue, generationAtIssue,
+        wipeEpochAtIssue, outcome, slotId) {
+      if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+        return; /* wiped by reset/sign-out - stay wiped */
+      }
+      if (isSessionLossOutcome(outcome)) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (!calendar.active) {
+        return; /* F3: no background work behind another page */
+      }
+      if (lifecycleAtIssue !== calendar.lifecycle ||
+          generationAtIssue !== calendar.generation) {
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        }
+        return;
+      }
+      if (!outcome.ok && outcome.state === "bad_request") {
+        if (calendar.bookSelectedId === slotId) {
+          setBookControlsDisabled(false);
+          setCalendarText("calendar-book-feedback",
+            MESSAGES.booking_rejected);
+        }
+        return;
+      }
+      var message;
+      if (outcome.ok) {
+        message = MESSAGES.booking_success;
+      } else if (outcome.state === "conflict") {
+        message = MESSAGES.booking_conflict;
+      } else if (outcome.state === "not_found") {
+        message = MESSAGES.booking_slot_gone;
+      } else {
+        message = MESSAGES.booking_uncertain;
+      }
+      closeCalendarBook();
+      calendar.pendingFeedback = message;
+      startCalendarSettleRefresh();
+    }
+
 
     /*
      * Purpose (P2-A): the FIRST click of Cancel arms THIS appointment (no
@@ -2272,6 +2604,10 @@
       calendar.settling = 0;
       var reopenId = calendar.selectedId;
       closeCalendarDrawer();
+      /* SLICE 3: a re-render replaces the week's rows, so any open booking
+       * panel would hold references to detached inventory. Close and wipe
+       * it; a settled booking's message survives through pendingFeedback. */
+      closeCalendarBook();
 
       var result = calendarRenderer.buildGrid(scheduleBody, appointmentsBody);
       if (!result.ok) {
@@ -2434,6 +2770,7 @@
         return;
       }
       closeCalendarDrawer();
+      closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       calendar.weekOffset -= 1;
       loadCalendar();
     }
@@ -2443,6 +2780,7 @@
         return;
       }
       closeCalendarDrawer();
+      closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       calendar.weekOffset += 1;
       loadCalendar();
     }
@@ -2478,6 +2816,7 @@
       calendar.currentEnd = null;
       calendar.timezoneName = "";
       closeCalendarDrawer();
+      closeCalendarBook();   /* Slice 3: re-entry is a page reset */
       setCalendarNavDisabled(true);
       setCalendarText("calendar-range-label", "");
       setCalendarText("calendar-timezone-note", "");
@@ -2758,6 +3097,9 @@
       calendar.wipeEpoch += 1;   /* F1: a WIPE, not a re-entry */
       calendar.active = false;
       calendar.actionBusy = {};
+      /* v1.0.1 F1: the wipe is the ONE event entitled to declare the
+       * in-flight booking request irrelevant (the actionBusy rule). */
+      calendar.bookBusy = null;
       calendar.armed = {};
       calendar.pendingFeedback = "";
       calendar.settling = 0;
@@ -2775,6 +3117,9 @@
       /* The detail panel carries patient contact details: close AND wipe
        * it, never merely hide it. */
       closeCalendarDrawer();
+      /* SLICE 3: the booking panel carries TYPED patient contact details -
+       * the same rule applies, with the same urgency. */
+      closeCalendarBook();
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -3071,6 +3416,16 @@
       var calDrawerClose = byId("calendar-drawer-close");
       if (calDrawerClose) {
         calDrawerClose.addEventListener("click", closeCalendarDrawer);
+      }
+      /* PHASE 3A Slice 3: booking panel controls (null-tolerant, so frozen
+       * suites whose fake DOM predates these ids construct unchanged). */
+      var calBookSubmit = byId("calendar-book-submit");
+      if (calBookSubmit) {
+        calBookSubmit.addEventListener("click", onCalendarBookSubmit);
+      }
+      var calBookClose = byId("calendar-book-close");
+      if (calBookClose) {
+        calBookClose.addEventListener("click", closeCalendarBook);
       }
     }
 

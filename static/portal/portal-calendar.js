@@ -393,8 +393,12 @@
       if (!slot || !isVisibleSlotStatus(slot.status)) {
         continue;
       }
+      /* SLICE 3: the slot ROW rides along as the entry payload (exactly
+       * what appointment entries already do), so a consolidated band can
+       * hand back the REAL underlying inventory. Presentation still
+       * decides nothing: the row is the server's, unmodified. */
       var slotEntry = positionEntry(KIND_SLOT, slot.status,
-        slot.start_datetime, slot.end_datetime, timeZone, null);
+        slot.start_datetime, slot.end_datetime, timeZone, slot);
       if (slotEntry !== null) {
         entries.push(slotEntry);
       }
@@ -508,9 +512,12 @@
    * instead of sixteen stacked cards.
    *
    * PRESENTATION ONLY: nothing is merged away. Each band carries the exact
-   * COUNT of authoritative slot rows it covers, the individual rows remain
-   * the backend's own inventory, and the Schedule page continues to show
-   * them one by one with their per-slot controls.
+   * COUNT of authoritative slot rows it covers - and, SLICE 3, the rows
+   * THEMSELVES (references to the server response, never copies or
+   * derivations), so a caller can act on the real inventory behind the
+   * band. The individual rows remain the backend's own inventory, and the
+   * Schedule page continues to show them one by one with their per-slot
+   * controls.
    *
    * Bands merge only when the statuses match and the next entry starts at or
    * before the current band's end (contiguous or overlapping). Pure.
@@ -532,6 +539,7 @@
           last.endMinutes = entry.endMinutes;
         }
         last.slotCount += 1;
+        last.slots.push(entry.payload);
         continue;
       }
       bands.push({
@@ -539,6 +547,8 @@
         startMinutes: entry.startMinutes,
         endMinutes: entry.endMinutes,
         slotCount: 1,
+        /* The authoritative rows behind this band (SLICE 3). */
+        slots: [entry.payload],
         caption: entry.caption
       });
     }
@@ -673,6 +683,12 @@
    *   onAppointmentSelect      READ-ONLY callback invoked with the already
    *                            loaded appointment row when a block is
    *                            activated. No request is made here or there.
+   *   onOpenBandSelect         SLICE 3 callback invoked with the ALREADY
+   *                            loaded authoritative slot rows behind an
+   *                            Open (available) band when it is activated.
+   *                            This module makes no request and applies no
+   *                            policy; everything after the click is the
+   *                            orchestrator's.
    * Returns: { buildGrid, appointmentDetailFields }
    * Failures: throws on a wiring mistake by the caller (a programming error,
    *   never a user-facing state).
@@ -684,7 +700,8 @@
         typeof deps.appointmentStatusLabel !== "function" ||
         typeof deps.notificationOutcomeLabel !== "function" ||
         typeof deps.shiftLocalDay !== "function" ||
-        typeof deps.onAppointmentSelect !== "function") {
+        typeof deps.onAppointmentSelect !== "function" ||
+        typeof deps.onOpenBandSelect !== "function") {
       throw new Error("createMiaPortalCalendar: missing injected dependencies");
     }
     var doc = deps.documentRef;
@@ -694,6 +711,7 @@
     var notificationOutcomeLabel = deps.notificationOutcomeLabel;
     var shiftLocalDay = deps.shiftLocalDay;
     var onAppointmentSelect = deps.onAppointmentSelect;
+    var onOpenBandSelect = deps.onOpenBandSelect;
 
     /* Render-local registry of the appointment blocks in the CURRENT grid,
      * paired with the row each one was drawn from. It exists only so the
@@ -716,7 +734,17 @@
      * (accessibility). The slot count states plainly how many authoritative
      * rows the band covers - it is a summary of them, not a replacement. */
     function buildBand(band, firstHour) {
-      var element = doc.createElement("div");
+      /* SLICE 3: an OPEN (available) band is the receptionist's entry point
+       * to booking, so it renders as a real button and, when activated,
+       * hands the ALREADY-LOADED authoritative slot rows to the injected
+       * callback. Held and blocked bands stay inert regions. Nothing is
+       * decided here: which rows exist came from the server response, and
+       * everything after the click is owned by the orchestrator. */
+      var interactive = band.status === "available";
+      var element = doc.createElement(interactive ? "button" : "div");
+      if (interactive) {
+        element.type = "button";
+      }
       element.className = "portal-calendar-band portal-calendar-band-" +
         band.status;
       var box = geometryFor(band.startMinutes, band.endMinutes, firstHour);
@@ -734,6 +762,14 @@
       element.title = band.slotCount > 1
         ? label + " from " + band.caption + " (" + band.slotCount + " slots)"
         : label + " from " + band.caption;
+      if (interactive) {
+        element.addEventListener("click", function () {
+          /* A defensive copy: the caller may sort or annotate for display,
+           * and the band model must stay exactly what consolidation
+           * computed from the server rows. */
+          onOpenBandSelect(band.slots.slice());
+        });
+      }
       return element;
     }
 

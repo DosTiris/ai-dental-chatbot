@@ -540,6 +540,35 @@ body {
   overflow: hidden;
 }
 
+/* PHASE 3A Slice 3: an available band is now a real <button> so it is
+ * keyboard-activatable. These resets keep it looking exactly like the
+ * inert band regions; the availability colours come from the existing
+ * band-status rules unchanged. v1.0.1 F2: this reset is (0,1,1) specific,
+ * so the availability treatment below carries BOTH band classes (0,2,0)
+ * and keeps its thin left accent - the reset may never win over it. */
+button.portal-calendar-band {
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The choose-time strip inside the booking panel. */
+.portal-book-times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.portal-book-time-selected {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
 .portal-calendar-band-label {
   display: block;
   padding: 1px 5px;
@@ -558,7 +587,7 @@ body {
    still unmistakably "this time is open", but it recedes behind the
    appointment blocks. Held and blocked keep their approved treatments,
    because those two say something the office must not miss. */
-.portal-calendar-band-available {
+.portal-calendar-band.portal-calendar-band-available {
   background: rgba(22, 163, 74, 0.05);
   border-left: 2px solid rgba(22, 163, 74, 0.30);
   border-radius: 3px;

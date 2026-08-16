@@ -385,6 +385,16 @@ test("audit: Open availability keeps a subdued background treatment", () => {
 /* Time-axis refinement: the detail panel is READ-ONLY. No action control
  * and no unauthorized action vocabulary may appear on the calendar surface
  * until a separate contract approves one. */
+/* PHASE 3A SLICE 3 - DELIBERATE closed-list amendment (the same growth
+ * mechanism the endpoint allow-list documents): the owner-approved Slice 3
+ * contract authorizes EXACTLY ONE new capability on this surface - booking
+ * an Open band's real slot through the receptionist panel - so the wording
+ * "Book appointment" and the panel's two markup buttons (close + submit)
+ * are now authorized. Everything else stays forbidden: reschedule and
+ * duplicate remain out of scope, and appointment CREATION language beyond
+ * booking an EXISTING authoritative slot remains banned, because the
+ * browser must never imply it can invent inventory. The control count
+ * stays an EXACT pin so an unreviewed button can never slip in. */
 test("audit: the calendar surface renders no unauthorized action vocabulary", () => {
   const html = read("index.html");
   const start = html.indexOf('id="page-calendar"');
@@ -393,15 +403,60 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
   assert(end !== -1, "page-calendar section must be closed");
   const section = html.slice(start, end);
   for (const word of ["Reschedule", "Duplicate", "New appointment",
-    "Book ", "Create appointment"]) {
+    "Create appointment"]) {
     assert(section.indexOf(word) === -1,
       "page-calendar markup must not offer " + word);
   }
-  /* The only controls in the section are week navigation, refresh and the
-   * panel close: four buttons, none of them a mutation. */
+  /* Exactly the six reviewed controls: week prev/next, refresh, the drawer
+   * close, and the booking panel's close + submit. Still an exact pin. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 4,
-    "expected exactly the four read-only controls, found " + buttons.length);
+  assert(buttons.length === 6,
+    "expected exactly the six reviewed controls, found " + buttons.length);
+});
+
+/* PHASE 3A Slice 3: the booking submit must go through the existing data
+ * owner; the pure renderer may not even name the method; and the booking
+ * path must stay DERIVED from the one schedule literal - no new endpoint
+ * literal may appear (the multi-segment shape would evade the single-
+ * segment allow-list regex above, so it is pinned here explicitly). */
+/* v1.0.1 F2: turning the Open band into a <button> added a (0,1,1) reset
+ * with border: 0, which silently out-specified the (0,1,0) availability
+ * rule and erased the approved thin left accent. The availability
+ * treatment now carries BOTH band classes (0,2,0), so the reset can never
+ * win again. This bite pins the pair: the strengthened selector must
+ * exist WITH its accent, and the button reset must keep border: 0 (a
+ * bare UA button border on the calendar canvas is its own regression). */
+test("audit: the Open band keeps the approved availability accent as a button", () => {
+  const css = read("portal.css");
+  const availableAt = css.indexOf(".portal-calendar-band.portal-calendar-band-available {");
+  assert(availableAt !== -1,
+    "the availability treatment must carry BOTH band classes (0,2,0)");
+  const availableRule = css.slice(availableAt, css.indexOf("}", availableAt));
+  assert(availableRule.indexOf("border-left: 2px solid") !== -1,
+    "the thin left accent must survive on the strengthened selector");
+  const resetAt = css.indexOf("button.portal-calendar-band {");
+  assert(resetAt !== -1, "the button reset must exist");
+  const resetRule = css.slice(resetAt, css.indexOf("}", resetAt));
+  assert(resetRule.indexOf("border: 0") !== -1,
+    "the reset must keep suppressing the UA button border");
+  assert(resetRule.indexOf("border-left") === -1,
+    "the accent has ONE owner - the availability rule, never the reset");
+  const weakAvailable = css.indexOf("\n.portal-calendar-band-available {");
+  assert(weakAvailable === -1,
+    "no weak (0,1,0) availability rule may return and lose to the reset");
+});
+
+test("audit: the booking panel reuses the existing data owner", () => {
+  const pages = read("portal-pages.js");
+  assert(pages.indexOf("data.bookScheduleSlot") !== -1,
+    "booking must go through the existing data owner");
+  const calendarSource = read("portal-calendar.js");
+  assert(calendarSource.indexOf("bookScheduleSlot") === -1,
+    "portal-calendar.js must not name the booking method");
+  const dataFile = read("portal-data.js");
+  const bookingLiterals = dataFile.match(/"\/portal\/schedule\/slots[a-z/-]*"/g) || [];
+  assertEqual(bookingLiterals.length, 0,
+    "the booking path is concatenated from the one schedule literal");
 });
 
 /* Visual Calendar Phase 1: the grid never advertises a slot as bookable.
