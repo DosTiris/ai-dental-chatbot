@@ -130,7 +130,21 @@
     note_gone:
       "That appointment could not be found. Showing the latest calendar.",
     note_uncertain:
-      "The portal did not confirm whether the note was saved. Showing the latest calendar - please check it before trying again."
+      "The portal did not confirm whether the note was saved. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4C: cancelled-appointment recovery + rescheduling.
+     * Office-facing, closed set. No channel claim of any kind: restoring
+     * or moving an appointment sends NO patient or office notification, so
+     * none is promised. The conflict sentence reuses the booking panel's
+     * honest shape ("that time is no longer available") because a refused
+     * restore/reschedule is the SAME real-world fact. */
+    appointment_restored: "Appointment restored.",
+    appointment_rescheduled: "Appointment time changed.",
+    reschedule_choose_time: "Choose a new time:",
+    reschedule_none_available:
+      "No open times in the week shown. Open the calendar week you want and try again, or publish availability first.",
+    reschedule_time_required: "Choose a new time first.",
+    reschedule_conflict:
+      "That time is no longer available for this appointment. Showing the latest calendar."
   };
 
   /* ------------------------------------------------------------------ */
@@ -171,6 +185,32 @@
     if (status === "pending") { return ["confirm", "cancel"]; }
     if (status === "confirmed") { return ["cancel"]; }
     return [];
+  }
+
+  /*
+   * Purpose (SLICE 4C): the CALENDAR DRAWER's action set for one
+   * appointment status. It DELEGATES to the frozen appointmentActionsFor
+   * matrix above (which the Appointments page continues to consume
+   * unchanged - that surface gains nothing here) and adds only the two
+   * Slice 4C capabilities the drawer now offers:
+   *   pending / confirmed  -> + "reschedule"  (Change time)
+   *   cancelled            -> "restore" + "reschedule"
+   *                           (Restore original time / Choose another time)
+   * Terminal completed / no_show and unknown statuses still offer nothing
+   * (fail safe - never a speculative button). The SERVER lifecycle owner
+   * remains authoritative; these stay UI hints mirroring its allow-lists.
+   * Pure.
+   */
+  function calendarDrawerActionsFor(status) {
+    var actions = appointmentActionsFor(status).slice();
+    if (status === "pending" || status === "confirmed") {
+      actions.push("reschedule");
+    }
+    if (status === "cancelled") {
+      actions.push("restore");
+      actions.push("reschedule");
+    }
+    return actions;
   }
 
   /*
@@ -527,6 +567,23 @@
        * booking); released only by the owning promise; wiped only by
        * resetContent. */
       noteBusy: null,
+      /* SLICE 4C - reschedule picker state. scheduleSlots holds REFERENCES
+       * to the slot rows of the LAST consistency-checked week read (the
+       * same authoritative response the grid was built from - never
+       * fetched separately, never derived from pixels); adopted only by
+       * renderCalendarPage on an agreed range, cleared on a range refusal
+       * and by resetContent. rescheduleOpen / rescheduleSelectedId /
+       * rescheduleMode are UI state scoped to the drawer's slot picker and
+       * are wiped with the drawer. The chosen value is always a REAL
+       * server slot_id. rescheduleMode (v1.0.1 mode pin F1) records WHICH
+       * command the user issued when the picker opened - "active" (Change
+       * time) or "cancelled" (Choose another time) - so Save submits that
+       * SAME server command; the backend independently enforces the legal
+       * starting status under its row lock and refuses a stale command. */
+      scheduleSlots: [],
+      rescheduleOpen: false,
+      rescheduleSelectedId: null,
+      rescheduleMode: null,
       lifecycle: 0
     };
 
@@ -1927,7 +1984,10 @@
       }
       clearChildren(host);
       var appointmentId = appointment.appointment_id;
-      var actions = appointmentActionsFor(appointment.status);
+      /* SLICE 4C: the drawer offers the calendar action set - the frozen
+       * P5-A matrix plus restore / reschedule. The Appointments page keeps
+       * consuming the frozen matrix unchanged. */
+      var actions = calendarDrawerActionsFor(appointment.status);
       if (actions.length === 0) {
         setCalendarText("calendar-drawer-actions-note",
           MESSAGES.calendar_drawer_no_actions);
@@ -1969,6 +2029,245 @@
         buttons.push(cancelBtn);
         host.appendChild(cancelBtn);
       }
+      /* SLICE 4C: Restore original time - a cancelled appointment only.
+       * One click performs the action through the SAME mutation discipline
+       * Confirm uses (token ownership, generation bump, F6 settle): the
+       * BACKEND re-verifies the original slot under its row locks, so a
+       * single click here can never double-book - and the P5-A rule that a
+       * mutation in flight disables EVERY control in this list holds. */
+      if (actions.indexOf("restore") !== -1) {
+        var restoreBtn = doc.createElement("button");
+        restoreBtn.type = "button";
+        restoreBtn.className = "portal-button portal-button-secondary";
+        restoreBtn.textContent = "Restore original time";
+        restoreBtn.disabled = busy;
+        restoreBtn.addEventListener("click", function () {
+          onCalendarAppointmentAction(appointmentId, data.restoreAppointment,
+            buttons, MESSAGES.appointment_restored,
+            MESSAGES.reschedule_conflict);
+        });
+        buttons.push(restoreBtn);
+        host.appendChild(restoreBtn);
+      }
+      /* SLICE 4C: Change time (active) / Choose another time (cancelled).
+       * The click opens the drawer's slot picker - NO request is made here
+       * or there: the choices are the REAL open slot rows of the already
+       * loaded week read, and the only scheduling value that will ever
+       * leave the browser is the chosen server slot_id. */
+      if (actions.indexOf("reschedule") !== -1) {
+        var reschedBtn = doc.createElement("button");
+        reschedBtn.type = "button";
+        reschedBtn.className = "portal-button portal-button-secondary";
+        reschedBtn.textContent = appointment.status === "cancelled"
+          ? "Choose another time" : "Change time";
+        reschedBtn.disabled = busy;
+        reschedBtn.addEventListener("click", function () {
+          /* v1.0.1 (F1): the mode is fixed by the command the user is
+           * issuing HERE - the button they see - never re-derived later. */
+          openCalendarReschedule(appointmentId,
+            appointment.status === "cancelled" ? "cancelled" : "active");
+        });
+        buttons.push(reschedBtn);
+        host.appendChild(reschedBtn);
+      }
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* PHASE 3A Slice 4C: drawer slot picker (Change time / Choose       */
+    /* another time). Authoritative real slots only - no second          */
+    /* availability engine, no typed datetimes, no pixel-derived times.  */
+    /* ---------------------------------------------------------------- */
+
+    /*
+     * Purpose: close AND WIPE the picker (the booking-panel rule). The
+     * selection and rendered time choices are cleared so nothing stale can
+     * be submitted after a drawer close, a re-render, or a reset; the
+     * static Save/Cancel controls are re-enabled for the next open.
+     * No request, no calendar state beyond the picker's own.
+     */
+    function closeCalendarReschedule() {
+      calendar.rescheduleOpen = false;
+      calendar.rescheduleSelectedId = null;
+      calendar.rescheduleMode = null;
+      var section = byId("calendar-drawer-reschedule");
+      if (section) { section.hidden = true; }
+      var times = byId("calendar-drawer-reschedule-times");
+      if (times) { clearChildren(times); }
+      setCalendarText("calendar-drawer-reschedule-note", "");
+      setCalendarText("calendar-drawer-reschedule-when", "");
+      var save = byId("calendar-drawer-reschedule-save");
+      if (save) { save.disabled = false; }
+      var cancelBtn = byId("calendar-drawer-reschedule-cancel");
+      if (cancelBtn) { cancelBtn.disabled = false; }
+    }
+
+    /*
+     * Purpose: the picker's choices - the OPEN (available) slot rows of the
+     * last consistency-checked week read, earliest first. References into
+     * the authoritative response, never copies or derivations; no request
+     * is made and no availability rule is applied here (the server already
+     * produced these rows, and it re-judges the chosen one under lock at
+     * mutation time - a same-day slot that has since started is refused
+     * there, exactly as an Open band click already behaves). Pure read.
+     */
+    function availableRescheduleSlots() {
+      var out = [];
+      for (var i = 0; i < calendar.scheduleSlots.length; i++) {
+        var slot = calendar.scheduleSlots[i];
+        if (slot && slot.status === "available") { out.push(slot); }
+      }
+      /* ISO-8601 UTC instants compare lexicographically in time order. */
+      out.sort(function (left, right) {
+        if (left.start_datetime < right.start_datetime) { return -1; }
+        if (left.start_datetime > right.start_datetime) { return 1; }
+        return 0;
+      });
+      return out;
+    }
+
+    /* Render one time-choice button per open slot (the booking panel's
+     * renderBookTimes pattern): each button is bound to its OWN
+     * authoritative slot row, so the selection can never be positional
+     * guesswork, and the chosen one carries the selected treatment. */
+    function renderRescheduleTimes() {
+      var times = byId("calendar-drawer-reschedule-times");
+      if (!times) { return; }
+      clearChildren(times);
+      var choices = availableRescheduleSlots();
+      for (var i = 0; i < choices.length; i++) {
+        (function (slot) {
+          var button = doc.createElement("button");
+          button.type = "button";
+          button.className = "portal-button portal-button-secondary " +
+            "portal-book-time" +
+            (calendar.rescheduleSelectedId === slot.slot_id
+              ? " portal-book-time-selected" : "");
+          /* The portal's ONE formatter, in the OFFICE timezone the agreed
+           * envelopes declared - never the device timezone. */
+          button.textContent = formatInTimeZone(slot.start_datetime,
+            calendar.timezoneName);
+          button.addEventListener("click", function () {
+            selectRescheduleSlot(slot);
+          });
+          times.appendChild(button);
+        }(choices[i]));
+      }
+    }
+
+    /* Adopt ONE chosen slot: its server slot_id becomes the ONLY
+     * scheduling authority the browser will send, and its full
+     * office-local time is echoed so the receptionist confirms a real
+     * instant, never a pixel (the booking panel's selectBookSlot rule). */
+    function selectRescheduleSlot(slot) {
+      calendar.rescheduleSelectedId = slot.slot_id;
+      setCalendarText("calendar-drawer-reschedule-when",
+        formatInTimeZone(slot.start_datetime, calendar.timezoneName));
+      renderRescheduleTimes();
+    }
+
+    /*
+     * Purpose: open the picker for the appointment the drawer is showing.
+     * No request is made: the choices are the loaded week's open slots. An
+     * empty week states so plainly (and disables Save) instead of offering
+     * an unusable form. Refused while authoritative state is settling or a
+     * mutation owns this appointment - the F6 / actionBusy rules the other
+     * drawer entry points already follow.
+     */
+    function openCalendarReschedule(appointmentId, mode) {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight */
+      }
+      if (calendar.actionBusy[appointmentId] !== undefined) {
+        return; /* a mutation owns this appointment */
+      }
+      if (mode !== "active" && mode !== "cancelled") {
+        return; /* v1.0.1 (F1): no recognizable command, no picker */
+      }
+      closeCalendarReschedule();
+      var section = byId("calendar-drawer-reschedule");
+      if (section) { section.hidden = false; }
+      calendar.rescheduleOpen = true;
+      calendar.rescheduleMode = mode;
+      var choices = availableRescheduleSlots();
+      if (choices.length === 0) {
+        setCalendarText("calendar-drawer-reschedule-note",
+          MESSAGES.reschedule_none_available);
+        var save = byId("calendar-drawer-reschedule-save");
+        if (save) { save.disabled = true; }
+        return;
+      }
+      setCalendarText("calendar-drawer-reschedule-note",
+        MESSAGES.reschedule_choose_time);
+      renderRescheduleTimes();
+    }
+
+    /*
+     * Purpose: submit the ONE atomic reschedule for the appointment the
+     * drawer is showing, carrying ONLY the chosen real server slot_id -
+     * through the EXISTING onCalendarAppointmentAction discipline, so
+     * duplicate-submit suppression (actionBusy token ownership), the
+     * mutation generation bump, lifecycle/wipe capture, control disabling,
+     * and F6 settling are all inherited verbatim rather than re-invented.
+     * A cancelled appointment is restored AND moved by the backend in the
+     * same transaction (one request - never restore-then-reschedule).
+     * External effects: one POST via the data owner; then the existing
+     * combined authoritative re-read on settle.
+     */
+    function onCalendarRescheduleSave() {
+      if (calendar.selected === null || calendar.selectedId === null) {
+        return; /* no drawer context - nothing to move */
+      }
+      var appointmentId = calendar.selectedId;
+      if (calendar.settling > 0) {
+        return; /* F6 */
+      }
+      if (calendar.actionBusy[appointmentId] !== undefined) {
+        return; /* duplicate submit while in flight */
+      }
+      var slotId = calendar.rescheduleSelectedId;
+      if (slotId === null) {
+        setCalendarText("calendar-drawer-feedback",
+          MESSAGES.reschedule_time_required);
+        return;
+      }
+      var mode = calendar.rescheduleMode;
+      if (mode !== "active" && mode !== "cancelled") {
+        return; /* v1.0.1 (F1): the picker was wiped - no command to send */
+      }
+      /* EVERY interactive control of the drawer - the action buttons the
+       * builder rendered, the picker's time choices, and the picker's own
+       * Save/Cancel - is disabled together for the flight (the P5-A "one
+       * button list" rule, extended over the picker). */
+      var controls = [];
+      var actionsHost = byId("calendar-drawer-actions");
+      if (actionsHost) {
+        for (var i = 0; i < actionsHost.children.length; i++) {
+          controls.push(actionsHost.children[i]);
+        }
+      }
+      var times = byId("calendar-drawer-reschedule-times");
+      if (times) {
+        for (var t = 0; t < times.children.length; t++) {
+          controls.push(times.children[t]);
+        }
+      }
+      var save = byId("calendar-drawer-reschedule-save");
+      if (save) { controls.push(save); }
+      var cancelBtn = byId("calendar-drawer-reschedule-cancel");
+      if (cancelBtn) { controls.push(cancelBtn); }
+      /* v1.0.1 (F1): submit the SAME server command the user issued when
+       * the picker opened. "Choose another time" (cancelled) and "Change
+       * time" (active) are DIFFERENT server-owned routes; the browser
+       * never sends a status and the backend re-checks the legal starting
+       * status under its own row lock - a stale command is refused there,
+       * surfaces as the conflict outcome, and settles with the
+       * authoritative re-read. */
+      onCalendarAppointmentAction(appointmentId, function (id) {
+        return mode === "cancelled"
+          ? data.restoreAppointmentToSlot(id, slotId)
+          : data.rescheduleAppointment(id, slotId);
+      }, controls, MESSAGES.appointment_rescheduled,
+        MESSAGES.reschedule_conflict);
     }
 
     /*
@@ -2046,6 +2345,10 @@
         }
       }
       renderCalendarDrawerActions(appointment);
+      /* SLICE 4C: every drawer open starts with the picker closed - a
+       * fresh open always renders fresh authoritative choices on demand,
+       * never a leftover selection from another appointment. */
+      closeCalendarReschedule();
       /* SLICE 4B2: every drawer open resets the note editor and renders
        * the display state from the row the week read returned. */
       closeCalendarNoteEditor();
@@ -2065,6 +2368,9 @@
      * disarms any pending cancel: an arm never survives the panel it was
      * made in, so re-opening always requires the two clicks again. */
     function closeCalendarDrawer() {
+      /* SLICE 4C: the picker's selection dies with the drawer it belongs
+       * to - a late response can never submit against a closed panel. */
+      closeCalendarReschedule();
       /* SLICE 4B2: the note editor may hold TYPED office-private text -
        * close AND wipe it with the drawer (the booking-panel rule), and
        * clear the displayed note + feedback so nothing lingers hidden. */
@@ -2651,7 +2957,7 @@
      * combined Schedule + Appointments GET on settle.
      */
     function onCalendarAppointmentAction(appointmentId, call, buttons,
-        successMessage) {
+        successMessage, conflictMessage) {
       if (calendar.settling > 0) {
         /* F6: a settled mutation is still waiting for authoritative state.
          * Acting now would act against a row the Calendar already knows is
@@ -2683,7 +2989,8 @@
           delete calendar.actionBusy[appointmentId];
         }
         settleCalendarMutation(lifecycleAtIssue, generationAtIssue,
-          wipeEpochAtIssue, outcome, successMessage, appointmentId);
+          wipeEpochAtIssue, outcome, successMessage, appointmentId,
+          conflictMessage);
       });
     }
 
@@ -2783,7 +3090,8 @@
     }
 
     function settleCalendarMutation(lifecycleAtIssue, generationAtIssue,
-        wipeEpochAtIssue, outcome, successMessage, appointmentId) {
+        wipeEpochAtIssue, outcome, successMessage, appointmentId,
+        conflictMessage) {
       if (wipeEpochAtIssue !== calendar.wipeEpoch) {
         return; /* wiped by reset/sign-out - stay wiped, fire nothing */
       }
@@ -2824,7 +3132,11 @@
       if (!outcome.ok) {
         var message;
         if (outcome.state === "conflict") {
-          message = MESSAGES.appointment_action_conflict;
+          /* SLICE 4C: an action may declare its own honest conflict
+           * sentence (a refused reschedule is "that time is taken", not
+           * "the appointment changed"); absent one, the frozen P5-A
+           * wording applies unchanged. */
+          message = conflictMessage || MESSAGES.appointment_action_conflict;
         } else if (outcome.state === "not_found") {
           message = MESSAGES.appointment_gone;
         } else {
@@ -2873,6 +3185,8 @@
         calendar.currentStart = null;
         calendar.currentEnd = null;
         calendar.timezoneName = "";
+        /* SLICE 4C: a refused pair is never a picker source either. */
+        calendar.scheduleSlots = [];
         setCalendarText("calendar-range-label", "");
         setCalendarText("calendar-timezone-note", "");
         setCalendarText("calendar-state", MESSAGES.calendar_range_mismatch);
@@ -2884,6 +3198,10 @@
       calendar.currentStart = scheduleBody.start_day;
       calendar.currentEnd = scheduleBody.end_day;
       calendar.timezoneName = scheduleBody.timezone_name;
+      /* SLICE 4C: the picker's choices are exactly this agreed week read's
+       * slot rows - the same authoritative inventory the grid painted. */
+      calendar.scheduleSlots = Array.isArray(scheduleBody.slots)
+        ? scheduleBody.slots : [];
       if (calendar.weekOffset === 0) {
         calendar.defaultStart = scheduleBody.start_day;
       }
@@ -3370,6 +3688,13 @@
        * settles it first). actionSeq stays monotonic and is never reset,
        * so old and new tokens can never collide. */
       calendar.noteBusy = null;
+      /* SLICE 4C: the wipe clears the picker source and selection - no
+       * office's open-slot times may linger behind the login view, and a
+       * post-reset drawer can never submit a pre-reset slot id. */
+      calendar.scheduleSlots = [];
+      calendar.rescheduleOpen = false;
+      calendar.rescheduleSelectedId = null;
+      calendar.rescheduleMode = null;
       calendar.armed = {};
       calendar.pendingFeedback = "";
       calendar.settling = 0;
@@ -3697,6 +4022,16 @@
       if (calBookClose) {
         calBookClose.addEventListener("click", closeCalendarBook);
       }
+      /* PHASE 3A Slice 4C: drawer reschedule picker controls
+       * (null-tolerant, the frozen-suite construction rule). */
+      var reschedSave = byId("calendar-drawer-reschedule-save");
+      if (reschedSave) {
+        reschedSave.addEventListener("click", onCalendarRescheduleSave);
+      }
+      var reschedCancel = byId("calendar-drawer-reschedule-cancel");
+      if (reschedCancel) {
+        reschedCancel.addEventListener("click", closeCalendarReschedule);
+      }
       /* PHASE 3A Slice 4B2: drawer note controls (null-tolerant). */
       var noteEdit = byId("calendar-drawer-note-edit");
       if (noteEdit) {
@@ -3735,7 +4070,10 @@
     shiftLocalDay: shiftLocalDay,
     appointmentsRangeLabel: appointmentsRangeLabel,
     scheduleSlotStatusLabel: scheduleSlotStatusLabel,
-    appointmentActionsFor: appointmentActionsFor
+    appointmentActionsFor: appointmentActionsFor,
+    /* SLICE 4C: the calendar drawer's action set, exported so the suite
+     * can pin its terminal-offers-nothing rule as a pure function. */
+    calendarDrawerActionsFor: calendarDrawerActionsFor
   };
 
   /* Export for both the browser (window) and the Node test harness. */

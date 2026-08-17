@@ -272,3 +272,271 @@ def portal_set_internal_note(
         raise HTTPException(status_code=422,
                             detail=INVALID_INTERNAL_NOTE_DETAIL)
     return _success_view(result, _NOTE_SUCCESS_REASONS)
+
+
+# --------------------------------------------------------------------------
+# PHASE 3A Slice 4C: cancelled-appointment recovery and rescheduling
+# --------------------------------------------------------------------------
+# Transport/auth wiring ONLY, exactly the confirm/cancel convention above:
+# the verified identity alone binds the tenant, the ENTIRE lifecycle rule
+# lives in the single lifecycle owner (booking_service.restore_appointment /
+# reschedule_appointment), and a success is projected through the ONE shared
+# leak-safe builder. The browser's ONLY scheduling authority on this surface
+# is a real server slot_id (reschedule); restore accepts NO body at all -
+# the original slot is read off the locked appointment row by the owner.
+
+# The slot-refusal wording is IMPORTED from the staff-booking surface rather
+# than restated (Rule 3): the target of a reschedule is judged by the SAME
+# service rules as a staff booking, so the office reads the SAME sentences
+# for the SAME slot states and the portal never learns a second vocabulary.
+from app.routes.portal_staff_booking import (
+    SLOT_NOT_FOUND_DETAIL,
+    SLOT_TAKEN_DETAIL,
+    SLOT_BLOCKED_DETAIL,
+    SLOT_STARTED_DETAIL,
+)
+
+_RESTORE_SUCCESS_REASONS = frozenset({"ok"})
+_RESCHEDULE_SUCCESS_REASONS = frozenset({"ok"})
+
+# Route-level refusal wording, each in one reviewable place (Rule 4).
+# RESTORE deliberately collapses every original-slot refusal - taken,
+# blocked, started, and a vanished slot row - into ONE sentence: the office
+# clicked "Restore original time", not a picked slot, so the only actionable
+# fact is that the original time cannot be had and Choose Another Time is
+# the path forward. Distinct wording would leak slot-state distinctions
+# (including that a patient conversation holds it) with no office benefit.
+RESTORE_SLOT_UNAVAILABLE_DETAIL = "Original time is no longer available."
+CONVERSATION_CONFLICT_DETAIL = (
+    "The patient's chat conversation already has an active appointment."
+)
+SAME_SLOT_DETAIL = "Appointment already has this time."
+
+
+class RescheduleRequest(BaseModel):
+    """The reschedule body - STRICT transport (the StaffBookingRequest /
+    InternalNoteUpdateRequest convention): any undeclared field is rejected
+    with 422 by pydantic itself, so a smuggled datetime / client_id /
+    status / source / provider / service / urgency / patient key can never
+    be silently ignored. Exactly ONE field is declared: the chosen REAL
+    server slot_id - the only scheduling authority this surface accepts.
+    Pixels and typed datetimes never become booking times."""
+    model_config = ConfigDict(extra="forbid")
+    slot_id: uuid.UUID
+
+
+@router.post("/appointments/{appointment_id}/restore",
+             response_model=PortalAppointmentView)
+def portal_restore_appointment(
+    appointment_id: uuid.UUID,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose (Slice 4C): the authenticated office restores ONE of its own
+        CANCELLED appointments back onto its ORIGINAL slot - the patient
+        called back. The rule - including the mandatory re-verification of
+        the original slot under the row locks - lives in the single
+        lifecycle owner (booking_service.restore_appointment); this route
+        only binds the tenant, injects the instant, and maps the
+        BookingResult onto HTTP.
+    Inputs: the Authorization header (dependency) and the appointment id
+        path segment. NO body: the original slot is server-known, so the
+        browser supplies no scheduling value of any kind. The verified
+        identity ALONE selects the tenant (Rule 15).
+    Returns: PortalAppointmentView (the leak-safe shared projection) - the
+        restored appointment, now confirmed.
+    Database effects: exactly the lifecycle owner's one transaction (on the
+        allowed path: appointment cancelled -> confirmed with times
+        re-synced AND its original slot -> booked, committed together;
+        every refusal rolls back). No notification is sent on any path.
+    Possible failures: 404 "Appointment not found." for an unknown or
+        cross-tenant id (indistinguishable, Rule 15); 409 with the owner's
+        sanitized status word when the appointment is not cancelled; 409
+        RESTORE_SLOT_UNAVAILABLE_DETAIL when the original slot is taken,
+        actively held, blocked, vanished, or already started - restoration
+        refuses cleanly and the office chooses another time instead; 409
+        CONVERSATION_CONFLICT_DETAIL when the originating chat conversation
+        already has another active appointment; 401/503 as on every portal
+        endpoint; HTTPException(500) fail-closed for an unexpected result
+        (guardrails G1/G2); database errors propagate (Rule 16).
+    """
+    result = booking_service.restore_appointment(
+        db, identity.client.id, appointment_id,
+        now_utc=datetime.now(ZoneInfo("UTC")),
+    )
+    if result.reason == "appointment_missing":
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    if result.reason == "not_restorable":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Appointment is {result.detail} and cannot be restored.",
+        )
+    if result.reason == "conversation_conflict":
+        raise HTTPException(status_code=409,
+                            detail=CONVERSATION_CONFLICT_DETAIL)
+    if result.reason in ("slot_missing", "slot_taken", "slot_blocked",
+                         "slot_started"):
+        raise HTTPException(status_code=409,
+                            detail=RESTORE_SLOT_UNAVAILABLE_DETAIL)
+    return _success_view(result, _RESTORE_SUCCESS_REASONS)
+
+
+@router.post("/appointments/{appointment_id}/reschedule",
+             response_model=PortalAppointmentView)
+def portal_reschedule_appointment(
+    appointment_id: uuid.UUID,
+    payload: RescheduleRequest,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose (Slice 4C, v1.0.1 mode pin F1): "Change time" - the
+        authenticated office moves ONE of its own ACTIVE (pending or
+        confirmed) appointments onto a DIFFERENT real authoritative slot
+        in ONE atomic operation, preserving its status. This route is the
+        ACTIVE-ONLY command: an appointment found CANCELLED under the row
+        lock (a concurrent Cancel committed first) is refused 409 with
+        the sanitized status word, so a stale Change-time request can
+        NEVER resurrect a cancellation. Cancelled recovery is a DIFFERENT
+        server-owned command with its own route (/restore-to-slot below);
+        the browser never chooses a transition by sending a status - it
+        only picks which command it issues. Both routes delegate into the
+        SAME lifecycle engine (booking_service._move_appointment_to_slot)
+        so the mode pin, deterministic slot lock order, the target
+        re-check under lock, the guarded old-slot release, and the
+        unique-index arbitration exist exactly once (Rule 3).
+    Inputs: the Authorization header (dependency), the appointment id path
+        segment, and the STRICT one-field body carrying only the chosen
+        real target slot_id. The verified identity ALONE selects the
+        tenant; the strict model rejects any smuggled datetime / tenant /
+        status / source / provider / service / urgency / patient key with
+        422 before any code here runs.
+    Returns: PortalAppointmentView - the moved appointment at its new time.
+        Patient fields, source, urgency, and internal_note are unchanged by
+        construction (the owner never touches them).
+    Database effects: exactly the lifecycle owner's one transaction; every
+        refusal rolls back with the appointment exactly where - and as -
+        it was (no partial move, ever).
+    Possible failures: 404 "Appointment not found." (unknown/cross-tenant
+        appointment); 404 SLOT_NOT_FOUND_DETAIL (unknown/cross-tenant
+        target slot - the staff-booking wording verbatim); 409 with the
+        owner's sanitized status word for a cancelled/completed/no_show/
+        malformed appointment (the v1.0.1 mode pin - "cancelled" here
+        means a stale Change-time request was refused, never converted);
+        409 SAME_SLOT_DETAIL when an active appointment's
+        target is its current slot; 409 SLOT_TAKEN_DETAIL /
+        SLOT_BLOCKED_DETAIL / SLOT_STARTED_DETAIL when the target is not
+        bookable (the staff-booking sentences verbatim - same rules, same
+        words); 409 CONVERSATION_CONFLICT_DETAIL retained as a defensive
+        mapping (the active mode cannot produce it; mapped rather than
+        500 if it ever appears);
+        422 for a malformed/extra-field body (pydantic, nothing mutated);
+        401/503 as on every portal endpoint; HTTPException(500) fail-closed
+        for an unexpected result (G1/G2); database errors propagate.
+    """
+    result = booking_service.reschedule_appointment(
+        db, identity.client.id, appointment_id, payload.slot_id,
+        now_utc=datetime.now(ZoneInfo("UTC")),
+    )
+    if result.reason == "appointment_missing":
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    if result.reason == "not_reschedulable":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Appointment is {result.detail} "
+                    "and cannot be rescheduled."),
+        )
+    if result.reason == "same_slot":
+        raise HTTPException(status_code=409, detail=SAME_SLOT_DETAIL)
+    if result.reason == "conversation_conflict":
+        raise HTTPException(status_code=409,
+                            detail=CONVERSATION_CONFLICT_DETAIL)
+    if result.reason == "slot_missing":
+        raise HTTPException(status_code=404, detail=SLOT_NOT_FOUND_DETAIL)
+    if result.reason == "slot_taken":
+        raise HTTPException(status_code=409, detail=SLOT_TAKEN_DETAIL)
+    if result.reason == "slot_blocked":
+        raise HTTPException(status_code=409, detail=SLOT_BLOCKED_DETAIL)
+    if result.reason == "slot_started":
+        raise HTTPException(status_code=409, detail=SLOT_STARTED_DETAIL)
+    return _success_view(result, _RESCHEDULE_SUCCESS_REASONS)
+
+
+# v1.0.1 (F1): the cancelled-recovery move is its OWN server-owned command.
+_RESTORE_TO_SLOT_SUCCESS_REASONS = frozenset({"ok"})
+
+
+@router.post("/appointments/{appointment_id}/restore-to-slot",
+             response_model=PortalAppointmentView)
+def portal_restore_appointment_to_slot(
+    appointment_id: uuid.UUID,
+    payload: RescheduleRequest,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose (Slice 4C, v1.0.1 mode pin F1): "Choose another time" - the
+        authenticated office restores ONE of its own CANCELLED
+        appointments AND moves it onto a chosen DIFFERENT real slot in
+        ONE atomic operation, ending CONFIRMED (confirmed_at never
+        written). This route is the CANCELLED-ONLY command: an
+        appointment found NOT cancelled under the row lock (a concurrent
+        Restore Original Time or Confirm committed first) is refused 409
+        with the sanitized status word, so a stale recovery request never
+        silently becomes an ordinary move. The active move has its OWN
+        route (/reschedule above); both delegate into the SAME lifecycle
+        engine (booking_service._move_appointment_to_slot) so locking,
+        slot judgement, unique-index arbitration, and transaction rules
+        exist exactly once (Rule 3).
+    Inputs: the Authorization header (dependency), the appointment id
+        path segment, and the STRICT one-field body carrying only the
+        chosen real target slot_id (the SAME RescheduleRequest model:
+        extra="forbid" rejects every smuggled datetime / tenant / status /
+        source / provider / service / urgency / patient key with 422
+        before any code here runs; the browser owns nothing but which
+        real slot it picked).
+    Returns: PortalAppointmentView - the recovered appointment, CONFIRMED
+        at its new time. Patient fields, source, urgency, internal_note,
+        and confirmed_at are unchanged by construction.
+    Database effects: exactly the lifecycle owner's one transaction;
+        every refusal rolls back with the appointment exactly where - and
+        as - it was (no partial recovery, ever).
+    Possible failures: 404 "Appointment not found." (unknown/cross-tenant
+        appointment); 404 SLOT_NOT_FOUND_DETAIL (unknown/cross-tenant
+        target slot - the staff-booking wording verbatim); 409 with the
+        owner's sanitized status word when the row is not cancelled under
+        the lock (the mode pin refusal - a stale request against a
+        restored, confirmed, or finished row); 409 SLOT_TAKEN_DETAIL /
+        SLOT_BLOCKED_DETAIL / SLOT_STARTED_DETAIL when the target is not
+        bookable (staff-booking sentences verbatim); 409
+        CONVERSATION_CONFLICT_DETAIL when the originating chat
+        conversation already has an active appointment; 422 for a
+        malformed/extra-field body (pydantic, nothing mutated); 401/503
+        as on every portal endpoint; HTTPException(500) fail-closed for
+        an unexpected result (guardrails G1/G2); database errors
+        propagate (Rule 16).
+    """
+    result = booking_service.restore_appointment_to_slot(
+        db, identity.client.id, appointment_id, payload.slot_id,
+        now_utc=datetime.now(ZoneInfo("UTC")),
+    )
+    if result.reason == "appointment_missing":
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+    if result.reason == "not_restorable":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Appointment is {result.detail} and cannot be restored.",
+        )
+    if result.reason == "conversation_conflict":
+        raise HTTPException(status_code=409,
+                            detail=CONVERSATION_CONFLICT_DETAIL)
+    if result.reason == "slot_missing":
+        raise HTTPException(status_code=404, detail=SLOT_NOT_FOUND_DETAIL)
+    if result.reason == "slot_taken":
+        raise HTTPException(status_code=409, detail=SLOT_TAKEN_DETAIL)
+    if result.reason == "slot_blocked":
+        raise HTTPException(status_code=409, detail=SLOT_BLOCKED_DETAIL)
+    if result.reason == "slot_started":
+        raise HTTPException(status_code=409, detail=SLOT_STARTED_DETAIL)
+    return _success_view(result, _RESTORE_TO_SLOT_SUCCESS_REASONS)

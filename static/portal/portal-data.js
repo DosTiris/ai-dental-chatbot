@@ -885,6 +885,59 @@
             "/internal-note",
           { internal_note: internalNote }, isValidAppointmentActionBody);
       },
+      /* SLICE 4C - POST /portal/appointments/<id>/restore: restore ONE
+       * cancelled appointment back onto its ORIGINAL slot. No body is sent:
+       * the original slot is server-known, so the browser supplies no
+       * scheduling value of any kind on this action. The path derives from
+       * the ONE appointments literal with a URI-encoded id segment (no new
+       * endpoint literal), and the success body is the SAME exact-key
+       * appointment shape every action returns, judged by the SAME
+       * validator. A 409 (the backend's refusal for a no-longer-available
+       * original time, a non-cancelled status, or a conversation conflict)
+       * surfaces as the existing "conflict" outcome; the pages settle it
+       * with an authoritative re-read, never optimistic state. */
+      restoreAppointment: function (appointmentId) {
+        return authorizedSend("POST",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/restore",
+          undefined, isValidAppointmentActionBody);
+      },
+      /* SLICE 4C (v1.0.1 mode pin F1) - POST
+       * /portal/appointments/<id>/reschedule: "Change time" - move ONE
+       * ACTIVE (pending/confirmed) appointment onto a DIFFERENT real
+       * authoritative slot in one atomic backend operation. This is the
+       * ACTIVE-ONLY server command: the backend refuses (409) if the row
+       * turns out to be cancelled under its lock, so a stale Change-time
+       * click can never resurrect a concurrent cancellation. Cancelled
+       * recovery is the SEPARATE command below (restoreAppointmentToSlot)
+       * - the browser picks WHICH command it issues and never a status.
+       * The body is EXACTLY one key: the chosen REAL server slot_id - the
+       * only scheduling authority this surface ever sends. Never a
+       * datetime, tenant, status, source, provider, service, urgency, or
+       * patient field: all server-owned, and the backend's strict model
+       * rejects any undeclared key with 422. Same derived path rule, same
+       * exact-key success validation as every other action. */
+      rescheduleAppointment: function (appointmentId, slotId) {
+        return authorizedSend("POST",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/reschedule",
+          { slot_id: slotId }, isValidAppointmentActionBody);
+      },
+      /* SLICE 4C (v1.0.1 mode pin F1) - POST
+       * /portal/appointments/<id>/restore-to-slot: "Choose another time" -
+       * restore ONE CANCELLED appointment AND move it onto the chosen
+       * real slot in one atomic backend operation, ending confirmed.
+       * This is the CANCELLED-ONLY server command: the backend refuses
+       * (409) if the row is no longer cancelled under its lock (someone
+       * restored or confirmed it first), so a stale recovery click never
+       * becomes an ordinary move. Same one-key body, same derived path
+       * rule, same exact-key success validation as reschedule above. */
+      restoreAppointmentToSlot: function (appointmentId, slotId) {
+        return authorizedSend("POST",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/restore-to-slot",
+          { slot_id: slotId }, isValidAppointmentActionBody);
+      },
       /* P4-B - GET /portal/schedule/recurring: the office's recurring config
        * (weekly hours + slot_minutes + closures) and the opaque token. */
       getRecurringSchedule: function () {

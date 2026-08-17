@@ -16,7 +16,7 @@
        asset carries the SAME deterministic token so production can never
        mix old and new UI code (the 4B1 F2 rule, extended). Unmodified
        assets (core, calendar, app) deliberately carry no token. -->
-  <link rel="stylesheet" href="/static/portal/portal.css?v=4b2-internal-note-ui-v1" />
+  <link rel="stylesheet" href="/static/portal/portal.css?v=4c-cancel-recovery-v2" />
 </head>
 <body>
   <main class="portal-wrap">
@@ -295,6 +295,33 @@
             <div class="portal-calendar-drawer-actions">
               <div id="calendar-drawer-actions" class="portal-appt-actions"></div>
               <p id="calendar-drawer-actions-note" class="portal-muted"></p>
+              <!-- SLICE 4C: the Change time / Choose another time picker.
+                   Opened by the drawer's reschedule action and populated
+                   ENTIRELY from the OPEN slot rows the week read already
+                   returned, so opening it issues no request. The chosen
+                   time is a real server slot_id - pixels and typed
+                   datetimes never become booking times - and Save sends
+                   ONE atomic reschedule request (a cancelled appointment
+                   is restored and moved by the backend together). It
+                   reuses the booking panel's time-choice classes wholesale
+                   (one time-picker treatment, not two). No patient or
+                   office notification is sent. -->
+              <div id="calendar-drawer-reschedule" hidden>
+                <p id="calendar-drawer-reschedule-note"
+                   class="portal-muted"></p>
+                <div id="calendar-drawer-reschedule-times"
+                     class="portal-book-times"></div>
+                <p id="calendar-drawer-reschedule-when"
+                   class="portal-muted"></p>
+                <div class="portal-appt-actions">
+                  <button id="calendar-drawer-reschedule-save"
+                          class="portal-button"
+                          type="button">Save new time</button>
+                  <button id="calendar-drawer-reschedule-cancel"
+                          class="portal-button portal-button-secondary"
+                          type="button">Cancel</button>
+                </div>
+              </div>
               <p id="calendar-drawer-feedback" class="portal-muted"
                  aria-live="polite"></p>
             </div>
@@ -480,9 +507,9 @@
        matching contract on first load after deployment. Bump this token
        whenever portal-data.js changes its response contract - the static
        audit pins it so an incompatible change cannot ship without one. -->
-  <script src="/static/portal/portal-data.js?v=4b2-internal-note-ui-v1"></script>
-  <script src="/static/portal/portal-calendar.js"></script>
-  <script src="/static/portal/portal-pages.js?v=4b2-internal-note-ui-v1"></script>
+  <script src="/static/portal/portal-data.js?v=4c-cancel-recovery-v2"></script>
+  <script src="/static/portal/portal-calendar.js?v=4c-cancel-recovery-v2"></script>
+  <script src="/static/portal/portal-pages.js?v=4c-cancel-recovery-v2"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>

@@ -507,6 +507,37 @@
   }
 
   /*
+   * Purpose (SLICE 4C - Bug A): does this history entry share any minute
+   * with an OPEN (available) consolidated band? Half-open on both sides,
+   * exactly the overlapsAnyActive rule. Pure.
+   *
+   * Why it exists: a cancelled ghost paints ABOVE the availability bands
+   * (history layer z1 over the base bands layer), and the ghost is a real
+   * button (pointer-events: auto per the 7496573 hotfix) - so a full-height
+   * ghost sitting over a green Open band swallowed every click meant for
+   * the band, and the office could not book the reusable time underneath.
+   * When THIS predicate is true, the renderer DEMOTES the ghost to the
+   * existing compact history strip (its own thin, deterministic hit target
+   * on the bottom edge) and draws NO full ghost block, so the Open band's
+   * button is reachable everywhere else. Two real controls, two distinct
+   * hit areas - never an invisible overlapping click ambiguity. Held and
+   * blocked bands are deliberately NOT considered: they are inert regions
+   * with no click target for a ghost to steal.
+   */
+  function overlapsAnyAvailableBand(entry, bands) {
+    for (var i = 0; i < bands.length; i++) {
+      if (bands[i].status !== "available") {
+        continue;
+      }
+      if (entry.startMinutes < bands[i].endMinutes &&
+          bands[i].startMinutes < entry.endMinutes) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /*
    * Purpose: consolidate adjacent same-status slot entries into bands, so a
    * full day of thirty-minute openings reads as one calm availability region
    * instead of sixteen stacked cards.
@@ -967,6 +998,14 @@
         return l.startMinutes - r.startMinutes;
       });
       for (var h = 0; h < orderedHistory.length; h++) {
+        /* SLICE 4C (Bug A): a ghost that overlaps an OPEN band is demoted
+         * to the compact strip ONLY (built in the strips layer below), so
+         * the Open band's button keeps a full, deterministic hit area and
+         * the cancelled history stays visible AND clickable on its own
+         * thin strip. Ghosts over non-open time render exactly as before. */
+        if (overlapsAnyAvailableBand(orderedHistory[h], bands)) {
+          continue;
+        }
         historyLayer.appendChild(buildAppointmentBlock(orderedHistory[h],
           window.firstHour));
       }
@@ -988,7 +1027,13 @@
       var stripLayer = doc.createElement("div");
       stripLayer.className = "portal-calendar-history-strips";
       for (var m = 0; m < orderedHistory.length; m++) {
-        if (isHistoryOccluded(orderedHistory[m], activeEntries)) {
+        /* SLICE 4C (Bug A): a strip is drawn for a ghost demoted off an
+         * OPEN band (its only remaining affordance) as well as for the
+         * existing case of a ghost a live appointment rendered unreadable.
+         * The two conditions are OR-ed over ONE loop, so an entry can never
+         * receive two strips. */
+        if (overlapsAnyAvailableBand(orderedHistory[m], bands) ||
+            isHistoryOccluded(orderedHistory[m], activeEntries)) {
           stripLayer.appendChild(buildHistoryStrip(orderedHistory[m],
             window.firstHour));
         }

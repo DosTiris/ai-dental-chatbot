@@ -147,7 +147,11 @@ const PAGE_ELEMENT_IDS = [
   "calendar-book-note",
   "calendar-drawer-note-text", "calendar-drawer-note-edit",
   "calendar-drawer-note-input", "calendar-drawer-note-save",
-  "calendar-drawer-note-cancel", "calendar-drawer-note-feedback"
+  "calendar-drawer-note-cancel", "calendar-drawer-note-feedback",
+  /* PHASE 3A Slice 4C: reschedule picker id contract. */
+  "calendar-drawer-reschedule", "calendar-drawer-reschedule-note",
+  "calendar-drawer-reschedule-times", "calendar-drawer-reschedule-when",
+  "calendar-drawer-reschedule-save", "calendar-drawer-reschedule-cancel"
 ];
 
 function makeDocument() {
@@ -167,7 +171,9 @@ function makeFakeData() {
     "unblockScheduleSlot", "blockAllOpenSlots",
     "confirmAppointment", "cancelAppointment",
     "bookScheduleSlot" /* PHASE 3A Slice 3 */,
-    "setAppointmentInternalNote" /* PHASE 3A Slice 4B2 */];
+    "setAppointmentInternalNote" /* PHASE 3A Slice 4B2 */,
+    "restoreAppointment", "rescheduleAppointment" /* PHASE 3A Slice 4C */,
+    "restoreAppointmentToSlot" /* SLICE 4C v1.0.1 mode pin F1 */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -200,6 +206,11 @@ function makeFakeData() {
       next("bookScheduleSlot", { slotId, fields }),
     setAppointmentInternalNote: (appointmentId, internalNote) =>
       next("setAppointmentInternalNote", { appointmentId, internalNote }),
+    restoreAppointment: (id) => next("restoreAppointment", id),
+    rescheduleAppointment: (appointmentId, slotId) =>
+      next("rescheduleAppointment", { appointmentId, slotId }),
+    restoreAppointmentToSlot: (appointmentId, slotId) =>
+      next("restoreAppointmentToSlot", { appointmentId, slotId }),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -1099,11 +1110,17 @@ test("2B: the cancelled drawer exposes NO actions", async () => {
   allHistory(f.doc)[0].trigger("click");
   await flush();
 
-  assertEqual(actionButtons(f.doc).length, 0,
-    "appointmentActionsFor('cancelled') offers nothing");
+  /* SLICE 4C amendment (was: cancelled offers nothing): the cancelled
+   * drawer now offers EXACTLY the two reviewed recovery actions - and
+   * nothing else. The FROZEN appointmentActionsFor matrix still returns
+   * nothing for cancelled (pinned separately below); these come from the
+   * calendar drawer's own reviewed action set. */
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Restore original time", "Choose another time"]),
+    "exactly the two Slice 4C recovery actions");
   assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent,
-    "No actions are available for this appointment.", "and says so");
-  /* No follow-up workflow is being introduced in this phase. */
+    "", "no 'nothing available' line when actions exist");
+  /* No OTHER follow-up workflow is being introduced. */
   const markup = [f.doc._elements["calendar-drawer-actions-note"].textContent,
     f.doc._elements["calendar-drawer-title"].textContent].join(" ");
   for (const word of ["Reactivate", "Reschedule", "Follow up", "Duplicate",
@@ -1145,10 +1162,19 @@ test("2B: authoritative Open availability renders at the same time as a ghost", 
   assertEqual(bands.length, 1, "the authoritative availability band renders");
   assertEqual(bands[0].children[0].textContent, "Open",
     "saying the time is open NOW");
-  assertEqual(bands[0].style.top, allHistory(f.doc)[0].style.top,
-    "at exactly the same position as the historical entry");
-  assertEqual(allHistory(f.doc).length, 1,
-    "while the history remains visible as context");
+  /* SLICE 4C amendment (Bug A - the owner-observed production defect): a
+   * full ghost here would paint ABOVE the Open band and swallow its
+   * clicks, so the ghost is DEMOTED to the compact history strip - its
+   * own thin, deterministic hit target - and the band keeps a full,
+   * reachable click area. History remains visible AND clickable. */
+  assertEqual(allHistory(f.doc).length, 0,
+    "no full ghost block may cover the reusable Open band");
+  const strips = allHistoryStrips(f.doc);
+  assertEqual(strips.length, 1,
+    "the history remains visible as its compact strip");
+  assertEqual(strips[0].tagName, "BUTTON", "and it is a real control");
+  assert(strips[0].title.indexOf("Maria Lopez") !== -1,
+    "still naming the patient the office may call: " + strips[0].title);
 });
 
 test("2B: a ghost never CREATES an Open band", async () => {
@@ -1344,8 +1370,11 @@ test("2B exact overlap: activating the strip opens Maria's cancelled drawer", as
     "on the CANCELLED patient, not the live one");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
     "showing the cancelled status");
-  assertEqual(actionButtons(f.doc).length, 0,
-    "and offering no action, exactly as appointmentActionsFor('cancelled') says");
+  /* SLICE 4C amendment: the cancelled drawer now offers exactly the two
+   * reviewed recovery actions. */
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Restore original time", "Choose another time"]),
+    "and offers exactly the Slice 4C recovery actions");
 });
 
 test("2B exact overlap: the live appointment still opens its own drawer", async () => {
@@ -1360,8 +1389,9 @@ test("2B exact overlap: the live appointment still opens its own drawer", async 
     "the live block still opens the live patient");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
     "with its own status");
+  /* SLICE 4C amendment: a confirmed appointment also offers Change time. */
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Cancel appointment"]),
+    JSON.stringify(["Cancel appointment", "Change time"]),
     "and its own allowed actions");
 });
 
@@ -1391,8 +1421,13 @@ test("2B exact overlap: an authoritative Open band still renders alongside both"
   assertEqual(allBands(f.doc).length, 1,
     "the Schedule remains the only source of availability");
   assertEqual(allBands(f.doc)[0].children[0].textContent, "Open", "and it says Open");
-  assertEqual(allHistory(f.doc).length, 1, "the ghost is still there");
-  assertEqual(allHistoryStrips(f.doc).length, 1, "and so is its strip");
+  /* SLICE 4C amendment (Bug A): the ghost overlaps a reusable Open band,
+   * so it is demoted to its strip - one strip, never two, even though it
+   * is ALSO fully occluded by the live appointment. */
+  assertEqual(allHistory(f.doc).length, 0,
+    "no full ghost block may cover the reusable Open band");
+  assertEqual(allHistoryStrips(f.doc).length, 1,
+    "the history remains reachable as exactly ONE strip");
 });
 
 test("2B: a ghost with clear air around it gets NO strip", async () => {
@@ -1438,7 +1473,9 @@ test("2B: a PARTIALLY overlapped ghost that still reads gets NO strip", async ()
   await flush();
   assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Maria Lopez",
     "clicking the visible ghost opens the cancelled drawer");
-  assertEqual(actionButtons(f.doc).length, 0, "read-only");
+  /* SLICE 4C amendment: the cancelled drawer offers the recovery actions. */
+  assertEqual(actionButtons(f.doc).length, 2,
+    "offering exactly the Slice 4C recovery actions");
   /* The live appointment keeps its geometry either way. */
   assertEqual(blocksIn(columns(f.doc)[0])[0].style.width, "100%",
     "the live appointment keeps the full column");
@@ -1478,8 +1515,10 @@ test("2B: the Aisha/Robert case - top covered, tail exposed - gets NO strip", as
   assertEqual(f.doc._elements["calendar-drawer-title"].textContent, "Aisha Khan",
     "clicking the visible ghost opens HER cancelled drawer");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
-    "read-only, cancelled");
-  assertEqual(actionButtons(f.doc).length, 0, "and offering no action");
+    "read-only record, cancelled");
+  /* SLICE 4C amendment: the cancelled drawer offers the recovery actions. */
+  assertEqual(actionButtons(f.doc).length, 2,
+    "offering exactly the Slice 4C recovery actions");
 
   /* Robert keeps his normal geometry and his own drawer. */
   const live = blocksIn(columns(f.doc)[0])[0];
@@ -1694,16 +1733,29 @@ test("2B: after the Phase 2A Cancel flow, the returned cancelled row stays visib
   await flush();
 
   assertEqual(allBlocks(f.doc).length, 0, "no live appointment remains");
-  assertEqual(allHistory(f.doc).length, 1,
-    "the cancelled row remains as follow-up context");
-  assertEqual(blockTexts(allHistory(f.doc)[0])[1], "Maria Lopez", "the patient");
+  /* SLICE 4C amendment (Bug A - this IS the owner-observed production
+   * scenario): the freed time returns as an Open band at the cancelled
+   * appointment's exact minutes, so the ghost is demoted to its compact
+   * strip. The history remains visible and reachable, and the Open band
+   * keeps a full, clickable area for booking the next patient. */
+  assertEqual(allHistory(f.doc).length, 0,
+    "no full ghost block may cover the reusable Open band");
+  const strips = allHistoryStrips(f.doc);
+  assertEqual(strips.length, 1,
+    "the cancelled row remains as follow-up context - as its strip");
+  assert(strips[0].title.indexOf("Maria Lopez") !== -1,
+    "still naming the patient: " + strips[0].title);
   const bands = bandsIn(columns(f.doc)[0]);
   assertEqual(bands.length, 1, "and the freed time shows as authoritative open");
   assertEqual(bands[0].children[0].textContent, "Open",
     "exactly the visual the office needs: open NOW, Maria cancelled here");
+  assertEqual(bands[0].tagName, "BUTTON",
+    "and the Open band is a REACHABLE control, not decoration");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
     "the panel settles on the authoritative cancelled state");
-  assertEqual(actionButtons(f.doc).length, 0, "offering no action");
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Restore original time", "Choose another time"]),
+    "offering exactly the Slice 4C recovery actions");
 });
 
 test("calendar: no rescheduled status is invented", () => {
@@ -2454,9 +2506,11 @@ test("actions: a pending appointment offers Confirm and Cancel", async () => {
   await flush();
   openDrawerFor(f);
   await flush();
+  /* SLICE 4C amendment: the drawer set is the frozen matrix PLUS the
+   * reviewed Change time action. */
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Confirm", "Cancel appointment"]),
-    "exactly the two actions the frozen matrix allows for pending");
+    JSON.stringify(["Confirm", "Cancel appointment", "Change time"]),
+    "the frozen pending actions plus Slice 4C's Change time");
   assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent, "",
     "no 'nothing available' line when actions exist");
 });
@@ -2468,8 +2522,10 @@ test("actions: a confirmed appointment offers only Cancel", async () => {
   await flush();
   openDrawerFor(f);
   await flush();
+  /* SLICE 4C amendment: Change time joins Cancel; Confirm is still never
+   * offered where the lifecycle owner would refuse it. */
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Cancel appointment"]),
+    JSON.stringify(["Cancel appointment", "Change time"]),
     "Confirm is never offered where the lifecycle owner would refuse it");
 });
 
@@ -2508,9 +2564,16 @@ test("actions: a terminal status shows no controls and says so", async () => {
     "the row is still in the response, so the panel may stay open");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Cancelled",
     "showing its refreshed authoritative state");
-  assertEqual(actionButtons(f.doc).length, 0, "and offering no action");
+  /* SLICE 4C amendment: a freshly cancelled appointment immediately
+   * offers the recovery actions - exactly the "patient calls right back"
+   * case this slice exists for. The TERMINAL-offers-nothing protection
+   * (completed / no_show / unknown) is pinned on the drawer action set
+   * itself in the Slice 4C suite below. */
+  assertEqual(JSON.stringify(actionLabels(f.doc)),
+    JSON.stringify(["Restore original time", "Choose another time"]),
+    "the refreshed cancelled row offers the recovery actions");
   assertEqual(f.doc._elements["calendar-drawer-actions-note"].textContent,
-    "No actions are available for this appointment.", "stated plainly");
+    "", "no 'nothing available' line when actions exist");
   assertEqual(allBlocks(f.doc).length, 0,
     "while the cancelled appointment leaves the resting grid");
 });
@@ -2585,8 +2648,9 @@ test("actions: after Confirm the panel and the block show the AUTHORITATIVE stat
   assertEqual(blockTexts(blocksIn(columns(f.doc)[0])[0])[3], "Confirmed",
     "and so does the calendar block");
   assertEqual(feedbackText(f.doc), "Appointment confirmed.", "honest outcome");
+  /* SLICE 4C amendment: confirmed offers Cancel + Change time. */
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Cancel appointment"]),
+    JSON.stringify(["Cancel appointment", "Change time"]),
     "and the offered actions follow the new status");
 });
 
@@ -3495,8 +3559,10 @@ test("F6: drawer actions stay disabled while the post-mutation read is in flight
   openDrawerFor(f);
   await flush();
   const pendingSet = actionButtons(f.doc).slice();
+  /* SLICE 4C amendment: pending now also offers Change time. */
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Confirm", "Cancel appointment"]), "precondition");
+    JSON.stringify(["Confirm", "Cancel appointment", "Change time"]),
+    "precondition");
 
   /* The POST succeeds, but the authoritative combined read is DEFERRED. */
   f.data.queue("confirmAppointment", { ok: true, data: {} });
@@ -3546,8 +3612,8 @@ test("F6: drawer actions stay disabled while the post-mutation read is in flight
   await flush();
 
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Cancel appointment"]),
-    "the rebuilt drawer offers exactly appointmentActionsFor('confirmed')");
+    JSON.stringify(["Cancel appointment", "Change time"]),
+    "the rebuilt drawer offers exactly the confirmed drawer action set");
   assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
     "and it is usable again");
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
@@ -3798,8 +3864,8 @@ test("F8: a failed post-mutation read keeps actions frozen until new truth lands
   assertEqual(f.doc._elements["calendar-drawer-status"].textContent, "Confirmed",
     "the drawer is rebuilt from the NEW returned row");
   assertEqual(JSON.stringify(actionLabels(f.doc)),
-    JSON.stringify(["Cancel appointment"]),
-    "exposing exactly appointmentActionsFor('confirmed')");
+    JSON.stringify(["Cancel appointment", "Change time"]),
+    "exposing exactly the confirmed drawer action set");
   assertEqual(actionButton(f.doc, "Cancel appointment").disabled, false,
     "and usable again now that authoritative truth landed");
 });
@@ -5234,4 +5300,540 @@ test("4B2 F1: a wiped session's note save neither blocks nor touches the next se
   noteEl(f, "edit").trigger("click");
   assertEqual(noteEl(f, "input").hidden, false,
     "and the lock is genuinely free again - the editor reopens");
+});
+
+/* ==================================================================== */
+/* PHASE 3A SLICE 4C: cancelled recovery + rescheduling + open access    */
+/* ==================================================================== */
+
+/* The picker's time choices live in the dedicated drawer section. */
+function rescheduleTimeButtons(doc) {
+  return doc._elements["calendar-drawer-reschedule-times"].children;
+}
+
+function cancelledWithOpenWeek(f) {
+  /* Maria cancelled 10:30-11:00; two REAL open slots exist this week. */
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-open-1",
+      start_datetime: "2026-08-25T15:00:00Z",
+      end_datetime: "2026-08-25T15:30:00Z" }),
+    slotFixture({ slot_id: "s-open-2",
+      start_datetime: "2026-08-26T13:00:00Z",
+      end_datetime: "2026-08-26T13:30:00Z" })
+  ], [cancelledFixture()]);
+}
+
+test("4C: the drawer action set is the frozen matrix plus ONLY the reviewed additions", () => {
+  const f = makePages();
+  const drawerActions = f.helpers.calendarDrawerActionsFor;
+  assertEqual(JSON.stringify(drawerActions("pending")),
+    JSON.stringify(["confirm", "cancel", "reschedule"]), "pending");
+  assertEqual(JSON.stringify(drawerActions("confirmed")),
+    JSON.stringify(["cancel", "reschedule"]), "confirmed");
+  assertEqual(JSON.stringify(drawerActions("cancelled")),
+    JSON.stringify(["restore", "reschedule"]), "cancelled");
+  /* The TERMINAL protection lives on here: completed / no_show / unknown
+   * statuses still offer NOTHING - never a speculative recovery button. */
+  for (const terminal of ["completed", "no_show", "rescheduled", "invented"]) {
+    assertEqual(JSON.stringify(drawerActions(terminal)), "[]",
+      terminal + " offers nothing");
+  }
+  /* And the FROZEN matrix itself is untouched by Slice 4C. */
+  assertEqual(JSON.stringify(f.helpers.appointmentActionsFor("cancelled")),
+    "[]", "the frozen P5-A matrix still offers nothing for cancelled");
+});
+
+/* ---- Restore original time ---- */
+
+test("4C restore: one click calls exactly restoreAppointment with the id", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c" })]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  f.data.queue("restoreAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c",
+    status: "confirmed" })]);
+  actionButton(f.doc, "Restore original time").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.restoreAppointment),
+    JSON.stringify(["appt-c"]), "one call, the selected appointment id");
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0, "and nothing else");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "no move command either (v1.0.1: restore touches the original slot only)");
+  assertEqual(feedbackText(f.doc), "Appointment restored.", "honest outcome");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "the panel shows the refreshed authoritative state");
+});
+
+test("4C restore: a duplicate click during flight is suppressed", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c" })]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  const deferred = f.data.queueDeferred("restoreAppointment");
+  const restoreBtn = actionButton(f.doc, "Restore original time");
+  restoreBtn.trigger("click");
+  restoreBtn.trigger("click");
+  await flush();
+  assertEqual(f.data.calls.restoreAppointment.length, 1,
+    "the second click is suppressed by the actionBusy token");
+  assertEqual(restoreBtn.disabled, true, "and the control is disabled");
+
+  deferred.resolve({ ok: true, data: {} });
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c",
+    status: "confirmed" })]);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.restoreAppointment.length, 1, "still exactly one");
+});
+
+test("4C restore: a 409 refusal shows the honest conflict wording and refreshes", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c" })]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  /* The backend refused: the original time was taken since cancellation. */
+  f.data.queue("restoreAppointment", { ok: false, state: "conflict" });
+  queueWeek(f, [], [cancelledFixture({ appointment_id: "appt-c" })]);
+  actionButton(f.doc, "Restore original time").trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(feedbackText(f.doc),
+    "That time is no longer available for this appointment. Showing the latest calendar.",
+    "the Slice 4C conflict sentence, not the generic appointment one");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Cancelled", "the appointment settles on its authoritative state");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "and the truth was re-read, never assumed");
+});
+
+/* ---- Choose another time / Change time picker ---- */
+
+test("4C picker: Choose another time lists the REAL open slots with no request", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+
+  const callsBefore = f.data.totalCalls();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "opening the picker issues no request - the week read is the source");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule"].hidden, false,
+    "the picker section shows");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule-note"].textContent,
+    "Choose a new time:", "and asks for a time");
+  const times = rescheduleTimeButtons(f.doc);
+  assertEqual(times.length, 2, "one button per REAL open slot");
+  assert(times[0].textContent.indexOf("2026") !== -1,
+    "each choice renders a real office-local instant: " + times[0].textContent);
+});
+
+test("4C picker: Save without a chosen time refuses locally", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0,
+    "no request without a chosen slot");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "no command of EITHER mode without a chosen slot (v1.0.1)");
+  assertEqual(feedbackText(f.doc), "Choose a new time first.", "stated plainly");
+});
+
+test("4C picker: Save sends EXACTLY the appointment id and chosen slot_id", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  rescheduleTimeButtons(f.doc)[1].trigger("click");
+  assert(f.doc._elements["calendar-drawer-reschedule-when"].textContent
+    .indexOf("2026") !== -1, "the chosen real instant is echoed");
+
+  /* SLICE 4C v1.0.1 amendment (F1): "Choose another time" on a cancelled
+   * row issues the CANCELLED-ONLY server command - never the active one. */
+  f.data.queue("restoreAppointmentToSlot", { ok: true, data: {} });
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [cancelledFixture({ status: "confirmed",
+      start_datetime: "2026-08-26T13:00:00Z",
+      end_datetime: "2026-08-26T13:30:00Z" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.restoreAppointmentToSlot),
+    JSON.stringify([{ appointmentId: "appt-cancelled",
+      slotId: "s-open-2" }]),
+    "one atomic request: the appointment and the REAL server slot id only");
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0,
+    "the ACTIVE command is never issued for a cancelled row (mode pin)");
+  assertEqual(feedbackText(f.doc), "Appointment time changed.",
+    "honest outcome");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "the refreshed row is the visual state");
+});
+
+test("4C picker: an empty week says so and disables Save", async () => {
+  const f = makePages();
+  queueWeek(f, [], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-drawer-reschedule-note"].textContent,
+    "No open times in the week shown. Open the calendar week you want and try again, or publish availability first.",
+    "the office is told plainly");
+  assertEqual(rescheduleTimeButtons(f.doc).length, 0, "no fabricated choices");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule-save"].disabled,
+    true, "Save cannot be pressed at nothing");
+});
+
+test("4C picker: only OPEN slots are offered - held/blocked/booked never are", async () => {
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-open", start_datetime: "2026-08-25T15:00:00Z",
+      end_datetime: "2026-08-25T15:30:00Z" }),
+    slotFixture({ slot_id: "s-held", status: "held",
+      start_datetime: "2026-08-25T16:00:00Z",
+      end_datetime: "2026-08-25T16:30:00Z" }),
+    slotFixture({ slot_id: "s-blocked", status: "blocked",
+      start_datetime: "2026-08-25T17:00:00Z",
+      end_datetime: "2026-08-25T17:30:00Z" }),
+    slotFixture({ slot_id: "s-booked", status: "booked",
+      start_datetime: "2026-08-25T18:00:00Z",
+      end_datetime: "2026-08-25T18:30:00Z" })
+  ], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  assertEqual(rescheduleTimeButtons(f.doc).length, 1,
+    "exactly the one authoritative OPEN slot is offered");
+});
+
+test("4C picker: Change time works for a confirmed appointment the same way", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [appointmentFixture({ appointment_id: "appt-live", status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Change time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  f.data.queue("rescheduleAppointment", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture({ appointment_id: "appt-live",
+    status: "confirmed", start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(JSON.stringify(f.data.calls.rescheduleAppointment),
+    JSON.stringify([{ appointmentId: "appt-live", slotId: "s-open-1" }]),
+    "the ACTIVE command with the same atomic request shape");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "the CANCELLED command is never issued for an active row (v1.0.1 F1)");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "an active appointment keeps its status");
+});
+
+test("4C picker: a failed reschedule leaves the appointment at its old truth", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [appointmentFixture({ appointment_id: "appt-live", status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Change time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  /* The target was taken between selection and submit: the backend refused
+   * with 409 and the authoritative re-read shows NOTHING moved. */
+  f.data.queue("rescheduleAppointment", { ok: false, state: "conflict" });
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1", status: "booked",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [appointmentFixture({ appointment_id: "appt-live", status: "confirmed" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(feedbackText(f.doc),
+    "That time is no longer available for this appointment. Showing the latest calendar.",
+    "the honest Slice 4C conflict sentence");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "the appointment is exactly where - and as - it was");
+  assertEqual(drawerValue(f.doc, "Patient"), "Rosa Delgado",
+    "same appointment, untouched");
+});
+
+test("4C picker: duplicate Save during flight is suppressed and controls freeze", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  /* SLICE 4C v1.0.1 amendment (F1): the cancelled drawer's Save issues
+   * the cancelled-only command; the suppression rule is unchanged. */
+  const deferred = f.data.queueDeferred("restoreAppointmentToSlot");
+  const saveEl = f.doc._elements["calendar-drawer-reschedule-save"];
+  saveEl.trigger("click");
+  saveEl.trigger("click");
+  await flush();
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 1,
+    "the second Save is suppressed by the actionBusy token");
+  assertEqual(saveEl.disabled, true, "Save is disabled during the flight");
+  assertEqual(actionButton(f.doc, "Restore original time").disabled, true,
+    "and so is every other drawer action - one mutation at a time");
+
+  deferred.resolve({ ok: true, data: {} });
+  queueWeek(f, [], [cancelledFixture({ status: "confirmed" })]);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 1,
+    "still exactly one");
+});
+
+/* ---- v1.0.1 mode pin (F1): stale commands settle at the truth ---- */
+
+test("4C v1.0.1: a refused stale Choose-another-time settles at the restored truth", async () => {
+  /* Receptionist A opened the cancelled drawer and picked a new time;
+   * meanwhile receptionist B pressed Restore Original Time and won. A's
+   * stale CANCELLED-ONLY command is refused by the backend's row-locked
+   * mode pin (409 -> conflict outcome) and the drawer settles on the
+   * authoritative CONFIRMED row - no second move is ever shown. */
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  f.data.queue("restoreAppointmentToSlot", { ok: false, state: "conflict" });
+  /* The authoritative re-read: B's restore already won - the appointment
+   * is CONFIRMED back on its ORIGINAL 10:30 time; the picked open slot
+   * is still open (no second move happened). */
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-open-1",
+      start_datetime: "2026-08-25T15:00:00Z",
+      end_datetime: "2026-08-25T15:30:00Z" }),
+    slotFixture({ slot_id: "s-open-2",
+      start_datetime: "2026-08-26T13:00:00Z",
+      end_datetime: "2026-08-26T13:30:00Z" })
+  ], [cancelledFixture({ status: "confirmed" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 1,
+    "the stale command was issued once and refused by the server");
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0,
+    "and was NEVER reinterpreted as an active move");
+  assertEqual(feedbackText(f.doc),
+    "That time is no longer available for this appointment. Showing the latest calendar.",
+    "the honest conflict sentence");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "the drawer settles on B's restored truth");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "the truth was re-read, never assumed");
+});
+
+test("4C v1.0.1: a refused stale Change-time settles at the cancelled truth", async () => {
+  /* Receptionist A opened a CONFIRMED drawer and picked a new time;
+   * meanwhile receptionist B cancelled the appointment and won. A's stale
+   * ACTIVE-ONLY command is refused (409 -> conflict) and the drawer
+   * settles on the authoritative CANCELLED row - the cancellation is
+   * never resurrected by the stale move. */
+  const f = makePages();
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [appointmentFixture({ appointment_id: "appt-live", status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Change time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  f.data.queue("rescheduleAppointment", { ok: false, state: "conflict" });
+  /* The authoritative re-read: B's cancel already won - the row is
+   * CANCELLED and the picked target slot is still open (no move). */
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })],
+    [appointmentFixture({ appointment_id: "appt-live", status: "cancelled" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.rescheduleAppointment.length, 1,
+    "the stale command was issued once and refused by the server");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "and was NEVER reinterpreted as a cancelled recovery");
+  assertEqual(feedbackText(f.doc),
+    "That time is no longer available for this appointment. Showing the latest calendar.",
+    "the honest conflict sentence");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Cancelled", "the drawer settles on B's cancellation - no resurrection");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "the truth was re-read, never assumed");
+});
+
+test("4C lifecycle: opening ANOTHER appointment discards the first picker context", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture({ slot_id: "s-open-1",
+    start_datetime: "2026-08-25T15:00:00Z",
+    end_datetime: "2026-08-25T15:30:00Z" })], [
+    cancelledFixture({ appointment_id: "appt-a" }),
+    appointmentFixture({ appointment_id: "appt-b",
+      patient_name: "Second Patient", status: "confirmed",
+      start_datetime: "2026-08-24T16:00:00Z",
+      end_datetime: "2026-08-24T17:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+  /* The ghost sits on its own time (no Open band beneath it here), so it
+   * renders as the full history block and is itself the control. */
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  /* The office opens B before saving A's move: the drawer re-renders for
+   * B and A's picker context is wiped with the panel it belonged to. */
+  blocksIn(columns(f.doc)[0])[0].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Second Patient", "the drawer now belongs to B");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule"].hidden, true,
+    "the picker is closed by the re-open");
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0,
+    "A's discarded selection can never be submitted against B");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "in EITHER mode (v1.0.1)");
+});
+
+test("4C lifecycle: closing the drawer wipes the picker selection", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule"].hidden, true,
+    "the picker closes with its drawer");
+  assertEqual(rescheduleTimeButtons(f.doc).length, 0,
+    "and its rendered choices are wiped, not merely hidden");
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  assertEqual(f.data.calls.rescheduleAppointment.length, 0,
+    "a wiped selection can never be submitted");
+  assertEqual(f.data.calls.restoreAppointmentToSlot.length, 0,
+    "in EITHER mode (v1.0.1)");
+});
+
+test("4C picker: the Cancel control closes the picker and touches the network never", async () => {
+  const f = makePages();
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+  rescheduleTimeButtons(f.doc)[0].trigger("click");
+  const callsBefore = f.data.totalCalls();
+
+  f.doc._elements["calendar-drawer-reschedule-cancel"].trigger("click");
+  await flush();
+  assertEqual(f.data.totalCalls(), callsBefore, "no request of any kind");
+  assertEqual(f.doc._elements["calendar-drawer-reschedule"].hidden, true,
+    "the picker closes");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false,
+    "while the drawer itself stays open");
+});
+
+test("4C: a range-refused week is never a picker source", async () => {
+  const f = makePages();
+  /* First a good week so a drawer can open; then a MISMATCHED refresh. */
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getSchedule", { ok: true, data: scheduleBody([slotFixture()]) });
+  f.data.queue("getAppointments", { ok: true,
+    data: appointmentsBody([cancelledFixture()], { end_day: "2026-08-29" }) });
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  await flush();
+
+  /* The refusal wiped the grid and closed the drawer; reopening is not
+   * possible, and the picker source was cleared with it - proven through
+   * the wiped rendered state rather than internals. */
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "The portal returned two different date ranges. Nothing is shown; please refresh.",
+    "the refusal is stated");
+  assertEqual(allHistory(f.doc).length + allHistoryStrips(f.doc).length, 0,
+    "nothing is rendered from a refused pair");
 });

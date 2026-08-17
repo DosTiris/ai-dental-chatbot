@@ -736,3 +736,588 @@ def cancel_appointment(
     except Exception:
         db.rollback()
         raise
+
+
+# ===========================================================================
+# PHASE 3A Slice 4C: cancelled-appointment recovery and rescheduling.
+#
+# Two NEW office-staff lifecycle actions, added to THIS module because it is
+# the single appointment-lifecycle owner (Rule 3) - restore and reschedule
+# are state transitions plus slot-inventory moves, exactly the concerns this
+# file already owns for finalize/confirm/cancel. Nothing existing above this
+# line changed; both functions REUSE the established primitives:
+#   - appointment_repository.get_appointment_for_update /
+#     get_slot_for_update: the SAME tenant-filtered FOR UPDATE row locks
+#     (with the V4.2 populate_existing correction) every other lifecycle
+#     action uses;
+#   - availability_rules.hold_is_active: the ONE definition of an active
+#     hold (an expired hold is lazily reclaimed, the established production
+#     rule - D4);
+#   - _classify_booking_unique_violation + the migration-002 partial unique
+#     indexes: the SAME final database arbiter for a concurrent claim.
+# There is no second lock, no second expiry rule, and no second state
+# machine.
+#
+# LOCK ORDER (deadlock discipline): the appointment row is ALWAYS locked
+# first, then slot rows. When ONE action must lock TWO slots (an active
+# reschedule locks the old slot and the target slot), they are locked in
+# ascending UUID order - a single global slot order, so two concurrent
+# reschedules moving between the same pair of slots in opposite directions
+# request the locks in the SAME sequence and can never form a cycle. The
+# existing cancel path (appointment -> its one slot) is a one-slot special
+# case of this order, so no existing path conflicts with it.
+#
+# NOTIFICATIONS: none, on any path. These functions call no notification
+# code and this module continues to import none - office staff are the ones
+# acting, and patient SMS remains disabled (the confirm/cancel policy,
+# unchanged).
+# ===========================================================================
+
+# Slice 4C: the ONLY appointment statuses each new action may start from.
+# Rejection is the default (Rule 4): a completed / no_show / malformed /
+# future status is refused without mutation, exactly the _CANCELLABLE_
+# STATUSES pattern above.
+_RESTORABLE_STATUSES = frozenset({AppointmentStatus.CANCELLED})
+_RESCHEDULABLE_ACTIVE_STATUSES = frozenset({
+    AppointmentStatus.PENDING,
+    AppointmentStatus.CONFIRMED,
+})
+
+
+def _sanitize_status_detail(status):
+    """
+    Purpose: Slice 4C extraction of the PATCH 8 / correction-pass-1 rule the
+        confirm and cancel paths already state inline: the appointments
+        status column has no CHECK constraint, so a stored value is
+        untrusted at a refusal boundary. Only controlled AppointmentStatus
+        vocabulary may leave through BookingResult.detail; anything else is
+        represented ONLY as the fixed sentinel "unsupported". The stored
+        value itself is never repaired or rewritten (Rule 4).
+    Inputs: the raw stored status string.
+    Returns: the status itself when it is a member of AppointmentStatus.ALL,
+        otherwise "unsupported".
+    Database effects: none. External effects: none.
+    """
+    return status if status in AppointmentStatus.ALL else "unsupported"
+
+
+def _judge_slot_bookable(slot, now_utc: datetime) -> Optional[str]:
+    """
+    Purpose: Slice 4C - judge ONE locked slot row against the staff
+        slot-state rules, returning the refusal reason or None (bookable).
+        This is the finalize_staff_booking D1/D2/D4 judgement extracted so
+        restore and reschedule apply the IDENTICAL rules in the IDENTICAL
+        order (Rule 3: the portal must never grow two meanings of "this
+        slot can be taken by staff"):
+          - BOOKED, or an ACTIVE hold        -> "slot_taken" (staff never
+            steal a live patient hold; hold_is_active is the single owner
+            of "active", and an EXPIRED hold is lazily reclaimed - D4);
+          - BLOCKED or CANCELLED             -> "slot_blocked";
+          - start not strictly in the future -> "slot_started" (notice and
+            horizon are bypassed for staff - D1/D2 - but the past is not
+            bookable; both sides normalized to aware UTC by the single
+            owner, never a naive/aware mix).
+    Inputs: the LOCKED slot row and the injected aware-UTC now.
+    Returns: None when the slot may be taken, else the refusal reason word.
+    Database effects: none (pure judgement of the locked row's values).
+    External effects: none.
+    """
+    if slot.status == SlotStatus.BOOKED:
+        return "slot_taken"
+    if slot.status in (SlotStatus.BLOCKED, SlotStatus.CANCELLED):
+        return "slot_blocked"
+    if hold_is_active(slot, now_utc):
+        return "slot_taken"
+    if ensure_utc(slot.start_datetime) <= ensure_utc(now_utc):
+        return "slot_started"
+    return None
+
+
+def restore_appointment(
+    db: Session,
+    client_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    *,
+    now_utc: datetime,
+) -> BookingResult:
+    """
+    Purpose: PHASE 3A Slice 4C - the office restores ONE of its own
+        CANCELLED appointments back onto its ORIGINAL slot, because the
+        patient called back and wants the appointment again. This is the
+        ONLY supported cancelled -> confirmed transition, and it is valid
+        ONLY when the original slot is re-verified as bookable UNDER THE
+        ROW LOCK at mutation time (Rule 15: the final booking must recheck
+        availability; a cancelled appointment is never blindly flipped
+        back to life).
+
+    Inputs: ids, then KEYWORD-ONLY aware-UTC now (the Patch 2C convention -
+        injected, never read from the clock, so tests stay deterministic).
+        Deliberately NOT accepted: a slot id (the original slot is read off
+        the locked appointment row itself - the browser has no time
+        authority on this action), datetimes, status, source, patient data,
+        or any tenant selector.
+
+    Status / timestamp semantics (recon-anchored, not invented):
+        - The restored appointment becomes CONFIRMED, not PENDING: an
+          authorized office employee restoring an appointment is an
+          explicit confirmation action, exactly the D5 rationale that makes
+          a staff BOOKING confirmed.
+        - confirmed_at is NEVER written here. booking_service.
+          confirm_appointment remains its ONLY writer (the D5 invariant);
+          whatever value the appointment carried at cancellation - NULL or
+          a prior staff-confirmation instant - is preserved byte-for-byte.
+        - start/end datetimes are RE-COPIED from the LOCKED slot row, so
+          the appointment's justified copies always match the slot it
+          occupies again.
+        - patient fields, new_or_returning, reason, urgency, source,
+          conversation_id, internal_note, and every notification field are
+          untouched.
+
+    Returns: BookingResult. Reason vocabulary (existing words wherever they
+        are honestly equivalent; see each):
+        ok                  - the appointment is CONFIRMED and its original
+                              slot is BOOKED again, committed together.
+        appointment_missing - no appointment with this id FOR THIS CLIENT
+                              (unknown and cross-tenant indistinguishable,
+                              Rule 15 - the confirm-path word).
+        not_restorable      - status is not CANCELLED. detail carries the
+                              SANITIZED current status (correction pass 1),
+                              so a live, completed, or malformed row is
+                              refused without mutation.
+        conversation_conflict - Slice 4C's ONE new refusal family: the
+                              appointment was created by a chat
+                              conversation, and that conversation has since
+                              produced ANOTHER active appointment, so
+                              restoring this one would give the same
+                              conversation two active appointments.
+                              Pre-checked through the existing
+                              get_appointment_by_conversation read and
+                              backstopped by uq_active_appointment_per_
+                              conversation at commit (restoring re-enters
+                              that partial index's predicate).
+        slot_missing        - the original slot row no longer exists for
+                              this client (fail closed - nothing is
+                              restored onto a vanished slot).
+        slot_taken / slot_blocked / slot_started - the original slot is no
+                              longer bookable, judged by _judge_slot_
+                              bookable under the lock: someone else booked
+                              or actively holds it, staff blocked or
+                              cancelled it, or its start time has passed.
+                              The office is directed to Choose Another
+                              Time instead; nothing is mutated.
+
+    Database effects: ONE transaction. On success: appointment status ->
+        confirmed with start/end re-copied, AND the original slot -> booked
+        with hold bookkeeping cleared (an ACTIVE hold cannot reach that
+        line; only expired-hold residue is cleared), committed together.
+        EVERY refusal path rolls back before returning - no partial
+        restore, no half-cleared hold, no open transaction holding locks.
+    External effects: none (no notification of any kind - D7 unchanged).
+    Concurrency: get_appointment_for_update serializes concurrent restores
+        and restore-vs-cancel/confirm on the appointment row; the slot lock
+        serializes restore against every other slot claimant (staff
+        booking, chatbot hold/finalize, block). Lock order appointment ->
+        slot is the cancel path's order. If a concurrent claimant slips
+        past the pre-checks, uq_active_appointment_per_slot rejects the
+        loser at commit and the IntegrityError maps to slot_taken - at most
+        one active appointment ever occupies the slot.
+    """
+    try:
+        appointment = appointment_repository.get_appointment_for_update(
+            db, client_id, appointment_id
+        )
+        if appointment is None:
+            db.rollback()
+            return BookingResult(False, "appointment_missing")
+        if appointment.status not in _RESTORABLE_STATUSES:
+            # Only a CANCELLED appointment may be restored; a live row must
+            # never be "restored" over itself and a terminal row must never
+            # come back to life through this action (Rule 14).
+            db.rollback()
+            return BookingResult(
+                False, "not_restorable",
+                appointment=appointment,
+                detail=_sanitize_status_detail(appointment.status),
+            )
+
+        if appointment.conversation_id is not None:
+            # Pre-check the conversation invariant with the EXISTING owner
+            # read (fast path); the migration-002 partial unique index
+            # remains the guarantee at commit. Our own row cannot match:
+            # it is CANCELLED and the read filters status != cancelled.
+            existing = appointment_repository.get_appointment_by_conversation(
+                db, client_id, appointment.conversation_id
+            )
+            if existing is not None:
+                db.rollback()
+                return BookingResult(False, "conversation_conflict")
+
+        slot = appointment_repository.get_slot_for_update(
+            db, client_id, appointment.slot_id
+        )
+        if slot is None:
+            db.rollback()
+            return BookingResult(False, "slot_missing")
+
+        refusal = _judge_slot_bookable(slot, now_utc)
+        if refusal is not None:
+            db.rollback()
+            return BookingResult(False, refusal)
+
+        # The single supported recovery transition: cancelled -> confirmed,
+        # with the appointment's justified time copies re-synced to the
+        # LOCKED slot row it occupies again. confirmed_at is deliberately
+        # NOT written (confirm_appointment stays its only writer - D5).
+        appointment.status = AppointmentStatus.CONFIRMED
+        appointment.start_datetime = slot.start_datetime
+        appointment.end_datetime = slot.end_datetime
+
+        slot.status = SlotStatus.BOOKED
+        # Clear any EXPIRED hold bookkeeping so a booked slot never carries
+        # a stale owner. An ACTIVE hold could not have reached this line.
+        slot.held_until = None
+        slot.held_by_conversation_id = None
+
+        db.commit()
+        return BookingResult(True, "ok", appointment=appointment)
+    except IntegrityError as integrity_error:
+        # EXPECTED in exactly one family of situations: a concurrent claim
+        # raced past the pre-checks and a migration-002 partial unique index
+        # rejected the loser at commit. Map ONLY those; anything else is a
+        # real bug and must propagate (Rule 16).
+        db.rollback()  # Releases the row locks; nothing was persisted.
+        violated_index = _classify_booking_unique_violation(integrity_error)
+        if violated_index == _SLOT_UNIQUE_INDEX:
+            # Another active appointment owns the original slot now.
+            return BookingResult(False, "slot_taken")
+        if violated_index == _CONVERSATION_UNIQUE_INDEX:
+            # The originating conversation re-booked concurrently; restoring
+            # would give it two active appointments. Same refusal as the
+            # pre-check - the database simply arbitrated the race.
+            return BookingResult(False, "conversation_conflict")
+        raise
+    except Exception:
+        db.rollback()  # No partial completion, ever (Rule 16).
+        raise
+
+
+def _move_appointment_to_slot(
+    db: Session,
+    client_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    target_slot_id: uuid.UUID,
+    *,
+    now_utc: datetime,
+    cancelled_mode: bool,
+) -> BookingResult:
+    """
+    Purpose: PHASE 3A Slice 4C - the SHARED move engine behind the two
+        MODE-PINNED public commands (v1.0.1 correction F1:
+        reschedule_appointment and restore_appointment_to_slot below).
+        The office moves ONE of its own appointments onto a DIFFERENT
+        real authoritative slot, in ONE atomic operation:
+          - an ACTIVE appointment (pending or confirmed): "Change time" -
+            the old slot is released, the target slot is claimed, and the
+            appointment's STATUS IS PRESERVED (a pending appointment stays
+            pending; rescheduling is not a confirmation).
+          - a CANCELLED appointment: "Choose another time" - the
+            appointment is restored AND moved in the SAME transaction,
+            ending CONFIRMED (the restore_appointment rationale: an office
+            employee explicitly bringing it back is a confirmation
+            action). The old slot is NOT touched: cancellation already
+            released it, and whatever happened to it since is not this
+            action's business.
+        There is never a book-first / release-old-second pair of requests:
+        the whole move commits or nothing does.
+
+    MODE PIN (v1.0.1 correction F1): which of the two behaviors runs is
+        chosen by the CALLER-OWNED cancelled_mode flag - the server-side
+        identity of the command the user actually issued - and is NEVER
+        re-derived from the appointment's current status. The
+        starting-status requirement is enforced AFTER the appointment row
+        lock is acquired:
+          - cancelled_mode=False ("Change time"): legal starting status
+            is pending or confirmed ONLY. A row found CANCELLED under the
+            lock is refused not_reschedulable - a stale Change-time
+            request must NEVER resurrect a cancellation that committed
+            first.
+          - cancelled_mode=True ("Choose another time"): legal starting
+            status is CANCELLED only. A row found active or terminal
+            under the lock is refused not_restorable - a stale
+            cancelled-recovery request must never silently become an
+            ordinary move, nor touch a finished row.
+
+    Inputs: ids (the appointment and the CHOSEN target slot - the ONLY
+        scheduling authority a caller may supply), then KEYWORD-ONLY
+        aware-UTC now (Patch 2C convention). Deliberately NOT accepted:
+        datetimes, status, source, provider, service, urgency, patient
+        data, or any tenant selector - all server-owned. The target slot
+        must already exist FOR THIS TENANT; a cross-tenant or unknown id is
+        slot_missing (indistinguishable, Rule 15).
+
+    Provider/service compatibility (recon conclusion, stated rather than
+        invented): appointments carry NO provider/service binding column,
+        and the staff-booking owner decision D3 already books ANY of the
+        tenant's slots without provider/service filtering - provider_name /
+        service_key remain whatever the authoritative TARGET slot carries.
+        Reschedule inherits exactly those rules; no new compatibility rule
+        exists in the current data model to enforce, and none is invented
+        here. The appointment's justified start/end copies are re-copied
+        from the LOCKED target row.
+
+    Returns: BookingResult:
+        ok                  - the appointment occupies the target slot
+                              (status per the table above), the target is
+                              BOOKED, and - on the active path - the old
+                              slot was released, committed together.
+        appointment_missing - no appointment with this id FOR THIS CLIENT.
+        not_reschedulable   - active mode only: the LOCKED status is not
+                              pending/confirmed (a cancelled, completed,
+                              no_show, or malformed row - the F1 stale-
+                              command refusal included). detail carries
+                              the SANITIZED status.
+        not_restorable      - cancelled mode only: the LOCKED status is
+                              not CANCELLED (the restore_appointment
+                              refusal word - same meaning, same route
+                              mapping). detail carries the SANITIZED
+                              status.
+        same_slot           - an ACTIVE appointment's target IS its current
+                              slot; there is nothing to move, and falling
+                              through would dishonestly report the slot
+                              "taken" by the appointment itself. (A
+                              CANCELLED appointment choosing its own
+                              original slot is NOT this refusal - that is
+                              simply a restore, and the general path
+                              handles it.)
+        conversation_conflict - cancelled mode only: the originating chat
+                              conversation has since produced another
+                              active appointment (see restore_appointment;
+                              same pre-check, same index backstop).
+        slot_missing        - no target slot with this id FOR THIS CLIENT.
+        slot_taken / slot_blocked / slot_started - the target slot is not
+                              bookable, judged by _judge_slot_bookable
+                              UNDER THE LOCK at mutation time; a slot that
+                              became occupied between UI selection and
+                              submit is refused safely with NO partial
+                              move (the appointment stays exactly where -
+                              and as - it was).
+
+    Database effects: ONE transaction. On success (active path): old slot
+        -> available with hold fields cleared WHEN it is currently booked
+        (a DRIFTED old slot is left exactly as-is - the cancel path's C7
+        pin), appointment slot_id/start/end re-pointed to the LOCKED
+        target row, target slot -> booked with hold bookkeeping cleared -
+        all committed together. On success (cancelled path): the same,
+        minus any old-slot touch, plus status -> confirmed (confirmed_at
+        untouched; confirm_appointment stays its only writer). EVERY
+        refusal path rolls back before returning.
+    External effects: none (no notification of any kind).
+    Concurrency: the appointment row lock serializes reschedule against
+        confirm/cancel/restore/reschedule on the same appointment. Slot
+        locks: the active path locks the OLD and TARGET slots in ascending
+        UUID order (the module lock-order rule above) so opposite-direction
+        moves over the same pair cannot deadlock; the cancelled path locks
+        only the target. Two concurrent reschedules racing for the SAME
+        target serialize on its row lock; the loser observes BOOKED and is
+        refused slot_taken - and uq_active_appointment_per_slot remains
+        the final arbiter for any interleaving the pre-checks cannot see,
+        so at most one winner ever holds the target.
+    """
+    try:
+        appointment = appointment_repository.get_appointment_for_update(
+            db, client_id, appointment_id
+        )
+        if appointment is None:
+            db.rollback()
+            return BookingResult(False, "appointment_missing")
+
+        # --- MODE PIN (v1.0.1 F1): enforce the command's legal starting
+        # status UNDER THE ROW LOCK. The mode is the caller-owned identity
+        # of the command the user issued; the locked status either matches
+        # it, or the stale command is refused - the engine never
+        # reinterprets one command as the other.
+        if cancelled_mode:
+            if appointment.status != AppointmentStatus.CANCELLED:
+                # Stale Choose-another-time: the row was restored,
+                # confirmed, or finished after the user last saw it. No
+                # second move, no touch of a live or finished row.
+                db.rollback()
+                return BookingResult(
+                    False, "not_restorable",
+                    appointment=appointment,
+                    detail=_sanitize_status_detail(appointment.status),
+                )
+        elif appointment.status not in _RESCHEDULABLE_ACTIVE_STATUSES:
+            # Stale (or illegal) Change-time: cancelled, completed,
+            # no_show, or malformed. A finished appointment must never be
+            # rewritten (Rule 14), rejection is the default for unknown
+            # statuses (Rule 4), and a CANCELLED row must never be
+            # resurrected by a Change-time command that lost the race to
+            # a concurrent Cancel.
+            db.rollback()
+            return BookingResult(
+                False, "not_reschedulable",
+                appointment=appointment,
+                detail=_sanitize_status_detail(appointment.status),
+            )
+        if not cancelled_mode and target_slot_id == appointment.slot_id:
+            # Moving an active appointment onto its own slot is not a move.
+            # Refusing here is honest; the general checks below would see
+            # the slot BOOKED (by this very appointment) and claim it
+            # "taken", which would be a misleading map of the condition.
+            db.rollback()
+            return BookingResult(
+                False, "same_slot", appointment=appointment
+            )
+
+        if cancelled_mode and appointment.conversation_id is not None:
+            # The cancelled path re-enters uq_active_appointment_per_
+            # conversation's predicate; pre-check with the existing owner
+            # read (the restore_appointment rule - one rationale, stated
+            # there). The index remains the guarantee at commit.
+            existing = appointment_repository.get_appointment_by_conversation(
+                db, client_id, appointment.conversation_id
+            )
+            if existing is not None:
+                db.rollback()
+                return BookingResult(False, "conversation_conflict")
+
+        # --- slot locks, in the module's deterministic order -------------
+        old_slot = None
+        if cancelled_mode:
+            # Cancellation already released the original slot; whatever
+            # state it is in now is deliberately not touched or judged.
+            target_slot = appointment_repository.get_slot_for_update(
+                db, client_id, target_slot_id
+            )
+        else:
+            # Active move: BOTH slots are locked, ascending UUID order
+            # (see the module lock-order comment). same_slot was refused
+            # above, so the two ids are distinct here.
+            first_id, second_id = sorted([appointment.slot_id,
+                                          target_slot_id])
+            first = appointment_repository.get_slot_for_update(
+                db, client_id, first_id
+            )
+            second = appointment_repository.get_slot_for_update(
+                db, client_id, second_id
+            )
+            if first_id == target_slot_id:
+                target_slot, old_slot = first, second
+            else:
+                target_slot, old_slot = second, first
+
+        if target_slot is None:
+            db.rollback()
+            return BookingResult(False, "slot_missing")
+
+        refusal = _judge_slot_bookable(target_slot, now_utc)
+        if refusal is not None:
+            db.rollback()
+            return BookingResult(False, refusal)
+
+        # --- the atomic move ---------------------------------------------
+        if old_slot is not None and old_slot.status == SlotStatus.BOOKED:
+            # Release the vacated slot EXACTLY as cancellation does: only
+            # when it is currently booked; a drifted slot (blocked,
+            # cancelled, or already re-purposed) is left untouched (C7 -
+            # no repair, no coercion), and the appointment still moves.
+            old_slot.status = SlotStatus.AVAILABLE
+            old_slot.held_until = None
+            old_slot.held_by_conversation_id = None
+
+        appointment.slot_id = target_slot.id
+        # Re-sync the justified time copies to the LOCKED target row.
+        appointment.start_datetime = target_slot.start_datetime
+        appointment.end_datetime = target_slot.end_datetime
+        if cancelled_mode:
+            # Choose Another Time restores as part of the SAME atomic
+            # operation - the restore_appointment status rationale.
+            # confirmed_at is deliberately not written (D5 invariant).
+            appointment.status = AppointmentStatus.CONFIRMED
+
+        target_slot.status = SlotStatus.BOOKED
+        target_slot.held_until = None
+        target_slot.held_by_conversation_id = None
+
+        db.commit()
+        return BookingResult(True, "ok", appointment=appointment)
+    except IntegrityError as integrity_error:
+        db.rollback()  # Releases the row locks; nothing was persisted.
+        violated_index = _classify_booking_unique_violation(integrity_error)
+        if violated_index == _SLOT_UNIQUE_INDEX:
+            # A concurrent claimant won the target slot at commit time.
+            return BookingResult(False, "slot_taken")
+        if violated_index == _CONVERSATION_UNIQUE_INDEX and cancelled_mode:
+            # Only the cancelled path re-enters that index's predicate; the
+            # database arbitrated the same race the pre-check guards.
+            return BookingResult(False, "conversation_conflict")
+        # An active-path conversation violation (the row already counted
+        # once and neither conversation_id nor status changed) - or any
+        # unknown constraint - would mean a broken invariant: surface it
+        # loudly rather than absorbing it into a polite refusal (Rule 16).
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reschedule_appointment(
+    db: Session,
+    client_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    target_slot_id: uuid.UUID,
+    *,
+    now_utc: datetime,
+) -> BookingResult:
+    """
+    Purpose: "Change time" - move an ACTIVE (pending or confirmed)
+        appointment onto a different real slot, preserving its status.
+        MODE-PINNED public command (v1.0.1 correction F1): this entry
+        point can ONLY perform the active move. If the appointment turns
+        out to be CANCELLED under the row lock - a concurrent Cancel
+        committed after the user last saw the row - the stale command is
+        refused not_reschedulable and NOTHING is resurrected. Cancelled
+        recovery is a DIFFERENT command (restore_appointment_to_slot).
+
+    Inputs / Returns / Database effects / Concurrency: the shared
+        engine's contract (_move_appointment_to_slot, cancelled_mode=
+        False) - one engine, so locking, slot judgement, unique-index
+        arbitration, and transaction rules exist exactly once (Rule 3).
+    External effects: none (no notification of any kind).
+    """
+    return _move_appointment_to_slot(
+        db, client_id, appointment_id, target_slot_id,
+        now_utc=now_utc, cancelled_mode=False,
+    )
+
+
+def restore_appointment_to_slot(
+    db: Session,
+    client_id: uuid.UUID,
+    appointment_id: uuid.UUID,
+    target_slot_id: uuid.UUID,
+    *,
+    now_utc: datetime,
+) -> BookingResult:
+    """
+    Purpose: "Choose another time" - restore a CANCELLED appointment AND
+        move it onto a chosen different real slot in ONE atomic
+        transaction, ending CONFIRMED (confirmed_at is never written;
+        confirm_appointment stays its only writer). MODE-PINNED public
+        command (v1.0.1 correction F1): this entry point can ONLY perform
+        the cancelled recovery. If the appointment turns out NOT to be
+        cancelled under the row lock - a concurrent Restore Original Time
+        (or Confirm) committed first - the stale command is refused
+        not_restorable and no second move ever happens.
+
+    Inputs / Returns / Database effects / Concurrency: the shared
+        engine's contract (_move_appointment_to_slot, cancelled_mode=
+        True) - one engine, so locking, slot judgement, unique-index
+        arbitration, and transaction rules exist exactly once (Rule 3).
+    External effects: none (no notification of any kind).
+    """
+    return _move_appointment_to_slot(
+        db, client_id, appointment_id, target_slot_id,
+        now_utc=now_utc, cancelled_mode=True,
+    )

@@ -1887,3 +1887,193 @@ test("Slice 4B2: a note-save success with an EXTRA key fails closed", async () =
   assert(!outcome.ok, "a leaked field is never rendered");
   assertEqual(outcome.state, "invalid_response", "fails the body closed");
 });
+
+/* ==================================================================== */
+/* SLICE 4C - restoreAppointment / rescheduleAppointment data-layer     */
+/* proofs. Restore is one authorized POST to the derived path with NO   */
+/* body (the original slot is server-known); reschedule is one          */
+/* authorized POST whose body is EXACTLY { slot_id } - the only         */
+/* scheduling authority this surface ever sends. Both validate the      */
+/* success body to EXACTLY the approved appointment field set (C6).     */
+/* ==================================================================== */
+
+test("restoreAppointment POSTs the encoded restore path with NO body", async () => {
+  const env = makeData();
+  seedSession(env);
+  const id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/" + id + "/restore", method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validAppointmentMember({ appointment_id: id,
+      status: "confirmed" }) }
+  );
+  const outcome = await env.data.restoreAppointment(id);
+  assert(outcome.ok, "a valid 200 restore body is ok");
+  assertEqual(outcome.data.status, "confirmed", "the restored member returns");
+  const seen = env.fetch.seen();
+  assertEqual(seen[seen.length - 1].method, "POST", "restore is a POST");
+  assertEqual(seen[seen.length - 1].body, undefined,
+    "restore sends NO request body - no slot, datetime, or tenant selector");
+});
+
+test("restoreAppointment URI-encodes the id into ONE path segment", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/a%2Fb%20c/restore", method: "POST" },
+    { status: 200, json: validAppointmentMember({ status: "confirmed" }) }
+  );
+  const outcome = await env.data.restoreAppointment("a/b c");
+  assert(outcome.ok, "encoded id path is used verbatim");
+});
+
+test("rescheduleAppointment POSTs EXACTLY { slot_id } and nothing else", async () => {
+  const env = makeData();
+  seedSession(env);
+  const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/" + id + "/reschedule", method: "POST" },
+    { status: 200, json: validAppointmentMember({ appointment_id: id,
+      status: "confirmed" }) }
+  );
+  const outcome = await env.data.rescheduleAppointment(id, "slot-9");
+  assert(outcome.ok, "a valid 200 reschedule body is ok");
+  const seen = env.fetch.seen();
+  assertEqual(seen[seen.length - 1].body, JSON.stringify({ slot_id: "slot-9" }),
+    "the body is EXACTLY the chosen real server slot id - never a datetime, " +
+    "tenant, status, source, provider, service, urgency, or patient field");
+});
+
+test("reschedule success body with an EXTRA field fails closed (exact-key C6)", async () => {
+  const env = makeData();
+  seedSession(env);
+  const leaky = validAppointmentMember({ status: "confirmed" });
+  leaky.slot_id = "should-never-be-here";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/x/reschedule", method: "POST" },
+    { status: 200, json: leaky }
+  );
+  const outcome = await env.data.rescheduleAppointment("x", "s1");
+  assert(!outcome.ok, "an extra field must fail the whole body closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed on extra key");
+});
+
+test("restore 409 (original time unavailable) maps to conflict", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/restore", method: "POST" },
+    { status: 409, json: {} });
+  const outcome = await env.data.restoreAppointment("x");
+  assertEqual(outcome.state, "conflict", "409 -> conflict");
+});
+
+test("reschedule 409 (target taken) maps to conflict and 404 to not_found", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/reschedule", method: "POST" },
+    { status: 409, json: {} });
+  assertEqual((await env.data.rescheduleAppointment("x", "s1")).state,
+    "conflict", "409 -> conflict");
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/reschedule", method: "POST" },
+    { status: 404, json: {} });
+  assertEqual((await env.data.rescheduleAppointment("x", "s1")).state,
+    "not_found", "404 -> not_found");
+});
+
+test("reschedule 422 (strict body refusal) maps to bad_request", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/reschedule", method: "POST" },
+    { status: 422, json: {} });
+  assertEqual((await env.data.rescheduleAppointment("x", "s1")).state,
+    "bad_request", "422 -> bad_request (nothing mutated)");
+});
+
+test("no session means NO restore or reschedule request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  assertEqual((await env.data.restoreAppointment("x")).state, "signed_out",
+    "restore: signed_out with zero requests");
+  assertEqual((await env.data.rescheduleAppointment("x", "s1")).state,
+    "signed_out", "reschedule: signed_out with zero requests");
+  assertEqual(env.fetch.remaining(), 0, "no request was made");
+});
+
+/* ==================================================================== */
+/* SLICE 4C v1.0.1 (mode pin F1) - restoreAppointmentToSlot: "Choose    */
+/* another time" is its OWN server command (cancelled-only), on its OWN */
+/* route, with the SAME one-key body and the SAME exact-key success     */
+/* validation as reschedule. The data owner never sends a status: the   */
+/* two commands are distinguished by WHICH method the pages call.       */
+/* ==================================================================== */
+
+test("restoreAppointmentToSlot POSTs the restore-to-slot path with EXACTLY { slot_id }", async () => {
+  const env = makeData();
+  seedSession(env);
+  const id = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/" + id + "/restore-to-slot",
+      method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: validAppointmentMember({ appointment_id: id,
+      status: "confirmed" }) }
+  );
+  const outcome = await env.data.restoreAppointmentToSlot(id, "slot-7");
+  assert(outcome.ok, "a valid 200 recovery body is ok");
+  assertEqual(outcome.data.status, "confirmed",
+    "the recovered appointment returns confirmed");
+  const seen = env.fetch.seen();
+  assertEqual(seen[seen.length - 1].body, JSON.stringify({ slot_id: "slot-7" }),
+    "the body is EXACTLY the chosen real server slot id - never a status, " +
+    "datetime, tenant, source, provider, service, urgency, or patient field");
+});
+
+test("restoreAppointmentToSlot URI-encodes the id into ONE path segment", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/a%2Fb%20c/restore-to-slot",
+      method: "POST" },
+    { status: 200, json: validAppointmentMember({ status: "confirmed" }) }
+  );
+  const outcome = await env.data.restoreAppointmentToSlot("a/b c", "s1");
+  assert(outcome.ok, "encoded id path is used verbatim");
+});
+
+test("restore-to-slot success body with an EXTRA field fails closed (exact-key C6)", async () => {
+  const env = makeData();
+  seedSession(env);
+  const leaky = validAppointmentMember({ status: "confirmed" });
+  leaky.slot_id = "should-never-be-here";
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/x/restore-to-slot", method: "POST" },
+    { status: 200, json: leaky }
+  );
+  const outcome = await env.data.restoreAppointmentToSlot("x", "s1");
+  assert(!outcome.ok, "an extra field must fail the whole body closed");
+  assertEqual(outcome.state, "invalid_response", "fail closed on extra key");
+});
+
+test("restore-to-slot 409 maps to conflict, 404 to not_found, 422 to bad_request", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/restore-to-slot",
+    method: "POST" }, { status: 409, json: {} });
+  assertEqual((await env.data.restoreAppointmentToSlot("x", "s1")).state,
+    "conflict",
+    "409 -> conflict (incl. the F1 stale-command refusal: not cancelled)");
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/restore-to-slot",
+    method: "POST" }, { status: 404, json: {} });
+  assertEqual((await env.data.restoreAppointmentToSlot("x", "s1")).state,
+    "not_found", "404 -> not_found");
+  env.fetch.expect({ urlEquals: "/portal/appointments/x/restore-to-slot",
+    method: "POST" }, { status: 422, json: {} });
+  assertEqual((await env.data.restoreAppointmentToSlot("x", "s1")).state,
+    "bad_request", "422 -> bad_request (nothing mutated)");
+});
+
+test("no session means NO restore-to-slot request at all", async () => {
+  const env = makeData();  /* no seedSession */
+  assertEqual((await env.data.restoreAppointmentToSlot("x", "s1")).state,
+    "signed_out", "signed_out with zero requests");
+  assertEqual(env.fetch.remaining(), 0, "no request was made");
+});

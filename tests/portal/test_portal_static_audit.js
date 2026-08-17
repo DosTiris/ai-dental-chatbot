@@ -337,20 +337,34 @@ test("audit: the drawer actions reuse the existing data-layer methods", () => {
     "Confirm must go through the existing data owner");
   assert(pages.indexOf("data.cancelAppointment") !== -1,
     "Cancel must go through the existing data owner");
-  /* SLICE 4B2 - DELIBERATE allow-list growth (the documented closed-list
-   * mechanism): the data owner now also declares the reviewed 4B1
-   * internal-note endpoint. Confirm, cancel, and internal-note are the
-   * ONLY appointment mutations; anything else remains a loud failure. */
+  /* SLICE 4B2 / SLICE 4C - DELIBERATE allow-list growth (the documented
+   * closed-list mechanism): the data owner now also declares the reviewed
+   * 4B1 internal-note endpoint and the reviewed 4C restore / reschedule /
+   * restore-to-slot actions (v1.0.1 mode pin F1: Change time and Choose
+   * another time are DIFFERENT server commands). Confirm, cancel,
+   * internal-note, restore, reschedule, and restore-to-slot are the ONLY
+   * appointment mutations; anything else remains a loud failure. */
   const dataFile = read("portal-data.js");
   const posts = dataFile.match(/\/portal\/appointments\/[^"\x27]*/g) || [];
   for (const path of posts) {
     assert(path.indexOf("confirm") !== -1 || path.indexOf("cancel") !== -1 ||
       path.indexOf("internal-note") !== -1 ||
+      path.indexOf("restore") !== -1 || path.indexOf("reschedule") !== -1 ||
       path.indexOf("{") !== -1 || path === "/portal/appointments",
       "unexpected appointment endpoint in the data owner: " + path);
   }
   assert(pages.indexOf("data.setAppointmentInternalNote") !== -1,
     "the note save must go through the existing data owner");
+  /* SLICE 4C: the drawer's restore and reschedule must also go through
+   * the ONE data owner - never a second request pathway. */
+  assert(pages.indexOf("data.restoreAppointment") !== -1,
+    "Restore must go through the existing data owner");
+  assert(pages.indexOf("data.rescheduleAppointment") !== -1,
+    "Reschedule must go through the existing data owner");
+  /* v1.0.1 (F1): the cancelled-recovery move is its OWN server command
+   * and must ALSO go through the one data owner. */
+  assert(pages.indexOf("data.restoreAppointmentToSlot") !== -1,
+    "Choose another time must go through the existing data owner");
 });
 
 /* Final polish: the calendar must not grow its own vertical scroll box.
@@ -412,14 +426,19 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
     assert(section.indexOf(word) === -1,
       "page-calendar markup must not offer " + word);
   }
-  /* Exactly the NINE reviewed controls (SLICE 4B2 amendment, the same
+  /* Exactly the ELEVEN reviewed controls (SLICE 4C amendment, the same
    * closed-list mechanism): week prev/next, refresh, the drawer close,
-   * the booking panel's close + submit, and the drawer note section's
-   * Edit / Save / Cancel. Still an exact pin - an unreviewed button can
-   * never slip in. */
+   * the booking panel's close + submit, the drawer note section's
+   * Edit / Save / Cancel, and the 4C reschedule picker's Save new time /
+   * Cancel. The action buttons themselves (Confirm, Cancel appointment,
+   * Restore original time, Change time / Choose another time) are
+   * rendered by the reviewed drawer builder from the calendar action set,
+   * never declared in markup - which is why the forbidden-word pin above
+   * still holds over this static section. Still an exact pin - an
+   * unreviewed button can never slip in. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 9,
-    "expected exactly the nine reviewed controls, found " + buttons.length);
+  assert(buttons.length === 11,
+    "expected exactly the eleven reviewed controls, found " + buttons.length);
 });
 
 /* PHASE 3A Slice 3: the booking submit must go through the existing data
@@ -531,7 +550,10 @@ test("audit: the calendar surface never claims a slot is bookable", () => {
  * would silently degrade the Calendar page to its unavailable state. */
 test("audit: index.html loads portal-calendar.js before portal-pages.js", () => {
   const content = read("index.html");
-  const calendarAt = content.indexOf('src="/static/portal/portal-calendar.js"');
+  /* 4C: portal-calendar.js is now version-tokened as well (its ghost
+   * hit-target fix must never pair with a stale cached orchestrator);
+   * the ORDER rule is unchanged. */
+  const calendarAt = content.indexOf('src="/static/portal/portal-calendar.js?');
   /* 4B2: portal-pages.js is version-tokened; the ORDER rule is unchanged. */
   const pagesAt = content.indexOf('src="/static/portal/portal-pages.js?');
   assert(calendarAt !== -1, "index.html must load portal-calendar.js");
@@ -607,20 +629,27 @@ test("audit: internal-note inputs are bounded and the note stays out of URLs/sto
   }
 });
 
-test("audit: the 4B2 assets carry the exact deterministic cache-bust tokens", () => {
+test("audit: the 4C assets carry the exact deterministic cache-bust tokens", () => {
   const html = read("index.html");
-  const TOKEN = "4b2-internal-note-ui-v1";
+  /* 4C: one shared token for every asset this slice changed - data (new
+   * restore/reschedule methods), pages (the drawer picker that calls
+   * them), calendar (the ghost hit-target fix), and css (pinned with the
+   * bundle). A stale cached member of this set must never pair with a
+   * fresh one across the deployment boundary. */
+  const TOKEN = "4c-cancel-recovery-v2";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
+    '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-pages.js?v=' + TOKEN + '"></script>',
     '<link rel="stylesheet" href="/static/portal/portal.css?v=' + TOKEN + '" />'
   ]) {
     assert(html.indexOf(versioned) !== -1,
-      "a 4B2-modified asset must ship with the exact token: " + versioned);
+      "a 4C-modified asset must ship with the exact token: " + versioned);
   }
   const scripts = html.match(/<script[^>]*src="([^"]+)"/g) || [];
   for (const tag of scripts) {
     if (tag.indexOf("portal-data.js") !== -1 ||
+        tag.indexOf("portal-calendar.js") !== -1 ||
         tag.indexOf("portal-pages.js") !== -1) { continue; }
     assert(tag.indexOf("?") === -1,
       "an untouched asset must not carry a query token: " + tag);
