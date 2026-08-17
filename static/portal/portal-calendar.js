@@ -117,6 +117,21 @@
    * line of text - rather than inventing a second magic number. */
   var HISTORY_STRIP_HEIGHT_PX = 14;
 
+  /* SLICE 4C.1 (Defect 2): when the marker exists because a LIVE
+   * appointment occludes the ghost, the horizontal bottom strip sat
+   * INSIDE the live block's own box - and on a short (compact) block the
+   * 14px band lands on the block's only text row, cutting the live
+   * patient's name in half (the production screenshot: John's red
+   * CANCELLED marker across the new patient's name). The occlusion marker
+   * is therefore a vertical RAIL on the region's RIGHT edge instead, and
+   * every live block it sits beside cedes exactly that clearance - the
+   * two controls never share a pixel, at ANY block height, with no
+   * pointer-events tricks and no z-order change. The rail width matches
+   * the strip height (one thin line, turned upright); the clearance adds
+   * the rail's own 2px inset on each side. */
+  var HISTORY_RAIL_WIDTH_PX = 14;
+  var HISTORY_RAIL_CLEARANCE_PX = HISTORY_RAIL_WIDTH_PX + 4;
+
   var KIND_SLOT = "slot";
   var KIND_APPOINTMENT = "appointment";
 
@@ -837,7 +852,19 @@
       var lane = historical ? 0 : entry.lane;
       var width = 100 / laneCount;
       element.style.left = (lane * width) + "%";
-      element.style.width = width + "%";
+      if (entry.besideHistoryRail === true) {
+        /* SLICE 4C.1 (Defect 2): this live block shares its time region
+         * with an occlusion RAIL, and it is the block whose box reaches
+         * the column's right edge - so its right edge is pulled in by the
+         * rail clearance (left inset + right inset defines the box; no
+         * width is set). Its text now ellipsizes a few pixels earlier -
+         * the calendar's established behavior for every width-constrained
+         * block - instead of being painted OVER, and the hover title
+         * still carries the full record. */
+        element.style.right = HISTORY_RAIL_CLEARANCE_PX + "px";
+      } else {
+        element.style.width = width + "%";
+      }
 
       var statusWord = appointmentStatusLabel(entry.status);
       var name = (entry.payload && entry.payload.patient_name) || "";
@@ -937,6 +964,48 @@
       return element;
     }
 
+    /*
+     * Purpose (SLICE 4C.1 - Defect 2): the occlusion marker - a vertical
+     * rail on the RIGHT edge of the ghost's own time region, drawn in the
+     * strips layer, replacing the horizontal bottom strip for the
+     * live-appointment-occlusion cause ONLY (a ghost demoted off an Open
+     * band keeps the shipped horizontal strip: a band has no text lines a
+     * bottom strip can cut). The rail spans the ghost's full height, so
+     * the history's true extent stays visible; the live blocks beside it
+     * cede the rail clearance (buildAppointmentBlock), so the rail never
+     * paints over the live patient's name or time - at any block height.
+     * It is the SAME kind of control as the strip: a real button, opening
+     * the same read-only cancelled drawer, with patient, status word and
+     * original time all present in its text (visually clipped by the
+     * narrow rail exactly as the strip already clips its time span) and
+     * on the hover title.
+     */
+    function buildHistoryRail(entry, firstHour) {
+      var element = doc.createElement("button");
+      element.type = "button";
+      element.className =
+        "portal-calendar-history-strip portal-calendar-history-rail";
+      var box = geometryFor(entry.startMinutes, entry.endMinutes, firstHour);
+      element.style.top = box.top + "px";
+      element.style.height = box.height + "px";
+
+      var statusWord = appointmentStatusLabel(entry.status);
+      var name = (entry.payload && entry.payload.patient_name) || "";
+      element.appendChild(span("portal-calendar-history-strip-name", name));
+      element.appendChild(span("portal-calendar-history-strip-status",
+        statusWord));
+      element.appendChild(span("portal-calendar-history-strip-time",
+        "at " + entry.caption));
+      element.title = statusWord + (name === "" ? "" : " - " + name) +
+        " at " + entry.caption;
+
+      element.addEventListener("click", function () {
+        onAppointmentSelect(entry.payload);
+      });
+      renderedBlocks.push({ payload: entry.payload, element: element });
+      return element;
+    }
+
     function buildColumn(dayText, dayEntries, window) {
       var column = doc.createElement("div");
       column.className = "portal-calendar-col";
@@ -1011,11 +1080,42 @@
       }
       canvas.appendChild(historyLayer);
 
+      /* SLICE 4C.1 (Defect 2): decide each ghost's marker CAUSE once, in
+       * one place, so the strips loop below and the beside-rail clearance
+       * here can never disagree. Occlusion by a live appointment takes
+       * priority over band demotion: only the occlusion case has live
+       * text a marker could cut, and one entry still gets at most ONE
+       * affordance. */
+      var occludedHistory = [];
+      for (var q = 0; q < orderedHistory.length; q++) {
+        occludedHistory[q] = isHistoryOccluded(orderedHistory[q],
+          activeEntries);
+      }
+
       var blockLayer = doc.createElement("div");
       blockLayer.className = "portal-calendar-blocks";
       var laned = assignLanes(activeEntries);
       for (var a = 0; a < laned.length; a++) {
-        blockLayer.appendChild(buildAppointmentBlock(laned[a],
+        /* SLICE 4C.1 (Defect 2): a live block cedes the rail clearance
+         * when (a) a RAIL will be drawn for a ghost sharing minutes with
+         * it, and (b) this block's own box reaches the column's right
+         * edge - the last lane (a sole full-width block is its own last
+         * lane). Earlier lanes never touch the rail's x-range and keep
+         * their exact geometry. */
+        var lanedEntry = laned[a];
+        var reachesRightEdge = !(lanedEntry.laneCount > 1 &&
+          lanedEntry.lane < lanedEntry.laneCount - 1);
+        if (reachesRightEdge) {
+          for (var r = 0; r < orderedHistory.length; r++) {
+            if (!occludedHistory[r]) { continue; }
+            if (lanedEntry.startMinutes < orderedHistory[r].endMinutes &&
+                orderedHistory[r].startMinutes < lanedEntry.endMinutes) {
+              lanedEntry.besideHistoryRail = true;
+              break;
+            }
+          }
+        }
+        blockLayer.appendChild(buildAppointmentBlock(lanedEntry,
           window.firstHour));
       }
       canvas.appendChild(blockLayer);
@@ -1027,13 +1127,19 @@
       var stripLayer = doc.createElement("div");
       stripLayer.className = "portal-calendar-history-strips";
       for (var m = 0; m < orderedHistory.length; m++) {
-        /* SLICE 4C (Bug A): a strip is drawn for a ghost demoted off an
-         * OPEN band (its only remaining affordance) as well as for the
-         * existing case of a ghost a live appointment rendered unreadable.
-         * The two conditions are OR-ed over ONE loop, so an entry can never
-         * receive two strips. */
-        if (overlapsAnyAvailableBand(orderedHistory[m], bands) ||
-            isHistoryOccluded(orderedHistory[m], activeEntries)) {
+        /* SLICE 4C (Bug A) + SLICE 4C.1 (Defect 2): one affordance per
+         * demoted/occluded ghost, chosen by CAUSE over ONE if/else so an
+         * entry can never receive two. Occlusion by a live appointment ->
+         * the vertical RAIL (never across the live block's text); demoted
+         * off an OPEN band without live occlusion -> the shipped
+         * horizontal strip, exactly as Bug A validated it. A ghost with
+         * both causes takes the rail: the band loses only the same thin
+         * right sliver every beside-rail live block cedes, while a bottom
+         * strip would cut the live patient's name. */
+        if (occludedHistory[m]) {
+          stripLayer.appendChild(buildHistoryRail(orderedHistory[m],
+            window.firstHour));
+        } else if (overlapsAnyAvailableBand(orderedHistory[m], bands)) {
           stripLayer.appendChild(buildHistoryStrip(orderedHistory[m],
             window.firstHour));
         }

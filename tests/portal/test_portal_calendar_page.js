@@ -239,7 +239,7 @@ function loadFactories() {
   };
 }
 
-function makePages() {
+function makePages(options) {
   const factories = loadFactories();
   const doc = makeDocument();
   const data = makeFakeData();
@@ -247,7 +247,11 @@ function makePages() {
   const pages = factories.createPages({
     data: data,
     documentRef: doc,
-    onSessionLost: (state) => sessionLost.push(state)
+    onSessionLost: (state) => sessionLost.push(state),
+    /* SLICE 4C.1 (Defect 1): tests may pin the picker's clock to a fixed
+     * epoch instant; production wiring passes nothing and the real clock
+     * is used. */
+    nowProvider: options && options.nowProvider
   });
   return {
     pages, doc, data, sessionLost,
@@ -1232,8 +1236,15 @@ test("2B: a ghost does not push an overlapping ACTIVE appointment into a lane", 
   await flush();
 
   const live = blocksIn(columns(f.doc)[0])[0];
-  assertEqual(live.style.width, "100%",
-    "the live appointment keeps the full column - history took no lane");
+  /* SLICE 4C.1 amendment (Defect 2): the occluded ghost's marker is now a
+   * right-edge RAIL, so the live block cedes exactly the rail clearance -
+   * it is still NOT laned (no lane class, left edge kept); its box simply
+   * ends before the rail instead of underneath it. */
+  assertEqual(live.style.right, "18px",
+    "the live appointment cedes exactly the rail clearance");
+  assertEqual(live.style.width, undefined,
+    "no width is set - left + right insets define its box, and no " +
+    "half-width lane was created");
   assertEqual(live.style.left, "0%", "and the left edge");
   assert(live.className.indexOf("portal-calendar-block-narrow") === -1,
     "and is not marked narrow");
@@ -1268,8 +1279,12 @@ test("2B exact overlap: the live appointment keeps normal geometry", async () =>
 
   const live = blocksIn(columns(f.doc)[0]);
   assertEqual(live.length, 1, "exactly ONE live appointment is drawn");
-  assertEqual(live[0].style.width, "100%",
-    "it keeps the full column - no second active lane was created");
+  /* SLICE 4C.1 amendment (Defect 2): beside the occlusion rail, the live
+   * block cedes the rail clearance instead of being painted over. */
+  assertEqual(live[0].style.right, "18px",
+    "it cedes exactly the rail clearance on the right");
+  assertEqual(live[0].style.width, undefined,
+    "no width is set - left + right insets define its box, unlaned");
   assertEqual(live[0].style.left, "0%", "and the left edge");
   assert(live[0].className.indexOf("portal-calendar-block-narrow") === -1,
     "and is not marked narrow");
@@ -1290,8 +1305,12 @@ test("2B exact overlap: a fully occluded ghost gets ONE compact history strip", 
   const strip = strips[0];
   assertEqual(strip.tagName, "BUTTON", "a real control, not decoration");
   assertEqual(strip.type, "button", "never a submit control");
-  assertEqual(strip.className, "portal-calendar-history-strip",
-    "the horizontal strip treatment, not the old vertical marker");
+  /* SLICE 4C.1 amendment (Defect 2): the OCCLUSION affordance is the
+   * vertical rail - the strip class plus its rail modifier, inheriting
+   * the whole clickable red treatment. */
+  assertEqual(strip.className,
+    "portal-calendar-history-strip portal-calendar-history-rail",
+    "the occlusion marker is the strip turned upright - the rail");
 });
 
 test("2B exact overlap: the strip reads as patient + CANCELLED, with no x glyph", async () => {
@@ -1324,7 +1343,7 @@ test("2B exact overlap: the strip reads as patient + CANCELLED, with no x glyph"
   }
 });
 
-test("2B exact overlap: the strip sits on the BOTTOM edge, above the live layer", async () => {
+test("2B exact overlap: the rail spans the region's right edge, above the live layer", async () => {
   const f = makePages();
   exactOverlapWeek(f);
   openCalendar(f);
@@ -1342,17 +1361,24 @@ test("2B exact overlap: the strip sits on the BOTTOM edge, above the live layer"
   assert(stripsIndex > blocksIndex,
     "but the strip paints above it, so it can never be covered");
 
-  /* Bottom-aligned, so it covers only the live block's LAST line. */
+  /* SLICE 4C.1 amendment (Defect 2): the occlusion marker is the RAIL on
+   * the region's right edge. It spans the ghost's FULL time region (its
+   * true extent stays visible), and the live block beside it cedes the
+   * rail clearance - so the marker shares NO pixel with the live block
+   * and can never cut the live patient's name or time, at any height.
+   * The old bottom strip sat INSIDE the live box and cut the single text
+   * row of a compact 30-minute block in half - the production defect. */
   const live = blocksIn(columns(f.doc)[0])[0];
-  const strip = allHistoryStrips(f.doc)[0];
+  const rail = allHistoryStrips(f.doc)[0];
   const liveTop = parseFloat(live.style.top);
   const liveHeight = parseFloat(live.style.height);
-  const stripTop = parseFloat(strip.style.top);
-  const stripHeight = parseFloat(strip.style.height);
-  assertEqual(stripHeight, 14, "one thin line");
-  assertEqual(stripTop, liveTop + liveHeight - stripHeight,
-    "flush with the bottom edge, leaving the live time and patient visible");
-  assert(stripTop > liveTop, "and never across the live block's first line");
+  const railTop = parseFloat(rail.style.top);
+  const railHeight = parseFloat(rail.style.height);
+  assertEqual(railTop, liveTop, "the rail starts at the region's top");
+  assertEqual(railHeight, liveHeight,
+    "and spans the ghost's full extent - one upright line beside the block");
+  assertEqual(live.style.right, "18px",
+    "the live block ends before the rail: no shared pixel, no covered text");
 });
 
 test("2B exact overlap: activating the strip opens Maria's cancelled drawer", async () => {
@@ -1548,9 +1574,13 @@ test("2B: only a TINY exposed fragment still uses the strip", async () => {
   openCalendar(f);
   await flush();
   assertEqual(allHistoryStrips(f.doc).length, 1,
-    "an unreadable sliver still needs the strip");
-  assertEqual(blocksIn(columns(f.doc)[0])[0].style.width, "100%",
-    "and the live appointment still keeps its geometry");
+    "an unreadable sliver still needs its affordance");
+  /* SLICE 4C.1 amendment (Defect 2): the affordance is the rail, so the
+   * overlapping live block cedes the rail clearance - and nothing else. */
+  assertEqual(blocksIn(columns(f.doc)[0])[0].style.right, "18px",
+    "the live appointment cedes exactly the rail clearance");
+  assertEqual(blocksIn(columns(f.doc)[0])[0].style.left, "0%",
+    "and keeps its left edge");
 });
 
 test("2B: no live block reserves padding for a history affordance", () => {
@@ -5836,4 +5866,349 @@ test("4C: a range-refused week is never a picker source", async () => {
     "the refusal is stated");
   assertEqual(allHistory(f.doc).length + allHistoryStrips(f.doc).length, 0,
     "nothing is rendered from a refused pair");
+});
+
+
+/* ==================================================================== */
+/* SLICE 4C.1 - Defect 1: reschedule picker eligibility.                */
+/* The picker never OFFERS a slot whose start is at or before the       */
+/* current instant - the exact mirror of the backend's strictly-in-the- */
+/* future rule (start <= now -> slot_started), which remains the FINAL  */
+/* authority under its row lock. The clock is injected as an EPOCH-MS   */
+/* INSTANT, and every comparison is instant-vs-instant on the slots'    */
+/* aware UTC starts - no local-clock strings anywhere in the path, so   */
+/* the outcome is identical on every developer machine in every         */
+/* timezone. Fixture slots: s-open-1 = 2026-08-25T15:00:00Z (11:00 AM   */
+/* EDT), s-open-2 = 2026-08-26T13:00:00Z (9:00 AM EDT).                 */
+/* ==================================================================== */
+
+test("4C.1: a slot that already started is not offered - the production case", async () => {
+  /* The office clock reads PAST the first slot's start (the reported
+   * defect: a 4:00 PM slot still listed after 4:00 PM office time). */
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-25T16:00:00Z")
+  });
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  const times = rescheduleTimeButtons(f.doc);
+  assertEqual(times.length, 1, "the started slot is absent from the picker");
+  assert(times[0].textContent.indexOf("9:00 AM") !== -1,
+    "the remaining choice is the still-future slot, office-local: " +
+    times[0].textContent);
+
+  /* The surviving choice remains fully usable end to end. */
+  times[0].trigger("click");
+  f.data.queue("restoreAppointmentToSlot", { ok: true, data: {} });
+  queueWeek(f, [], [cancelledFixture({ status: "confirmed" })]);
+  f.doc._elements["calendar-drawer-reschedule-save"].trigger("click");
+  await flush();
+  await flush();
+  assertEqual(JSON.stringify(f.data.calls.restoreAppointmentToSlot),
+    JSON.stringify([{ appointmentId: "appt-cancelled",
+      slotId: "s-open-2" }]),
+    "and books through the same one-command pathway");
+});
+
+test("4C.1: a slot starting exactly NOW is not offered (the backend's boundary)", async () => {
+  /* The backend refuses start <= now ("start not strictly in the
+   * future"); the picker mirrors that boundary EXACTLY, so a choice the
+   * server would certainly reject is never presented. */
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-25T15:00:00Z")
+  });
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  const times = rescheduleTimeButtons(f.doc);
+  assertEqual(times.length, 1, "start == now is already ineligible");
+  assert(times[0].textContent.indexOf("9:00 AM") !== -1,
+    "only the strictly-future slot remains");
+});
+
+test("4C.1: one instant before its start, a slot is still offered", async () => {
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-25T15:00:00Z") - 1000
+  });
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  assertEqual(rescheduleTimeButtons(f.doc).length, 2,
+    "both strictly-future slots are offered - the filter never over-hides");
+});
+
+test("4C.1: the ACTIVE Change-time picker receives the same protection", async () => {
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-25T16:00:00Z")
+  });
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-open-1",
+      start_datetime: "2026-08-25T15:00:00Z",
+      end_datetime: "2026-08-25T15:30:00Z" }),
+    slotFixture({ slot_id: "s-open-2",
+      start_datetime: "2026-08-26T13:00:00Z",
+      end_datetime: "2026-08-26T13:30:00Z" })
+  ], [appointmentFixture({ appointment_id: "appt-live",
+    status: "confirmed" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f);
+  await flush();
+  actionButton(f.doc, "Change time").trigger("click");
+  await flush();
+
+  const times = rescheduleTimeButtons(f.doc);
+  assertEqual(times.length, 1,
+    "one filter at one boundary protects BOTH commands");
+  assert(times[0].textContent.indexOf("9:00 AM") !== -1,
+    "and the same still-future slot remains");
+});
+
+test("4C.1: when every open slot has started, the picker says none and Save disables", async () => {
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-27T00:00:00Z")
+  });
+  cancelledWithOpenWeek(f);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  assertEqual(rescheduleTimeButtons(f.doc).length, 0, "nothing is offered");
+  assertEqual(
+    f.doc._elements["calendar-drawer-reschedule-note"].textContent,
+    "No open times in the week shown. Open the calendar week you want and try again, or publish availability first.",
+    "the existing honest empty-picker wording, not a new message");
+  assertEqual(
+    f.doc._elements["calendar-drawer-reschedule-save"].disabled, true,
+    "and Save is disabled");
+  assertEqual(f.data.calls.rescheduleAppointment.length +
+    f.data.calls.restoreAppointmentToSlot.length, 0,
+    "no request of either mode can be sent");
+});
+
+test("4C.1: an unparsable slot start fails CLOSED - never offered", async () => {
+  const f = makePages({
+    nowProvider: () => Date.parse("2026-08-24T00:00:00Z")
+  });
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-bad", start_datetime: "not-a-datetime" }),
+    slotFixture({ slot_id: "s-open-2",
+      start_datetime: "2026-08-26T13:00:00Z",
+      end_datetime: "2026-08-26T13:30:00Z" })
+  ], [cancelledFixture()]);
+  openCalendar(f);
+  await flush();
+  allHistory(f.doc)[0].trigger("click");
+  await flush();
+  actionButton(f.doc, "Choose another time").trigger("click");
+  await flush();
+
+  assertEqual(rescheduleTimeButtons(f.doc).length, 1,
+    "a start the filter cannot judge is not offered (fail closed)");
+});
+
+
+/* ==================================================================== */
+/* SLICE 4C.1 - Defect 2: the cancelled-history occlusion marker.       */
+/* The production defect: John's red CANCELLED marker (the old bottom   */
+/* strip) painted ACROSS the new active appointment booked into his     */
+/* reopened 2:00 PM slot, cutting the live patient's name in half. The  */
+/* occlusion marker is now a vertical RAIL on the region's right edge,  */
+/* and the live block beside it cedes exactly the rail clearance - the  */
+/* two controls never share a pixel, both stay independently clickable, */
+/* and no pointer-events trick is involved (the audit pins the layer    */
+/* rules unchanged). Band-only demotion keeps the shipped horizontal    */
+/* strip.                                                               */
+/* ==================================================================== */
+
+test("4C.1: booked-over-cancelled - the marker never covers the live name or time", async () => {
+  /* John cancelled 10:30-11:00; the slot reopened and was booked for a
+   * NEW patient - the exact production reproduction. */
+  const f = makePages();
+  queueWeek(f, [], [
+    cancelledFixture({ appointment_id: "appt-john",
+      patient_name: "John Alvarez",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-new",
+      patient_name: "Dana Whitfield", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  const live = blocksIn(columns(f.doc)[0])[0];
+  const rails = allHistoryStrips(f.doc);
+  assertEqual(rails.length, 1, "exactly one history affordance");
+  const rail = rails[0];
+  assert(rail.className.indexOf("portal-calendar-history-rail") !== -1,
+    "and it is the vertical rail");
+
+  /* Zero shared pixels: the live box ends at the rail clearance; the
+   * rail occupies only that ceded right edge. The live block's time and
+   * name therefore CANNOT be painted over - at any block height. */
+  assertEqual(live.style.right, "18px",
+    "the live block ends before the rail");
+  assertEqual(parseFloat(rail.style.top), parseFloat(live.style.top),
+    "the rail shares the region's top");
+  assertEqual(parseFloat(rail.style.height), parseFloat(live.style.height),
+    "and its full height - the history's true extent stays visible");
+
+  /* The live text is intact in the block the office actually sees. */
+  const texts = blockTexts(live);
+  assert(texts.indexOf("Dana Whitfield") !== -1,
+    "the ACTIVE patient's name renders in the live block");
+  assertEqual(live.title.indexOf("Dana Whitfield") === -1, false,
+    "and the hover title carries the full record regardless of width");
+
+  /* History is preserved: patient, status and original time all remain
+   * in the rail's accessible text and title (visually clipped by the
+   * narrow rail exactly as the strip already clips its time span). */
+  const parts = rail.children.map((s) => s.textContent);
+  assertEqual(parts[0], "John Alvarez", "the cancelled patient is named");
+  assertEqual(parts[1], "Cancelled", "with the frozen status word");
+  assert(parts[2].indexOf("10:30 AM") !== -1, "and his ORIGINAL time");
+  assert(rail.title.indexOf("John Alvarez") !== -1, "title too");
+});
+
+test("4C.1: booked-over-cancelled - both controls stay independently clickable", async () => {
+  const f = makePages();
+  queueWeek(f, [], [
+    cancelledFixture({ appointment_id: "appt-john",
+      patient_name: "John Alvarez",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-new",
+      patient_name: "Dana Whitfield", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  /* The rail opens JOHN's read-only cancelled drawer... */
+  allHistoryStrips(f.doc)[0].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "John Alvarez", "the rail opens the CANCELLED patient's drawer");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Cancelled", "read-only history");
+
+  /* ...and the live block, its own box beside the rail, opens DANA's. */
+  blocksIn(columns(f.doc)[0])[0].trigger("click");
+  await flush();
+  assertEqual(f.doc._elements["calendar-drawer-title"].textContent,
+    "Dana Whitfield", "the live block opens the ACTIVE drawer");
+  assertEqual(f.doc._elements["calendar-drawer-status"].textContent,
+    "Confirmed", "which is the live appointment");
+});
+
+test("4C.1: band-only demotion keeps the shipped horizontal strip", async () => {
+  /* A ghost over a reusable Open band with NO live overlap: the Bug A
+   * presentation is untouched - the horizontal bottom strip, exactly as
+   * production validated it. This pins the cause split. */
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-reopened",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ], [cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" })]);
+  openCalendar(f);
+  await flush();
+
+  const strips = allHistoryStrips(f.doc);
+  assertEqual(strips.length, 1, "one affordance");
+  assertEqual(strips[0].className, "portal-calendar-history-strip",
+    "the horizontal strip, without the rail modifier");
+  assertEqual(parseFloat(strips[0].style.height), 14, "one thin line");
+  assertEqual(allHistory(f.doc).length, 0,
+    "and the full ghost stays demoted off the Open band (Bug A)");
+});
+
+test("4C.1: a ghost over an Open band AND under a live block takes the rail", async () => {
+  /* Both causes at once: the ghost sits over a reusable Open band AND is
+   * fully occluded by a live appointment (booked on a DIFFERENT slot at
+   * the same time). The rail wins - a bottom strip would cut the live
+   * text, while the band loses only the same thin right sliver every
+   * beside-rail live block cedes. Still exactly ONE affordance. */
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ slot_id: "s-reopened",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ], [
+    cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "appt-live", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  const affordances = allHistoryStrips(f.doc);
+  assertEqual(affordances.length, 1, "never two affordances for one ghost");
+  assert(affordances[0].className.indexOf("portal-calendar-history-rail")
+    !== -1, "the rail takes priority over the horizontal strip");
+  assertEqual(allHistory(f.doc).length, 0,
+    "the full ghost stays demoted off the Open band (Bug A preserved)");
+  assertEqual(allBands(f.doc).length, 1, "the reusable band still renders");
+  assertEqual(allBands(f.doc)[0].children[0].textContent, "Open",
+    "and still says Open");
+  assertEqual(blocksIn(columns(f.doc)[0])[0].style.right, "18px",
+    "and the overlapped live block cedes the rail clearance");
+});
+
+test("4C.1: with laned actives, only the right-edge lane cedes the rail clearance", async () => {
+  /* Two overlapping live appointments share the region as lanes; a ghost
+   * occluded beneath them draws the rail. Only the lane whose box reaches
+   * the column's right edge can touch the rail, so only IT cedes. */
+  const f = makePages();
+  queueWeek(f, [], [
+    cancelledFixture({ start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "lane-left",
+      patient_name: "Lane Left", status: "confirmed",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" }),
+    appointmentFixture({ appointment_id: "lane-right",
+      patient_name: "Lane Right", status: "pending",
+      start_datetime: "2026-08-24T14:30:00Z",
+      end_datetime: "2026-08-24T15:00:00Z" })
+  ]);
+  openCalendar(f);
+  await flush();
+
+  const blocks = blocksIn(columns(f.doc)[0]);
+  assertEqual(blocks.length, 2, "two live lanes");
+  const left = blocks.find((el) => el.style.left === "0%");
+  const right = blocks.find((el) => el.style.left === "50%");
+  assertEqual(left.style.width, "50%",
+    "the left lane keeps its exact geometry - it never touches the rail");
+  assertEqual(left.style.right, undefined, "and cedes nothing");
+  assertEqual(right.style.width, undefined,
+    "the right-edge lane drops its width");
+  assertEqual(right.style.right, "18px",
+    "and cedes exactly the rail clearance");
+  assertEqual(allHistoryStrips(f.doc).length, 1, "beside one rail");
 });

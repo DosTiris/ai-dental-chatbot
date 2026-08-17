@@ -636,7 +636,7 @@ test("audit: the 4C assets carry the exact deterministic cache-bust tokens", () 
    * them), calendar (the ghost hit-target fix), and css (pinned with the
    * bundle). A stale cached member of this set must never pair with a
    * fresh one across the deployment boundary. */
-  const TOKEN = "4c-cancel-recovery-v2";
+  const TOKEN = "4c1-picker-overlay-v1";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',

@@ -834,6 +834,32 @@ button.portal-calendar-band {
   white-space: nowrap;
 }
 
+/* SLICE 4C.1 (Defect 2): the OCCLUSION marker is the strip turned upright -
+   a thin vertical rail on the right edge of the ghost's own time region.
+   It inherits the strip's whole treatment (red dashed border, background,
+   pointer-events: auto, hover, focus ring); only its geometry differs, and
+   every live block beside it cedes exactly this clearance in the renderer,
+   so the rail never paints over the live patient's name or time. */
+.portal-calendar-history-rail {
+  left: auto;
+  right: 2px;
+  width: 14px;
+  padding: 0;
+}
+
+/* The rail is one thin upright line: like the strip's original-time span,
+   its patient and status words stay in the control's accessible name (and
+   on the hover title) without needing visual room it does not have. */
+.portal-calendar-history-rail .portal-calendar-history-strip-name,
+.portal-calendar-history-rail .portal-calendar-history-strip-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* The block whose detail panel is open. A ring plus a lift: obvious at a
    glance without shouting, and it does not restate any status. Purely a
    frontend selection cue - it carries no authority and clears whenever the

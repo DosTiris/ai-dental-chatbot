@@ -418,6 +418,14 @@
     var data = deps.data;
     var doc = deps.documentRef;
     var onSessionLost = deps.onSessionLost;
+    /* SLICE 4C.1 (Defect 1): the ONE clock the reschedule picker consults,
+     * injectable for deterministic tests and defaulting to the real clock.
+     * It returns an EPOCH-MS INSTANT - never a local-clock string - so the
+     * comparison against the slots' aware UTC start instants is the same
+     * on every device in every timezone (instants are timezone-free; only
+     * their RENDERING is local, and rendering plays no part here). */
+    var nowProvider = (deps && typeof deps.nowProvider === "function")
+      ? deps.nowProvider : Date.now;
 
     /* Current leads query (closed parameter set; tenant is NEVER part of
      * a query - the backend derives it from the token). */
@@ -2112,9 +2120,26 @@
      */
     function availableRescheduleSlots() {
       var out = [];
+      /* SLICE 4C.1 (Defect 1): one instant, read once per render, so every
+       * candidate is judged against the SAME now. */
+      var nowMs = nowProvider();
       for (var i = 0; i < calendar.scheduleSlots.length; i++) {
         var slot = calendar.scheduleSlots[i];
-        if (slot && slot.status === "available") { out.push(slot); }
+        if (!slot || slot.status !== "available") { continue; }
+        /* SLICE 4C.1 (Defect 1): never OFFER a slot whose start is at or
+         * before the current instant - the exact mirror of the backend's
+         * "start not strictly in the future -> slot_started" refusal, so
+         * a choice the server would certainly reject (the 4:00 PM slot
+         * still listed after 4:00 PM office time) is not presented. The
+         * comparison is instant-vs-instant: Date.parse of the slot's
+         * aware UTC ISO start against the epoch-ms now - no local-clock
+         * strings, no device-timezone dependence. An unparsable start
+         * fails CLOSED (not offered). The backend's own judgement under
+         * its row lock remains the final authority for everything this
+         * presentation filter cannot see (clock skew, races, holds). */
+        var startMs = Date.parse(slot.start_datetime);
+        if (!isFinite(startMs) || startMs <= nowMs) { continue; }
+        out.push(slot);
       }
       /* ISO-8601 UTC instants compare lexicographically in time order. */
       out.sort(function (left, right) {
