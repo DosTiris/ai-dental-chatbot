@@ -1818,3 +1818,72 @@ test("Slice 3: a book success with an EXTRA key fails closed as invalid_response
   assertEqual(outcome.state, "invalid_response",
     "the exact-key appointment contract fails the whole body closed");
 });
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 4B2: setAppointmentInternalNote (PUT .../internal-   */
+/* note). One required-but-nullable body key, ALWAYS sent (the frozen   */
+/* 4B1 contract); the note travels ONLY in the request body - the       */
+/* exact-URL assertions prove no note text ever enters the URL.         */
+/* ------------------------------------------------------------------ */
+
+test("Slice 4B2: note save PUTs exactly {internal_note} to the exact path", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/appt%20one/internal-note",
+      method: "PUT",
+      headerEquals: { "Authorization": "Bearer tok-a" },
+      bodyJson: { internal_note: "gate code 4411\nring twice" } },
+    { status: 200, json: validAppointmentMember(
+        { internal_note: "gate code 4411\nring twice" }) }
+  );
+  const outcome = await env.data.setAppointmentInternalNote(
+    "appt one", "gate code 4411\nring twice");
+  assert(outcome.ok, "the exact-key appointment body is accepted");
+  assertEqual(outcome.data.internal_note, "gate code 4411\nring twice",
+    "the server-normalized note comes back to the caller");
+  assertEqual(env.fetch.remaining(), 0, "exactly one request");
+});
+
+test("Slice 4B2: an explicit null clear sends {internal_note:null}", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/a1/internal-note", method: "PUT",
+      bodyJson: { internal_note: null } },
+    { status: 200, json: validAppointmentMember({ internal_note: null }) }
+  );
+  const outcome = await env.data.setAppointmentInternalNote("a1", null);
+  assert(outcome.ok, "the clear round-trips");
+  assertEqual(outcome.data.internal_note, null, "cleared");
+});
+
+test("Slice 4B2: note-save outcome mapping - 404, 422, 409", async () => {
+  const cases = [[404, "not_found"], [422, "bad_request"],
+    [409, "conflict"]];
+  for (const [status, state] of cases) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/appointments/a1/internal-note", method: "PUT" },
+      { status, json: { detail: "x" } }
+    );
+    const outcome = await env.data.setAppointmentInternalNote("a1", "n");
+    assert(!outcome.ok, status + " is not ok");
+    assertEqual(outcome.state, state, status + " -> " + state);
+  }
+});
+
+test("Slice 4B2: a note-save success with an EXTRA key fails closed", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/appointments/a1/internal-note", method: "PUT" },
+    { status: 200,
+      json: validAppointmentMember({ client_id: "tenant-leak" }) }
+  );
+  const outcome = await env.data.setAppointmentInternalNote("a1", "n");
+  assert(!outcome.ok, "a leaked field is never rendered");
+  assertEqual(outcome.state, "invalid_response", "fails the body closed");
+});

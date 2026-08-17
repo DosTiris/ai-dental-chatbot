@@ -142,7 +142,12 @@ const PAGE_ELEMENT_IDS = [
   "calendar-book-times", "calendar-book-when",
   "calendar-book-name", "calendar-book-phone", "calendar-book-email",
   "calendar-book-patient-type", "calendar-book-reason",
-  "calendar-book-submit", "calendar-book-close", "calendar-book-feedback"
+  "calendar-book-submit", "calendar-book-close", "calendar-book-feedback",
+  /* PHASE 3A Slice 4B2: internal-notes id contract. */
+  "calendar-book-note",
+  "calendar-drawer-note-text", "calendar-drawer-note-edit",
+  "calendar-drawer-note-input", "calendar-drawer-note-save",
+  "calendar-drawer-note-cancel", "calendar-drawer-note-feedback"
 ];
 
 function makeDocument() {
@@ -161,7 +166,8 @@ function makeFakeData() {
     "getSchedule", "publishScheduleDay", "blockScheduleSlot",
     "unblockScheduleSlot", "blockAllOpenSlots",
     "confirmAppointment", "cancelAppointment",
-    "bookScheduleSlot" /* PHASE 3A Slice 3 */];
+    "bookScheduleSlot" /* PHASE 3A Slice 3 */,
+    "setAppointmentInternalNote" /* PHASE 3A Slice 4B2 */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -192,6 +198,8 @@ function makeFakeData() {
     cancelAppointment: (id) => next("cancelAppointment", id),
     bookScheduleSlot: (slotId, fields) =>
       next("bookScheduleSlot", { slotId, fields }),
+    setAppointmentInternalNote: (appointmentId, internalNote) =>
+      next("setAppointmentInternalNote", { appointmentId, internalNote }),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -4828,4 +4836,402 @@ test("slice 4A: every other source keeps its exact previous rows", async () => {
   assertEqual(drawerValue(f.doc, "Office notification"),
     "Notification pending",
     "the notification row survives untouched for other sources, pending included");
+});
+
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A Slice 4B2: internal notes - booking form + drawer editor    */
+/* ------------------------------------------------------------------ */
+
+function noteEl(f, suffix) {
+  return f.doc._elements["calendar-drawer-note-" + suffix];
+}
+
+async function openDrawerWithNote(f, note) {
+  queueWeek(f, [], [appointmentFixture({ internal_note: note })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+}
+
+test("4B2 booking: the request carries the trimmed note - and ONLY approved keys", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-note": "  Prefers mornings\nGate 4411  " });
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  const fields = f.data.calls.bookScheduleSlot[0].fields;
+  assertEqual(fields.internal_note, "Prefers mornings\nGate 4411",
+    "the note rides the ONE booking request, outer-trimmed");
+  assertEqual(JSON.stringify(Object.keys(fields).sort()),
+    JSON.stringify(["internal_note", "patient_name", "patient_phone"]),
+    "no server-owned key joined the body");
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 0,
+    "and NO second note-save request exists - booking-time notes are atomic");
+});
+
+test("4B2 booking: a blank note is OMITTED (the 4B1 absent = no note contract)", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-note": "   \n  " });
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], []);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(JSON.stringify(Object.keys(
+    f.data.calls.bookScheduleSlot[0].fields).sort()),
+    JSON.stringify(["patient_name", "patient_phone"]),
+    "a blank textarea never becomes a body key");
+});
+
+test("4B2 booking: success wipes the note with the rest of the form", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-note": "private" });
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  queueWeek(f, [], [appointmentFixture()]);
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book-note"].value, "",
+    "no office-private text lingers after the panel closes");
+});
+
+test("4B2 booking: a bad_request preserves the typed note like every other field", async () => {
+  const f = makePages();
+  await openBookingFor(f, [slotFixture({ slot_id: "s1" })]);
+  fillBooking(f, { "calendar-book-note": "keep me" });
+  f.data.queue("bookScheduleSlot", { ok: false, state: "bad_request" });
+  submitBooking(f);
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-book-note"].value, "keep me",
+    "the proven no-op keeps the form intact for correction");
+  assertEqual(f.doc._elements["calendar-book-note"].disabled, false,
+    "and usable again");
+});
+
+test("4B2 drawer: an existing multiline note renders literally, line breaks intact", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f,
+    "Patient prefers morning appointments.\nNeeds wheelchair access.");
+  const text = noteEl(f, "text");
+  assertEqual(text.textContent,
+    "Patient prefers morning appointments.\nNeeds wheelchair access.",
+    "textContent carries the note verbatim - CSS, not markup, breaks lines");
+  assertEqual(text.children.length, 0, "no child nodes were ever created");
+});
+
+test("4B2 drawer: markup-looking notes stay LITERAL text", async () => {
+  for (const hostile of ["<script>alert(1)</script>", "<b>private</b>",
+    "\"quoted\" & text"]) {
+    const f = makePages();
+    await openDrawerWithNote(f, hostile);
+    const text = noteEl(f, "text");
+    assertEqual(text.textContent, hostile,
+      "rendered exactly as typed: " + hostile);
+    assertEqual(text.children.length, 0,
+      "never parsed into elements: " + hostile);
+  }
+});
+
+test("4B2 drawer: null renders the quiet empty state", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, null);
+  const text = noteEl(f, "text");
+  assertEqual(text.textContent, "No internal notes", "the empty state");
+  assert(text.className.indexOf("portal-muted") !== -1, "visually quiet");
+});
+
+test("4B2 drawer: Edit prefills the current server value; Cancel is LOCAL", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, "server truth");
+  const callsBefore = f.data.totalCalls();
+  noteEl(f, "edit").trigger("click");
+  assertEqual(noteEl(f, "input").hidden, false, "editor open");
+  assertEqual(noteEl(f, "input").value, "server truth", "prefilled");
+  noteEl(f, "input").value = "typed but abandoned";
+  noteEl(f, "cancel").trigger("click");
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "Cancel touched the network never");
+  assertEqual(noteEl(f, "text").hidden, false, "display restored");
+  assertEqual(noteEl(f, "text").textContent, "server truth",
+    "showing the last server-authoritative value");
+  assertEqual(noteEl(f, "input").value, "",
+    "the abandoned typed text was WIPED, not parked");
+});
+
+test("4B2 drawer: Save is ONE PUT to the exact id with ONLY internal_note", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, null);
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "call before visit";
+  f.data.queue("setAppointmentInternalNote", { ok: true,
+    data: appointmentFixture({ internal_note: "call before visit" }) });
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 1, "one PUT");
+  const call = f.data.calls.setAppointmentInternalNote[0];
+  assertEqual(call.appointmentId,
+    appointmentFixture().appointment_id, "the exact appointment id");
+  assertEqual(call.internalNote, "call before visit", "the typed note");
+});
+
+test("4B2 drawer: blank Save is the EXPLICIT clear (null on the wire)", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, "old note");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "   \n ";
+  f.data.queue("setAppointmentInternalNote", { ok: true,
+    data: appointmentFixture({ internal_note: null }) });
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote[0].internalNote, null,
+    "blank translates to the contract's explicit null clear");
+  assertEqual(noteEl(f, "text").textContent, "No internal notes",
+    "the cleared state renders from the returned representation");
+});
+
+test("4B2 drawer: Save is single-flight; controls lock while in flight", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, null);
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "first";
+  const deferred = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(noteEl(f, "save").disabled, true, "Save visibly locked");
+  noteEl(f, "save").trigger("click");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 1,
+    "rapid clicks never became parallel PUTs");
+  deferred.resolve({ ok: true,
+    data: appointmentFixture({ internal_note: "first" }) });
+  await flush();
+  assertEqual(noteEl(f, "text").textContent, "first", "then settled");
+});
+
+test("4B2 drawer: a 422 keeps the editor, the typed text, and allows retry", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, "authoritative");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "way too long";
+  const callsBefore = f.data.totalCalls();
+  f.data.queue("setAppointmentInternalNote",
+    { ok: false, state: "bad_request" });
+  noteEl(f, "save").trigger("click");
+  await flush(); await flush();
+  assertEqual(noteEl(f, "input").hidden, false, "editor survives");
+  assertEqual(noteEl(f, "input").value, "way too long", "typed preserved");
+  assertEqual(noteEl(f, "save").disabled, false, "retry possible");
+  assertEqual(noteEl(f, "feedback").textContent,
+    "The portal could not accept that note. It must be 2000 characters or fewer.",
+    "honest wording, no silent truncation");
+  assertEqual(f.data.totalCalls(), callsBefore + 1,
+    "a proven no-op triggers no refresh");
+});
+
+test("4B2 drawer: success adopts the SERVER-normalized value, not the textarea", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, null);
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "   padded   ";
+  f.data.queue("setAppointmentInternalNote", { ok: true,
+    data: appointmentFixture({ internal_note: "padded" }) });
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(noteEl(f, "text").textContent, "padded",
+    "the RETURNED normalized note renders - never the raw textarea");
+  assertEqual(noteEl(f, "feedback").textContent, "Note saved.", "stated");
+  /* The cached row was patched: reopening shows the truth with NO read. */
+  const callsAfterSave = f.data.totalCalls();
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  openDrawerFor(f, 0);
+  assertEqual(noteEl(f, "text").textContent, "padded",
+    "the ONE cached row now carries the committed note");
+  assertEqual(f.data.totalCalls(), callsAfterSave, "and no request fired");
+});
+
+test("4B2 race: a late save for appointment A cannot touch appointment B's drawer", async () => {
+  const f = makePages();
+  const apptA = appointmentFixture({ internal_note: "A note" });
+  const apptB = appointmentFixture({
+    appointment_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    start_datetime: "2026-08-24T16:00:00Z",
+    end_datetime: "2026-08-24T17:00:00Z",
+    internal_note: "B note" });
+  queueWeek(f, [], [apptA, apptB]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "A rewritten";
+  const deferred = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  openDrawerFor(f, 1);                       /* the office moves on to B */
+  assertEqual(noteEl(f, "text").textContent, "B note", "B's drawer");
+  /* A's save now lands while B is on screen: the truth is restored by the
+   * ONE existing settle-refresh system (an authoritative re-read that
+   * carries A's committed note), never by a write into B's context. */
+  queueWeek(f, [], [
+    Object.assign({}, apptA, { internal_note: "A rewritten" }), apptB]);
+  deferred.resolve({ ok: true,
+    data: Object.assign({}, apptA, { internal_note: "A rewritten" }) });
+  await flush(); await flush();
+  assertEqual(noteEl(f, "text").textContent, "B note",
+    "A's late response never overwrites B's drawer - B was reopened from " +
+    "the refreshed truth with B's own note");
+  assertEqual(noteEl(f, "feedback").textContent, "",
+    "and no feedback lands in B's context");
+  openDrawerFor(f, 0);
+  assertEqual(noteEl(f, "text").textContent, "A rewritten",
+    "reopening A shows the committed value from the refreshed truth");
+});
+
+test("4B2 race: a late response after drawer close cannot resurrect the drawer", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, "before");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "after";
+  const deferred = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  f.doc._elements["calendar-drawer-close"].trigger("click");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true, "closed");
+  /* The commit is real, so the settle system re-reads the truth once; the
+   * drawer itself must stay closed throughout. */
+  queueWeek(f, [], [appointmentFixture({ internal_note: "after" })]);
+  deferred.resolve({ ok: true,
+    data: appointmentFixture({ internal_note: "after" }) });
+  await flush(); await flush();
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, true,
+    "the drawer stays closed - no resurrection");
+  assertEqual(noteEl(f, "text").textContent, "",
+    "the wiped display stays wiped");
+});
+
+test("4B2 race: a mid-edit data refresh never restores an obsolete note", async () => {
+  const f = makePages();
+  await openDrawerWithNote(f, "old server note");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "new note";
+  const deferred = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  /* The office refreshes while the save is in flight; the refresh payload
+   * still carries the PRE-save note (a read can race a commit). The
+   * re-render closes the drawer, so the save settles into a moved-on
+   * context: the ONE settle-refresh system re-reads the truth - which now
+   * carries the committed note - and the obsolete value never returns. */
+  queueWeek(f, [], [appointmentFixture({ internal_note: "old server note" })]);
+  f.doc._elements["calendar-refresh"].trigger("click");
+  await flush();
+  queueWeek(f, [], [appointmentFixture({ internal_note: "new note" })]);
+  deferred.resolve({ ok: true,
+    data: appointmentFixture({ internal_note: "new note" }) });
+  await flush(); await flush();
+  openDrawerFor(f, 0);
+  assertEqual(noteEl(f, "text").textContent, "new note",
+    "the committed note is the one displayed - the pre-save read did not " +
+    "restore obsolete content");
+});
+
+test("4B2: Mia-created and CANCELLED appointments carry editable office notes", async () => {
+  const f = makePages();
+  const ghost = appointmentFixture({
+    appointment_id: "gggggggg-gggg-gggg-gggg-gggggggggggg",
+    status: "cancelled", source: "mia_widget",
+    start_datetime: "2026-08-24T16:00:00Z",
+    end_datetime: "2026-08-24T17:00:00Z",
+    internal_note: null });
+  queueWeek(f, [], [ghost]);
+  openCalendar(f);
+  await flush();
+  historyIn(columns(f.doc)[0])[0].trigger("click");   /* the ghost's drawer */
+  assertEqual(noteEl(f, "text").textContent, "No internal notes",
+    "the section shows for a cancelled Mia-created appointment too");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "kept for the record";
+  f.data.queue("setAppointmentInternalNote", { ok: true,
+    data: Object.assign({}, ghost, { internal_note: "kept for the record" }) });
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 1, "saved");
+  assertEqual(noteEl(f, "text").textContent, "kept for the record",
+    "a cancelled historical appointment legitimately retains a note");
+});
+
+
+/* ------------------------------------------------------------------ */
+/* 4B2 v1.0.1 F1: a true wipe releases noteBusy - proven as the         */
+/* wipeEpoch + monotonic-token COMPOSITION, not a source-text check.    */
+/* ------------------------------------------------------------------ */
+
+test("4B2 F1: a wiped session's note save neither blocks nor touches the next session", async () => {
+  const f = makePages();
+  /* 1-2: appointment A, a deferred save that OWNS noteBusy. */
+  await openDrawerWithNote(f, "old session note");
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "from the old session";
+  const oldSave = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 1,
+    "the old session's save is in flight");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 1,
+    "and it owns the single-flight lock");
+
+  /* 3: the TRUE wipe (sign-out / independent reset) while unresolved. */
+  f.pages.reset();
+  assertEqual(noteEl(f, "input").value, "", "the wipe wiped");
+
+  /* 4-6: a fresh session re-enters and may save IMMEDIATELY. */
+  queueWeek(f, [], [appointmentFixture({ internal_note: "fresh row" })]);
+  openCalendar(f);
+  await flush();
+  openDrawerFor(f, 0);
+  noteEl(f, "edit").trigger("click");
+  noteEl(f, "input").value = "from the new session";
+  const newSave = f.data.queueDeferred("setAppointmentInternalNote");
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 2,
+    "the new session acquired the lock immediately - the wipe released it");
+
+  /* 7-8: the OLD request now resolves. Its wipeEpoch is stale and its
+   * token is not the owner: it must do NOTHING at all. */
+  const callsBefore = f.data.totalCalls();
+  oldSave.resolve({ ok: true, data: appointmentFixture(
+    { internal_note: "from the old session" }) });
+  await flush(); await flush();
+  assertEqual(f.data.totalCalls(), callsBefore,
+    "no old-session corrective GET fired");
+  assertEqual(noteEl(f, "feedback").textContent, "",
+    "no old-session feedback rendered");
+  assertEqual(noteEl(f, "input").hidden, false,
+    "the new session's editor is untouched");
+  assertEqual(noteEl(f, "input").value, "from the new session",
+    "and its typed text is untouched");
+
+  /* 9: the newer save still holds the lock (the old completion did not
+   * clear the newer owner). */
+  noteEl(f, "save").trigger("click");
+  await flush();
+  assertEqual(f.data.calls.setAppointmentInternalNote.length, 2,
+    "a duplicate save is STILL suppressed - the newer owner survived");
+
+  /* 10: only the owner releases, and ITS server value renders. */
+  newSave.resolve({ ok: true, data: appointmentFixture(
+    { internal_note: "from the new session" }) });
+  await flush();
+  assertEqual(noteEl(f, "text").textContent, "from the new session",
+    "the new session's server-authoritative note renders");
+  assertEqual(noteEl(f, "feedback").textContent, "Note saved.", "stated");
+  noteEl(f, "edit").trigger("click");
+  assertEqual(noteEl(f, "input").hidden, false,
+    "and the lock is genuinely free again - the editor reopens");
 });

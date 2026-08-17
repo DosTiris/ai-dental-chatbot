@@ -120,7 +120,17 @@
     booking_rejected:
       "The portal could not accept those patient details. Please review them and try again.",
     booking_uncertain:
-      "The portal did not confirm whether the booking went through. Showing the latest calendar - please check it before trying again."
+      "The portal did not confirm whether the booking went through. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4B2: office-internal notes. No channel claims (a note
+     * is never sent anywhere) and no patient-visibility ambiguity. */
+    note_empty: "No internal notes",
+    note_saved: "Note saved.",
+    note_rejected:
+      "The portal could not accept that note. It must be 2000 characters or fewer.",
+    note_gone:
+      "That appointment could not be found. Showing the latest calendar.",
+    note_uncertain:
+      "The portal did not confirm whether the note was saved. Showing the latest calendar - please check it before trying again."
   };
 
   /* ------------------------------------------------------------------ */
@@ -511,6 +521,12 @@
        * DEDICATED state: Confirm/Cancel actionBusy semantics are
        * untouched. */
       bookBusy: null,
+      /* SLICE 4B2 - the note-save single-flight owner: the token of the
+       * ONE internal-note PUT currently unresolved, or null. Dedicated
+       * state (a note save is neither an appointment action nor a staff
+       * booking); released only by the owning promise; wiped only by
+       * resetContent. */
+      noteBusy: null,
       lifecycle: 0
     };
 
@@ -2030,6 +2046,11 @@
         }
       }
       renderCalendarDrawerActions(appointment);
+      /* SLICE 4B2: every drawer open resets the note editor and renders
+       * the display state from the row the week read returned. */
+      closeCalendarNoteEditor();
+      renderCalendarDrawerNote(appointment);
+      setCalendarText("calendar-drawer-note-feedback", "");
       /* Keep the originating block visibly selected while the panel is open,
        * so it is obvious which appointment is being read. Appearance only.
        * A cancelled appointment has no block in the resting calendar, so
@@ -2044,6 +2065,12 @@
      * disarms any pending cancel: an arm never survives the panel it was
      * made in, so re-opening always requires the two clicks again. */
     function closeCalendarDrawer() {
+      /* SLICE 4B2: the note editor may hold TYPED office-private text -
+       * close AND wipe it with the drawer (the booking-panel rule), and
+       * clear the displayed note + feedback so nothing lingers hidden. */
+      closeCalendarNoteEditor();
+      setCalendarText("calendar-drawer-note-text", "");
+      setCalendarText("calendar-drawer-note-feedback", "");
       calendar.selected = null;
       calendar.selectedId = null;
       calendar.armed = {};
@@ -2082,6 +2109,219 @@
       return null;
     }
 
+    /* Every control the note editor owns (Rule 4: named once). */
+    var NOTE_CONTROL_IDS = ["calendar-drawer-note-edit",
+      "calendar-drawer-note-input", "calendar-drawer-note-save",
+      "calendar-drawer-note-cancel"];
+
+    /* ---------------------------------------------------------------- */
+    /* PHASE 3A Slice 4B2: office-internal note in the drawer            */
+    /* ---------------------------------------------------------------- */
+
+    /* Render the note DISPLAY state from the server-authoritative row.
+     * textContent only (never innerHTML): a note that LOOKS like markup
+     * stays literal text, and CSS pre-wrap preserves its real line
+     * breaks. The section shows for EVERY appointment - any source, any
+     * status - because a Mia-created or cancelled appointment may carry
+     * a private office note too. */
+    function renderCalendarDrawerNote(appointment) {
+      var text = byId("calendar-drawer-note-text");
+      if (!text) { return; }
+      var note = appointment ? appointment.internal_note : null;
+      /* Full className assignment (the codebase convention): the state of
+       * this element is exactly one of two declared appearances. */
+      if (typeof note === "string" && note !== "") {
+        text.textContent = note;
+        text.className = "portal-drawer-note-text";
+      } else {
+        text.textContent = MESSAGES.note_empty;
+        text.className = "portal-drawer-note-text portal-muted";
+      }
+    }
+
+    /* Leave edit mode. The typed value is WIPED (an internal note is
+     * office-private data - the booking-panel rule) and the display,
+     * which was never touched during editing, simply shows again. */
+    function closeCalendarNoteEditor() {
+      var input = byId("calendar-drawer-note-input");
+      if (input) { input.value = ""; input.hidden = true; input.disabled = false; }
+      var save = byId("calendar-drawer-note-save");
+      if (save) { save.hidden = true; save.disabled = false; }
+      var cancel = byId("calendar-drawer-note-cancel");
+      if (cancel) { cancel.hidden = true; cancel.disabled = false; }
+      var text = byId("calendar-drawer-note-text");
+      if (text) { text.hidden = false; }
+      var editBtn = byId("calendar-drawer-note-edit");
+      if (editBtn) { editBtn.hidden = false; editBtn.disabled = false; }
+    }
+
+    /* Enter edit mode, prefilled with the CURRENT server-authoritative
+     * value from the cached row (opening the editor issues no request -
+     * the drawer rule). Refused while a save is in flight. */
+    function openCalendarNoteEditor() {
+      if (calendar.noteBusy !== null) {
+        return; /* single-flight: the owning save settles first */
+      }
+      var appointment = calendar.selected;
+      if (!appointment || calendar.selectedId === null) { return; }
+      var input = byId("calendar-drawer-note-input");
+      if (input) {
+        input.value = typeof appointment.internal_note === "string"
+          ? appointment.internal_note : "";
+        input.hidden = false;
+      }
+      var save = byId("calendar-drawer-note-save");
+      if (save) { save.hidden = false; }
+      var cancel = byId("calendar-drawer-note-cancel");
+      if (cancel) { cancel.hidden = false; }
+      var text = byId("calendar-drawer-note-text");
+      if (text) { text.hidden = true; }
+      var editBtn = byId("calendar-drawer-note-edit");
+      if (editBtn) { editBtn.hidden = true; }
+      setCalendarText("calendar-drawer-note-feedback", "");
+    }
+
+    function setNoteControlsDisabled(disabled) {
+      for (var i = 0; i < NOTE_CONTROL_IDS.length; i++) {
+        var el = byId(NOTE_CONTROL_IDS[i]);
+        if (el) { el.disabled = disabled; }
+      }
+    }
+
+    /*
+     * Purpose (Slice 4B2): submit ONE note save through the EXISTING data
+     * owner under the established mutation discipline: a dedicated
+     * single-flight owner (calendar.noteBusy - a note save is distinct
+     * from Confirm/Cancel and from a staff booking, so it entangles
+     * neither actionBusy nor bookBusy), a new mutation generation so any
+     * week read issued before now can never roll the cached note back,
+     * lifecycle/wipe capture, and F6 settling. Blank input is translated
+     * to the contract's EXPLICIT null clear; otherwise the typed text is
+     * sent verbatim and the SERVER-normalized value comes back.
+     */
+    function onCalendarNoteSave() {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight */
+      }
+      if (calendar.noteBusy !== null) {
+        return; /* single-flight */
+      }
+      var appointmentId = calendar.selectedId;
+      if (appointmentId === null) {
+        return;
+      }
+      var input = byId("calendar-drawer-note-input");
+      var raw = String(input ? input.value : "");
+      var note = raw.trim() === "" ? null : raw;
+
+      var token = ++calendar.actionSeq;
+      calendar.noteBusy = token;
+      calendar.generation += 1;   /* a mutation begins */
+      var lifecycleAtIssue = calendar.lifecycle;
+      var generationAtIssue = calendar.generation;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      setNoteControlsDisabled(true);
+      setCalendarText("calendar-drawer-note-feedback", "");
+      data.setAppointmentInternalNote(appointmentId, note)
+        .then(function (outcome) {
+          /* Only the promise that OWNS the token releases it. */
+          if (calendar.noteBusy === token) {
+            calendar.noteBusy = null;
+          }
+          settleCalendarNote(lifecycleAtIssue, generationAtIssue,
+            wipeEpochAtIssue, outcome, appointmentId);
+        });
+    }
+
+    /*
+     * Purpose (Slice 4B2): THE settling point for a note save - the
+     * settleCalendarBooking guard order applied to the note editor.
+     *   1. WIPED -> nothing (the wipe stands).
+     *   2. Session loss -> wipe and hand back (F9).
+     *   3. NOT ON SCREEN (F3) -> nothing now; openCalendar reads
+     *      authoritatively on the next visit, so a committed save is
+     *      seen then.
+     *   4. STALE lifecycle or generation -> a superseded attempt writes
+     *      no feedback; when the server MAY have moved (success or ANY
+     *      ambiguous outcome - a response can be lost AFTER the save
+     *      committed) the visible truth is corrected by ONE authoritative
+     *      re-read. A proven no-op is dropped.
+     *   5. Current, ok: adopt the RETURNED server-normalized value - the
+     *      cached row is patched (so reopening the drawer shows the truth
+     *      without a re-read) and, if the drawer still shows THIS
+     *      appointment, the editor closes over the fresh display.
+     *   6. Current, bad_request (proven no-op): editor stays open with
+     *      the typed text for correction and retry; nothing on the
+     *      server moved, so nothing else changes.
+     *   7. Current, not_found: the appointment vanished or was never this
+     *      office's (indistinguishable by design) - honest message, close
+     *      the drawer path via the settle refresh.
+     *   8. Current, anything else: AMBIGUOUS - the save may have
+     *      committed, so failure is never claimed; honest wording plus
+     *      the authoritative re-read (Rule 16 / F7).
+     */
+    function settleCalendarNote(lifecycleAtIssue, generationAtIssue,
+        wipeEpochAtIssue, outcome, appointmentId) {
+      if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+        return;
+      }
+      if (isSessionLossOutcome(outcome)) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (!calendar.active) {
+        return; /* F3 */
+      }
+      if (lifecycleAtIssue !== calendar.lifecycle ||
+          generationAtIssue !== calendar.generation) {
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        }
+        return;
+      }
+      if (outcome.ok) {
+        if (calendar.selectedId === appointmentId &&
+            calendar.selected !== null) {
+          /* The drawer still shows THIS appointment: adopt the RETURNED
+           * server-normalized note onto the LIVE row object - the same
+           * reference the rendered grid holds - so the display is the
+           * committed truth and reopening later re-reads nothing. Even if
+           * an interleaved refresh re-rendered and reopened this drawer,
+           * calendar.selected is that render's live row, so the newest
+           * committed value always wins the display. */
+          calendar.selected.internal_note = outcome.data.internal_note;
+          closeCalendarNoteEditor();
+          renderCalendarDrawerNote(calendar.selected);
+          setCalendarText("calendar-drawer-note-feedback",
+            MESSAGES.note_saved);
+          return;
+        }
+        /* The office moved on (drawer closed or showing ANOTHER
+         * appointment): the committed note now exists only server-side,
+         * so the ONE existing correction system re-reads the truth -
+         * never a write into someone else's drawer context, and never a
+         * second cache or stale-response system. */
+        startCalendarSettleRefresh();
+        return;
+      }
+      if (outcome.state === "bad_request") {
+        if (calendar.selectedId === appointmentId) {
+          setNoteControlsDisabled(false);
+          setCalendarText("calendar-drawer-note-feedback",
+            MESSAGES.note_rejected);
+        }
+        return;
+      }
+      if (outcome.state === "not_found") {
+        calendar.pendingFeedback = MESSAGES.note_gone;
+        startCalendarSettleRefresh();
+        return;
+      }
+      calendar.pendingFeedback = MESSAGES.note_uncertain;
+      startCalendarSettleRefresh();
+    }
+
     /* ---------------------------------------------------------------- */
     /* PHASE 3A Slice 3: receptionist booking from an Open band          */
     /* ---------------------------------------------------------------- */
@@ -2090,7 +2330,8 @@
      * can never drift apart on which fields exist (Rule 4). */
     var BOOK_INPUT_IDS = ["calendar-book-name", "calendar-book-phone",
       "calendar-book-email", "calendar-book-patient-type",
-      "calendar-book-reason"];
+      "calendar-book-reason",
+      "calendar-book-note" /* 4B2: wiped and disabled with the rest */];
 
     function setBookControlsDisabled(disabled) {
       for (var i = 0; i < BOOK_INPUT_IDS.length; i++) {
@@ -2267,6 +2508,15 @@
       var reasonEl = byId("calendar-book-reason");
       var reason = String(reasonEl ? reasonEl.value : "").trim();
       if (reason !== "") { fields.reason = reason; }
+      /* SLICE 4B2: the optional office-internal note rides the SAME
+       * booking request - the frozen 4B1 transaction creates the
+       * appointment and its note atomically, so there is never a second
+       * note-save call. Blank is OMITTED (the Slice 3 optional-field
+       * convention; the 4B1 booking contract reads an absent field as
+       * "no note"). */
+      var noteEl = byId("calendar-book-note");
+      var bookNote = String(noteEl ? noteEl.value : "").trim();
+      if (bookNote !== "") { fields.internal_note = bookNote; }
 
       /* v1.0.1 F1: acquire the booking-wide ownership BEFORE the request
        * is issued. The token still comes from the ONE monotonic actionSeq
@@ -3109,6 +3359,17 @@
       /* v1.0.1 F1: the wipe is the ONE event entitled to declare the
        * in-flight booking request irrelevant (the actionBusy rule). */
       calendar.bookBusy = null;
+      /* 4B2 v1.0.1 F1: the SAME rule for the note-save owner - v1.0.0
+       * documented this wipe but never performed it, which could strand a
+       * freshly authenticated session behind the prior wiped session's
+       * unresolved note PUT. Only THIS true wipe/reset boundary clears it:
+       * drawer Close and Calendar re-entry continue to respect a real
+       * unresolved request from the same session (the F4 principle), and a
+       * late completion from the wiped session can neither clear a newer
+       * owner (the token guard) nor render anything (the wipeEpoch guard
+       * settles it first). actionSeq stays monotonic and is never reset,
+       * so old and new tokens can never collide. */
+      calendar.noteBusy = null;
       calendar.armed = {};
       calendar.pendingFeedback = "";
       calendar.settling = 0;
@@ -3435,6 +3696,21 @@
       var calBookClose = byId("calendar-book-close");
       if (calBookClose) {
         calBookClose.addEventListener("click", closeCalendarBook);
+      }
+      /* PHASE 3A Slice 4B2: drawer note controls (null-tolerant). */
+      var noteEdit = byId("calendar-drawer-note-edit");
+      if (noteEdit) {
+        noteEdit.addEventListener("click", openCalendarNoteEditor);
+      }
+      var noteSave = byId("calendar-drawer-note-save");
+      if (noteSave) {
+        noteSave.addEventListener("click", onCalendarNoteSave);
+      }
+      var noteCancel = byId("calendar-drawer-note-cancel");
+      if (noteCancel) {
+        /* Cancel is LOCAL: it touches the network never, wipes the typed
+         * text, and the untouched display simply shows again. */
+        noteCancel.addEventListener("click", closeCalendarNoteEditor);
       }
     }
 

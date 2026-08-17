@@ -337,15 +337,20 @@ test("audit: the drawer actions reuse the existing data-layer methods", () => {
     "Confirm must go through the existing data owner");
   assert(pages.indexOf("data.cancelAppointment") !== -1,
     "Cancel must go through the existing data owner");
-  /* portal-data.js is untouched: it still declares exactly these two
-   * appointment action endpoints and no others. */
+  /* SLICE 4B2 - DELIBERATE allow-list growth (the documented closed-list
+   * mechanism): the data owner now also declares the reviewed 4B1
+   * internal-note endpoint. Confirm, cancel, and internal-note are the
+   * ONLY appointment mutations; anything else remains a loud failure. */
   const dataFile = read("portal-data.js");
   const posts = dataFile.match(/\/portal\/appointments\/[^"\x27]*/g) || [];
   for (const path of posts) {
     assert(path.indexOf("confirm") !== -1 || path.indexOf("cancel") !== -1 ||
+      path.indexOf("internal-note") !== -1 ||
       path.indexOf("{") !== -1 || path === "/portal/appointments",
       "unexpected appointment endpoint in the data owner: " + path);
   }
+  assert(pages.indexOf("data.setAppointmentInternalNote") !== -1,
+    "the note save must go through the existing data owner");
 });
 
 /* Final polish: the calendar must not grow its own vertical scroll box.
@@ -407,11 +412,14 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
     assert(section.indexOf(word) === -1,
       "page-calendar markup must not offer " + word);
   }
-  /* Exactly the six reviewed controls: week prev/next, refresh, the drawer
-   * close, and the booking panel's close + submit. Still an exact pin. */
+  /* Exactly the NINE reviewed controls (SLICE 4B2 amendment, the same
+   * closed-list mechanism): week prev/next, refresh, the drawer close,
+   * the booking panel's close + submit, and the drawer note section's
+   * Edit / Save / Cancel. Still an exact pin - an unreviewed button can
+   * never slip in. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 6,
-    "expected exactly the six reviewed controls, found " + buttons.length);
+  assert(buttons.length === 9,
+    "expected exactly the nine reviewed controls, found " + buttons.length);
 });
 
 /* PHASE 3A Slice 3: the booking submit must go through the existing data
@@ -524,7 +532,8 @@ test("audit: the calendar surface never claims a slot is bookable", () => {
 test("audit: index.html loads portal-calendar.js before portal-pages.js", () => {
   const content = read("index.html");
   const calendarAt = content.indexOf('src="/static/portal/portal-calendar.js"');
-  const pagesAt = content.indexOf('src="/static/portal/portal-pages.js"');
+  /* 4B2: portal-pages.js is version-tokened; the ORDER rule is unchanged. */
+  const pagesAt = content.indexOf('src="/static/portal/portal-pages.js?');
   assert(calendarAt !== -1, "index.html must load portal-calendar.js");
   assert(pagesAt !== -1, "index.html must load portal-pages.js");
   assert(calendarAt < pagesAt,
@@ -564,24 +573,57 @@ test("audit: no third-party or plaintext resources; scripts are same-origin port
   }
 });
 
-/* v1.0.1 F2 (Slice 4B1): portal-data.js carries an incompatible-contract
- * response validator (exact appointment member keys, fail-closed in both
- * directions), so its script tag must carry the matching DETERMINISTIC
- * version token - a stale cached copy against the new backend fails every
- * appointment read closed. This bite pins the exact token, so a future
- * incompatible contract change cannot ship without consciously bumping it
- * (and re-facing this audit). No other asset may silently grow a query
- * key, and no nondeterministic (timestamp-like) token is permitted. */
-test("audit: the portal-data asset carries the Slice 4B1 cache-bust token", () => {
+/* Slice 4B1 F2 established the rule; SLICE 4B2 amends the token set
+ * DELIBERATELY (the same mechanism): pages, data, and the stylesheet all
+ * change together in 4B2, so each carries the SAME deterministic token -
+ * production can never mix old and new UI code. Untouched assets (core,
+ * calendar, app) must stay token-free, and no nondeterministic
+ * (timestamp-like) token is ever permitted. A future incompatible change
+ * cannot ship without consciously re-facing this exact pin. */
+/* SLICE 4B2: internal notes are OFFICE-ONLY, so their inputs are pinned:
+ * both textareas carry the 2000-character UX assist (the backend limit
+ * stays authoritative), and the note travels ONLY in the authenticated
+ * request body - portal-pages may never place it in a URL, a DOM data
+ * attribute, or browser storage. */
+test("audit: internal-note inputs are bounded and the note stays out of URLs/storage", () => {
   const html = read("index.html");
-  assert(html.indexOf(
-    '<script src="/static/portal/portal-data.js?v=4b1-internal-note-v1"></script>') !== -1,
-    "portal-data.js must ship with the exact 4b1-internal-note-v1 token");
+  for (const id of ["calendar-book-note", "calendar-drawer-note-input"]) {
+    const at = html.indexOf('id="' + id + '"');
+    assert(at !== -1, id + " must exist");
+    const tagStart = html.lastIndexOf("<textarea", at);
+    const tagEnd = html.indexOf(">", at);
+    const tag = html.slice(tagStart, tagEnd);
+    assert(tagStart !== -1 && tag.indexOf('maxlength="2000"') !== -1,
+      id + " must be a textarea with maxlength 2000");
+    assert(tag.indexOf("data-") === -1,
+      id + " must carry no data attributes");
+  }
+  const pages = read("portal-pages.js");
+  for (const banned of ["localStorage", "sessionStorage",
+    "console.log", "internal_note="]) {
+    assert(pages.indexOf(banned) === -1,
+      "portal-pages.js must not contain '" + banned +
+      "' (notes live only in the authenticated runtime and request body)");
+  }
+});
+
+test("audit: the 4B2 assets carry the exact deterministic cache-bust tokens", () => {
+  const html = read("index.html");
+  const TOKEN = "4b2-internal-note-ui-v1";
+  for (const versioned of [
+    '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
+    '<script src="/static/portal/portal-pages.js?v=' + TOKEN + '"></script>',
+    '<link rel="stylesheet" href="/static/portal/portal.css?v=' + TOKEN + '" />'
+  ]) {
+    assert(html.indexOf(versioned) !== -1,
+      "a 4B2-modified asset must ship with the exact token: " + versioned);
+  }
   const scripts = html.match(/<script[^>]*src="([^"]+)"/g) || [];
   for (const tag of scripts) {
-    if (tag.indexOf("portal-data.js") !== -1) { continue; }
+    if (tag.indexOf("portal-data.js") !== -1 ||
+        tag.indexOf("portal-pages.js") !== -1) { continue; }
     assert(tag.indexOf("?") === -1,
-      "only the versioned contract asset carries a query token: " + tag);
+      "an untouched asset must not carry a query token: " + tag);
   }
 });
 

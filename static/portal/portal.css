@@ -565,6 +565,32 @@ button.portal-calendar-band {
   cursor: pointer;
 }
 
+/* SLICE 4B2: office-internal notes. pre-wrap preserves the note's real
+ * line breaks under textContent-only insertion - multiline WITHOUT any
+ * markup interpretation. The section stays visually quiet. */
+.portal-drawer-note { margin-top: 12px; }
+.portal-drawer-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.portal-drawer-note-title {
+  margin: 0;
+  font-size: 13px;
+}
+.portal-drawer-note-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 6px 0;
+}
+.portal-note-input {
+  white-space: pre-wrap;
+  resize: vertical;
+}
+.portal-drawer-note-controls { display: flex; gap: 8px; }
+.portal-note-helper { margin: 0 0 4px; }
+
 /* The choose-time strip inside the booking panel. */
 .portal-book-times {
   display: flex;

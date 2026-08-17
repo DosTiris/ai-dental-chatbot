@@ -869,6 +869,22 @@
             "/book",
           fields, isValidAppointmentActionBody);
       },
+      /* SLICE 4B2 - PUT /portal/appointments/<id>/internal-note: replace or
+       * clear ONE appointment's office-internal note. The body is EXACTLY
+       * one required-but-nullable key (the frozen 4B1 contract: a string
+       * replaces, an explicit null clears, blank normalizes to NULL
+       * server-side, an ABSENT key is a 422 that mutates nothing) - so the
+       * key is ALWAYS sent. The note travels ONLY here, in the
+       * authenticated request body: never in the URL, never in storage,
+       * never in logs. The success body is the SAME exact-key appointment
+       * view every action returns, judged by the SAME validator - the
+       * caller receives the SERVER-normalized note back. */
+      setAppointmentInternalNote: function (appointmentId, internalNote) {
+        return authorizedSend("PUT",
+          APPOINTMENTS_URL + "/" + encodeURIComponent(String(appointmentId)) +
+            "/internal-note",
+          { internal_note: internalNote }, isValidAppointmentActionBody);
+      },
       /* P4-B - GET /portal/schedule/recurring: the office's recurring config
        * (weekly hours + slot_minutes + closures) and the opaque token. */
       getRecurringSchedule: function () {

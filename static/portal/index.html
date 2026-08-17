@@ -12,7 +12,11 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'self'" />
   <title>Mia Office Portal | Sign in</title>
-  <link rel="stylesheet" href="/static/portal/portal.css" />
+  <!-- v4B2: pages/data/css change together in this slice; each modified
+       asset carries the SAME deterministic token so production can never
+       mix old and new UI code (the 4B1 F2 rule, extended). Unmodified
+       assets (core, calendar, app) deliberately carry no token. -->
+  <link rel="stylesheet" href="/static/portal/portal.css?v=4b2-internal-note-ui-v1" />
 </head>
 <body>
   <main class="portal-wrap">
@@ -255,6 +259,35 @@
                       type="button">Close</button>
             </div>
             <dl id="calendar-drawer-fields" class="portal-detail-fields"></dl>
+            <!-- SLICE 4B2: office-internal note. Shown for EVERY portal
+                 appointment (any source, any status - a Mia-created or
+                 cancelled appointment may carry a private office note).
+                 The text renders through textContent only (never innerHTML)
+                 with line breaks preserved by CSS; markup-looking notes stay
+                 literal text. Edit -> textarea + Save/Cancel; Save is ONE
+                 PUT to the frozen 4B1 endpoint; Cancel touches the network
+                 never. Blank + Save is the explicit clear. -->
+            <div class="portal-drawer-note">
+              <div class="portal-drawer-note-head">
+                <h4 class="portal-drawer-note-title">Internal notes</h4>
+                <button id="calendar-drawer-note-edit"
+                        class="portal-button portal-button-secondary"
+                        type="button">Edit</button>
+              </div>
+              <p id="calendar-drawer-note-text" class="portal-drawer-note-text"></p>
+              <textarea class="portal-input portal-note-input"
+                        id="calendar-drawer-note-input" maxlength="2000"
+                        rows="4" autocomplete="off" hidden></textarea>
+              <div class="portal-drawer-note-controls">
+                <button id="calendar-drawer-note-save" class="portal-button"
+                        type="button" hidden>Save</button>
+                <button id="calendar-drawer-note-cancel"
+                        class="portal-button portal-button-secondary"
+                        type="button" hidden>Cancel</button>
+              </div>
+              <p id="calendar-drawer-note-feedback" class="portal-muted"
+                 aria-live="polite"></p>
+            </div>
             <!-- P2-A: the EXISTING P5-A Confirm / Cancel controls. They are
                  rendered from the frozen appointmentActionsFor matrix, so this
                  markup declares no action of its own and no action can appear
@@ -305,6 +338,15 @@
             <label class="portal-label" for="calendar-book-reason">Reason (optional)</label>
             <input class="portal-input" id="calendar-book-reason" type="text"
                    autocomplete="off">
+            <!-- SLICE 4B2: optional office-internal note, created ATOMICALLY
+                 with the appointment by the frozen 4B1 booking transaction
+                 (one request - never a second note-save call). Plain text
+                 only; the browser maxlength is UX assistance and the backend
+                 limit stays authoritative. -->
+            <label class="portal-label" for="calendar-book-note">Internal notes (optional)</label>
+            <p class="portal-muted portal-note-helper">Visible only to office staff.</p>
+            <textarea class="portal-input portal-note-input" id="calendar-book-note"
+                      maxlength="2000" rows="3" autocomplete="off"></textarea>
             <button id="calendar-book-submit" class="portal-button"
                     type="button">Book appointment</button>
             <p id="calendar-book-feedback" class="portal-muted"
@@ -438,9 +480,9 @@
        matching contract on first load after deployment. Bump this token
        whenever portal-data.js changes its response contract - the static
        audit pins it so an incompatible change cannot ship without one. -->
-  <script src="/static/portal/portal-data.js?v=4b1-internal-note-v1"></script>
+  <script src="/static/portal/portal-data.js?v=4b2-internal-note-ui-v1"></script>
   <script src="/static/portal/portal-calendar.js"></script>
-  <script src="/static/portal/portal-pages.js"></script>
+  <script src="/static/portal/portal-pages.js?v=4b2-internal-note-ui-v1"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>
