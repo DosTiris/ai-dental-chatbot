@@ -151,7 +151,12 @@ const PAGE_ELEMENT_IDS = [
   /* PHASE 3A Slice 4C: reschedule picker id contract. */
   "calendar-drawer-reschedule", "calendar-drawer-reschedule-note",
   "calendar-drawer-reschedule-times", "calendar-drawer-reschedule-when",
-  "calendar-drawer-reschedule-save", "calendar-drawer-reschedule-cancel"
+  "calendar-drawer-reschedule-save", "calendar-drawer-reschedule-cancel",
+  /* PHASE 3A Slice 4D-A: one-off availability panel id contract. */
+  "calendar-avail-open", "calendar-avail", "calendar-avail-title",
+  "calendar-avail-note", "calendar-avail-day", "calendar-avail-start",
+  "calendar-avail-duration", "calendar-avail-submit",
+  "calendar-avail-close", "calendar-avail-feedback"
 ];
 
 function makeDocument() {
@@ -173,7 +178,8 @@ function makeFakeData() {
     "bookScheduleSlot" /* PHASE 3A Slice 3 */,
     "setAppointmentInternalNote" /* PHASE 3A Slice 4B2 */,
     "restoreAppointment", "rescheduleAppointment" /* PHASE 3A Slice 4C */,
-    "restoreAppointmentToSlot" /* SLICE 4C v1.0.1 mode pin F1 */];
+    "restoreAppointmentToSlot" /* SLICE 4C v1.0.1 mode pin F1 */,
+    "createOneOffAvailability" /* PHASE 3A Slice 4D-A */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -211,6 +217,8 @@ function makeFakeData() {
       next("rescheduleAppointment", { appointmentId, slotId }),
     restoreAppointmentToSlot: (appointmentId, slotId) =>
       next("restoreAppointmentToSlot", { appointmentId, slotId }),
+    createOneOffAvailability: (day, startTime, durationMinutes) =>
+      next("createOneOffAvailability", { day, startTime, durationMinutes }),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -6211,4 +6219,368 @@ test("4C.1: with laned actives, only the right-edge lane cedes the rail clearanc
   assertEqual(right.style.right, "18px",
     "and cedes exactly the rail clearance");
   assertEqual(allHistoryStrips(f.doc).length, 1, "beside one rail");
+});
+
+/* ------------------------------------------------------------------ */
+/* PHASE 3A SLICE 4D-A - Calendar-native one-off availability          */
+/* ------------------------------------------------------------------ */
+
+/* The 4D-A wording, pinned literally (the MESSAGES convention). */
+const AVAIL_INTRO = "Open one appointment time. Times use the office timezone.";
+const AVAIL_FIELDS_REQUIRED = "Date and start time are required.";
+const AVAIL_CREATED = "Availability added.";
+const AVAIL_CONFLICT =
+  "That time overlaps existing schedule slots. Showing the latest calendar.";
+const AVAIL_REJECTED =
+  "The portal could not accept that availability. Please review the date and time and try again.";
+const AVAIL_UNCERTAIN =
+  "The portal did not confirm whether the availability was added. Showing the latest calendar - please check it before trying again.";
+
+function availPanel(doc) { return doc._elements["calendar-avail"]; }
+function availFeedback(doc) {
+  return doc._elements["calendar-avail-feedback"].textContent;
+}
+function openAvail(f) {
+  f.doc._elements["calendar-avail-open"].trigger("click");
+}
+function submitAvail(f) {
+  f.doc._elements["calendar-avail-submit"].trigger("click");
+}
+function setAvailForm(f, day, start, duration) {
+  f.doc._elements["calendar-avail-day"].value = day;
+  f.doc._elements["calendar-avail-start"].value = start;
+  if (duration !== undefined) {
+    f.doc._elements["calendar-avail-duration"].value = duration;
+  }
+}
+
+test("4D-A: an EMPTY week still presents the affordance, and opening the panel issues no request", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);          /* zero slots, zero appointments */
+  openCalendar(f);
+  await flush();
+
+  const before = f.data.totalCalls();
+  openAvail(f);
+  assertEqual(availPanel(f.doc).hidden, false, "the panel opens");
+  assertEqual(f.doc._elements["calendar-avail-note"].textContent,
+    AVAIL_INTRO, "with the office-timezone note");
+  assertEqual(f.data.totalCalls(), before,
+    "opening the panel touches the network never");
+});
+
+test("4D-A: the date prefills to the DISPLAYED week's first day from the backend anchor, with today as assistance min", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  assertEqual(f.doc._elements["calendar-avail-day"].value, WEEK_START,
+    "week 0 prefills the backend default start - never the device date");
+  assertEqual(f.doc._elements["calendar-avail-day"].min, WEEK_START,
+    "min is the office-local today the backend declared");
+
+  /* Navigate one week forward: the panel closes (its default belonged to
+   * the week being left) and reopening prefills the NEW week's first day. */
+  queueWeek(f, [], [],
+    { start_day: "2026-08-31", end_day: "2026-09-06" },
+    { start_day: "2026-08-31", end_day: "2026-09-06" });
+  f.doc._elements["calendar-next"].trigger("click");
+  assertEqual(availPanel(f.doc).hidden, true,
+    "week navigation closes the panel");
+  await flush();
+  openAvail(f);
+  assertEqual(f.doc._elements["calendar-avail-day"].value, "2026-08-31",
+    "the shifted week's first day");
+  assertEqual(f.doc._elements["calendar-avail-day"].min, WEEK_START,
+    "while min stays the office-local today");
+});
+
+test("4D-A: the panel always opens FRESH and is mutually exclusive with the booking panel", async () => {
+  const f = makePages();
+  queueWeek(f, [slotFixture()], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-27", "10:15", "60");
+  f.doc._elements["calendar-avail-close"].trigger("click");
+  assertEqual(availPanel(f.doc).hidden, true, "Close hides the panel");
+  openAvail(f);
+  assertEqual(f.doc._elements["calendar-avail-day"].value, WEEK_START,
+    "reopen wiped the typed date back to the prefill");
+  assertEqual(f.doc._elements["calendar-avail-start"].value, "",
+    "the typed start is wiped");
+  assertEqual(f.doc._elements["calendar-avail-duration"].value, "30",
+    "the duration resets to the reviewed default");
+
+  /* One surface at a time, both directions. */
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  assertEqual(availPanel(f.doc).hidden, true,
+    "opening the booking panel closes the availability panel");
+  assertEqual(f.doc._elements["calendar-book"].hidden, false, "book is open");
+  openAvail(f);
+  assertEqual(f.doc._elements["calendar-book"].hidden, true,
+    "and opening availability closes the booking panel");
+  assertEqual(availPanel(f.doc).hidden, false, "availability is open");
+});
+
+test("4D-A: a plainly incomplete form never leaves the browser", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "", "", "30");
+  const before = f.data.totalCalls();
+  submitAvail(f);
+  assertEqual(availFeedback(f.doc), AVAIL_FIELDS_REQUIRED,
+    "the presence precheck speaks");
+  assertEqual(f.data.totalCalls(), before, "and no request was issued");
+
+  setAvailForm(f, "2026-08-27", "", "30");
+  submitAvail(f);
+  assertEqual(f.data.totalCalls(), before, "start missing: still nothing");
+});
+
+test("4D-A: a successful create sends EXACTLY the typed fields and re-reads authoritatively - the slot renders only from the re-read", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 0, "the week starts empty");
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "60");
+  f.data.queue("createOneOffAvailability", { ok: true, data: slotFixture({
+    slot_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+    start_datetime: "2026-08-24T14:00:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" }) });
+  const created = slotFixture({
+    slot_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+    start_datetime: "2026-08-24T14:00:00Z",
+    end_datetime: "2026-08-24T15:00:00Z" });
+  queueWeek(f, [created], []);   /* the authoritative re-read carries it */
+  submitAvail(f);
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.createOneOffAvailability.length, 1,
+    "exactly one POST");
+  const sent = f.data.calls.createOneOffAvailability[0];
+  assertEqual(sent.day, "2026-08-24", "the typed office-local date");
+  assertEqual(sent.startTime, "10:00", "the typed HH:MM start");
+  assertEqual(sent.durationMinutes, 60,
+    "the select value as an integer - and nothing else is sent");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "one authoritative settle re-read");
+  assertEqual(f.data.calls.getAppointments.length, 2, "combined, both halves");
+  assertEqual(availPanel(f.doc).hidden, true, "the panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent, AVAIL_CREATED,
+    "the settled message survives the re-render");
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 1,
+    "the Open band arrived through the normal data source");
+});
+
+test("4D-A: NOTHING is synthesized - an ok POST whose re-read returns an empty week renders no band", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  f.data.queue("createOneOffAvailability",
+    { ok: true, data: slotFixture() });
+  queueWeek(f, [], []);          /* the backend truth says: nothing */
+  submitAvail(f);
+  await flush();
+  await flush();
+
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 0,
+    "the POST response body never becomes frontend state (constraint 4)");
+});
+
+test("4D-A: bad_request keeps the panel open with the GENERIC wording and provably re-reads nothing", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-20", "10:00", "30");   /* e.g. a past day */
+  f.data.queue("createOneOffAvailability",
+    { ok: false, state: "bad_request" });
+  submitAvail(f);
+  await flush();
+
+  assertEqual(availPanel(f.doc).hidden, false,
+    "a proven no-op keeps the form open");
+  assertEqual(f.doc._elements["calendar-avail-day"].value, "2026-08-20",
+    "with its typed values");
+  assertEqual(availFeedback(f.doc), AVAIL_REJECTED,
+    "raw backend detail never renders - the generic wording does");
+  assertEqual(f.doc._elements["calendar-avail-submit"].disabled, false,
+    "controls re-enable");
+  assertEqual(f.data.calls.getSchedule.length, 1,
+    "a proven no-op triggers no re-read");
+});
+
+test("4D-A: conflict closes the panel, says so, and shows the latest calendar", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  f.data.queue("createOneOffAvailability",
+    { ok: false, state: "conflict" });
+  queueWeek(f, [slotFixture()], []);   /* whatever the truth now is */
+  submitAvail(f);
+  await flush();
+  await flush();
+
+  assertEqual(availPanel(f.doc).hidden, true, "the panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent, AVAIL_CONFLICT,
+    "the honest conflict message");
+  assertEqual(f.data.calls.getSchedule.length, 2, "one authoritative re-read");
+});
+
+test("4D-A: an ambiguous transport outcome NEVER claims failure - it refreshes and says so", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  f.data.queue("createOneOffAvailability",
+    { ok: false, state: "unavailable" });
+  queueWeek(f, [], []);
+  submitAvail(f);
+  await flush();
+  await flush();
+
+  assertEqual(availPanel(f.doc).hidden, true, "the panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent, AVAIL_UNCERTAIN,
+    "uncertainty is stated, failure is never claimed (Rule 16)");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "and the truth was re-read");
+});
+
+test("4D-A: session loss on the create wipes and hands back", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  f.data.queue("createOneOffAvailability",
+    { ok: false, state: "unauthorized" });
+  submitAvail(f);
+  await flush();
+
+  assertEqual(f.sessionLost.length, 1, "the session-loss hand-back fired");
+  assertEqual(f.sessionLost[0], "unauthorized", "with the honest state");
+});
+
+test("4D-A: at most ONE availability POST is in flight - a duplicate submit is refused by the dedicated owner", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  const deferred = f.data.queueDeferred("createOneOffAvailability");
+  submitAvail(f);
+  submitAvail(f);                /* while the first is unresolved */
+  assertEqual(f.data.calls.createOneOffAvailability.length, 1,
+    "the single-flight owner refused the duplicate");
+  queueWeek(f, [], []);
+  deferred.resolve({ ok: true, data: slotFixture() });
+  await flush();
+  await flush();
+  assertEqual(availPanel(f.doc).hidden, true, "then the settle proceeds");
+});
+
+test("4D-A: the ACCEPTANCE PATH - empty week, create, the Open slot arrives, staff books it by the REAL server slot_id", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 0, "empty future week");
+
+  /* Create the one-off. */
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  const created = slotFixture({
+    slot_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+    start_datetime: "2026-08-24T14:00:00Z",
+    end_datetime: "2026-08-24T14:30:00Z" });
+  f.data.queue("createOneOffAvailability", { ok: true, data: created });
+  queueWeek(f, [created], []);
+  submitAvail(f);
+  await flush();
+  await flush();
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 1, "the Open slot arrived");
+
+  /* Book it through the EXISTING booking panel. */
+  bandsIn(columns(f.doc)[0])[0].trigger("click");
+  assertEqual(f.doc._elements["calendar-book"].hidden, false,
+    "the existing booking panel opened");
+  f.doc._elements["calendar-book-name"].value = "Walk-in Caller";
+  f.doc._elements["calendar-book-phone"].value = "516-555-7777";
+  f.data.queue("bookScheduleSlot", { ok: true, data: {} });
+  const booked = Object.assign({}, created, { status: "booked" });
+  queueWeek(f, [booked], [appointmentFixture({
+    start_datetime: created.start_datetime,
+    end_datetime: created.end_datetime,
+    patient_name: "Walk-in Caller", source: "portal_staff",
+    confirmed_at: null, notification_outcome: "pending",
+    patient_phone: "516-555-7777", patient_email: null,
+    new_or_returning: null, reason: null })]);
+  f.doc._elements["calendar-book-submit"].trigger("click");
+  await flush();
+  await flush();
+
+  assertEqual(f.data.calls.bookScheduleSlot.length, 1, "one booking POST");
+  assertEqual(f.data.calls.bookScheduleSlot[0].slotId,
+    "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+    "carrying the REAL server slot_id the re-read returned - never a pixel");
+  assertEqual(bandsIn(columns(f.doc)[0]).length, 0,
+    "the slot is no longer Open");
+  assertEqual(blocksIn(columns(f.doc)[0]).length, 1,
+    "and the appointment renders normally");
+});
+
+test("4D-A: F6 - while a settled mutation awaits authoritative state, the panel neither opens nor submits", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-24", "10:00", "30");
+  f.data.queue("createOneOffAvailability", { ok: true, data: slotFixture() });
+  const deferredRead = f.data.queueDeferred("getSchedule");
+  f.data.queue("getAppointments", { ok: true, data: appointmentsBody([]) });
+  submitAvail(f);
+  await flush();
+
+  /* The create settled and the authoritative re-read is still in flight:
+   * the calendar is SETTLING - no new surface may open or act. */
+  openAvail(f);
+  assertEqual(availPanel(f.doc).hidden, true,
+    "the panel refuses to open while settling");
+  deferredRead.resolve({ ok: true, data: scheduleBody([slotFixture()]) });
+  await flush();
+  await flush();
+  openAvail(f);
+  assertEqual(availPanel(f.doc).hidden, false,
+    "and opens normally once truth has landed");
 });

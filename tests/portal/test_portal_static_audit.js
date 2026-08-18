@@ -426,19 +426,23 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
     assert(section.indexOf(word) === -1,
       "page-calendar markup must not offer " + word);
   }
-  /* Exactly the ELEVEN reviewed controls (SLICE 4C amendment, the same
+  /* Exactly the FOURTEEN reviewed controls (SLICE 4D-A amendment, the same
    * closed-list mechanism): week prev/next, refresh, the drawer close,
    * the booking panel's close + submit, the drawer note section's
-   * Edit / Save / Cancel, and the 4C reschedule picker's Save new time /
-   * Cancel. The action buttons themselves (Confirm, Cancel appointment,
-   * Restore original time, Change time / Choose another time) are
-   * rendered by the reviewed drawer builder from the calendar action set,
-   * never declared in markup - which is why the forbidden-word pin above
-   * still holds over this static section. Still an exact pin - an
-   * unreviewed button can never slip in. */
+   * Edit / Save / Cancel, the 4C reschedule picker's Save new time /
+   * Cancel, and the 4D-A availability panel's open ("Add availability"
+   * toolbar button) + close + submit. The 4D-A affordance opens
+   * AVAILABILITY (authoritative inventory) - never an appointment row
+   * directly - which is why the forbidden-word pin above still refuses
+   * "New appointment" / "Create appointment" over this section. The
+   * action buttons themselves (Confirm, Cancel appointment, Restore
+   * original time, Change time / Choose another time) are rendered by the
+   * reviewed drawer builder from the calendar action set, never declared
+   * in markup. Still an exact pin - an unreviewed button can never slip
+   * in. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 11,
-    "expected exactly the eleven reviewed controls, found " + buttons.length);
+  assert(buttons.length === 14,
+    "expected exactly the fourteen reviewed controls, found " + buttons.length);
 });
 
 /* PHASE 3A Slice 3: the booking submit must go through the existing data
@@ -629,14 +633,15 @@ test("audit: internal-note inputs are bounded and the note stays out of URLs/sto
   }
 });
 
-test("audit: the 4C assets carry the exact deterministic cache-bust tokens", () => {
+test("audit: the 4D-A assets carry the exact deterministic cache-bust tokens", () => {
   const html = read("index.html");
-  /* 4C: one shared token for every asset this slice changed - data (new
-   * restore/reschedule methods), pages (the drawer picker that calls
-   * them), calendar (the ghost hit-target fix), and css (pinned with the
-   * bundle). A stale cached member of this set must never pair with a
-   * fresh one across the deployment boundary. */
-  const TOKEN = "4c1-picker-overlay-v1";
+  /* 4D-A: one shared token for the versioned asset set. This slice changed
+   * data (createOneOffAvailability), pages (the availability panel), and
+   * index.html markup; portal-calendar.js and portal.css are byte-unchanged
+   * but stay pinned WITH the bundle (the 4C rule: a stale cached member of
+   * this set must never pair with a fresh one across the deployment
+   * boundary). */
+  const TOKEN = "4da-one-off-avail-v1";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',

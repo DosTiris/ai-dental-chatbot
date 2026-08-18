@@ -304,3 +304,78 @@ def portal_block_all_open(
             for start, end in result.booked_remaining
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3A SLICE 4D-A - Calendar-native ONE-OFF availability (transport only)
+# ---------------------------------------------------------------------------
+
+class OneOffAvailabilityRequest(BaseModel):
+    """The one-off availability body - STRICT transport (the
+    PublishDayRequest / contract SS5-B convention): any undeclared field is
+    rejected with 422 by pydantic itself, so a misspelled or SMUGGLED key -
+    client_id, status, provider, service, a raw datetime, a browser-supplied
+    "now" - can never be silently ignored. Tenant identity comes ONLY from
+    the verified portal credential; time authority comes ONLY from the
+    server clock inside the service. day parses as a strict ISO calendar
+    date; start_time is the office-local "HH:MM" wall time; validity,
+    timezone normalization, DST refusal, the strictly-future rule, overlap,
+    and tenancy are ALL server-enforced in the service owner - browser-side
+    validation is assistance, never eligibility."""
+    model_config = ConfigDict(extra="forbid")
+    day: date
+    start_time: str
+    duration_minutes: int
+
+
+# Fail-closed wording for an impossible service result (the staff-booking
+# route's UNEXPECTED_RESULT_DETAIL convention - Rule 4/16: named once,
+# generic, never echoing internals).
+UNEXPECTED_ONE_OFF_RESULT_DETAIL = "Unable to create availability."
+
+
+@router.post("/schedule/slots/one-off",
+             response_model=PortalScheduleSlotView)
+def portal_create_one_off_availability(
+    body: OneOffAvailabilityRequest,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: Slice 4D-A - create ONE one-off available slot from the
+        Calendar page, so a receptionist can open a single future time and
+        then book it through the EXISTING staff-booking flow. Every rule
+        lives in portal_schedule_service.create_one_off_slot (shared
+        prevalidation helpers, the strictly-future rule against the
+        server-authoritative office clock, the same-local-day rule, then
+        wholesale delegation to the frozen publish transaction - advisory
+        lock, DST classification, overlap refusal, repository insert); this
+        route only binds the verified tenant and maps the closed outcome
+        vocabulary to HTTP.
+    Tenant binding (Rule 15): identity.client from the verified credential
+        ALONE. The strict body above cannot carry a tenant selector.
+    Failures: 422 for every PUBLISH_INVALID (including any undeclared body
+        field via the strict request model); 409 PUBLISH_OVERLAP with zero
+        inserts (the frozen OVERLAP_DETAIL wording); 401 every credential
+        failure (indistinguishable); 503 unconfigured server auth; 500
+        fail-closed if the service ever returned success without exactly
+        one row (impossible by construction - never guessed around);
+        database errors propagate (fail closed).
+    Database effects: on success, exactly ONE slot INSERT committed by the
+        service; on any refusal, nothing.
+    """
+    settings = calendar_settings_service.load_calendar_settings(identity.client)
+    result = portal_schedule_service.create_one_off_slot(
+        db, identity.client.id, settings, body.day,
+        body.start_time, body.duration_minutes,
+    )
+    if not result.ok:
+        if result.reason == portal_schedule_service.PUBLISH_OVERLAP:
+            raise HTTPException(status_code=409, detail=result.detail)
+        raise HTTPException(status_code=422, detail=result.detail)
+    # G1/G2 fail-closed (the staff-booking convention): only a success
+    # carrying EXACTLY ONE created row may reach the response projection.
+    if len(result.slots) != 1:
+        raise HTTPException(status_code=500,
+                            detail=UNEXPECTED_ONE_OFF_RESULT_DETAIL)
+    return _slot_view(result.slots[0])

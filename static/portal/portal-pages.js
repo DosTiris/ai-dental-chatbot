@@ -121,6 +121,22 @@
       "The portal could not accept those patient details. Please review them and try again.",
     booking_uncertain:
       "The portal did not confirm whether the booking went through. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4D-A: one-off availability from the Calendar. No
+     * channel claims of any kind (creating availability notifies no one).
+     * avail_rejected stays GENERIC (the booking_rejected convention - raw
+     * backend detail never renders through this surface), and
+     * avail_uncertain deliberately never claims failure: a response lost
+     * in transport can arrive AFTER the availability committed (Rule 16). */
+    avail_intro:
+      "Open one appointment time. Times use the office timezone.",
+    avail_fields_required: "Date and start time are required.",
+    avail_created: "Availability added.",
+    avail_conflict:
+      "That time overlaps existing schedule slots. Showing the latest calendar.",
+    avail_rejected:
+      "The portal could not accept that availability. Please review the date and time and try again.",
+    avail_uncertain:
+      "The portal did not confirm whether the availability was added. Showing the latest calendar - please check it before trying again.",
     /* PHASE 3A Slice 4B2: office-internal notes. No channel claims (a note
      * is never sent anywhere) and no patient-visibility ambiguity. */
     note_empty: "No internal notes",
@@ -575,6 +591,13 @@
        * booking); released only by the owning promise; wiped only by
        * resetContent. */
       noteBusy: null,
+      /* SLICE 4D-A - the one-off availability single-flight owner: the
+       * token of the ONE availability POST currently unresolved, or null.
+       * Dedicated state (creating inventory is neither a booking nor a
+       * note); released only by the owning promise; wiped only by
+       * resetContent (the F4 principle - exactly the bookBusy/noteBusy
+       * rule). */
+      availBusy: null,
       /* SLICE 4C - reschedule picker state. scheduleSlots holds REFERENCES
        * to the slot rows of the LAST consistency-checked week read (the
        * same authoritative response the grid was built from - never
@@ -2340,6 +2363,7 @@
        * closes (and wipes) the booking panel, exactly as opening the
        * booking panel closes the drawer. */
       closeCalendarBook();
+      closeCalendarAvail();   /* 4D-A: the same one-surface rule */
       if (!appointment || calendarRenderer === null) {
         return;
       }
@@ -2766,9 +2790,11 @@
         return;
       }
       /* One surface at a time: the drawer and the booking panel are
-       * mutually exclusive over the same grid. */
+       * mutually exclusive over the same grid (and 4D-A adds the
+       * availability panel to the same exclusion). */
       closeCalendarDrawer();
       closeCalendarBook();
+      closeCalendarAvail();
       /* ISO-8601 UTC instants compare lexicographically in time order, so
        * the choices always read earliest-first whatever the band held. */
       var ordered = slots.slice().sort(function (left, right) {
@@ -2944,6 +2970,233 @@
       startCalendarSettleRefresh();
     }
 
+
+    /* -----------------------------------------------------------------
+     * PHASE 3A SLICE 4D-A - Calendar-native one-off availability.
+     *
+     * The receptionist affordance for an empty (or any) week: open ONE
+     * future time from the Calendar itself, then book it through the
+     * EXISTING Slice 3 staff booking panel. The panel follows every
+     * established Calendar mutation discipline verbatim: a DEDICATED
+     * single-flight owner (calendar.availBusy, minted from the ONE
+     * monotonic actionSeq source), a new mutation generation so any week
+     * read issued before now can never roll the calendar back, lifecycle /
+     * wipe capture, F6 settling, and the F9 session-loss classifier.
+     *
+     * AUTHORITY BOUNDARIES (the four 4D-A GO constraints):
+     *   1. Eligibility is SERVER-established only. The browser sends the
+     *      typed office-local date, "HH:MM" start, and a duration from the
+     *      fixed select - never a clock, never a tenant, never a raw
+     *      datetime instant. Required-field presence is the ONLY precheck
+     *      here (the booking panel's day_required convention); validity,
+     *      DST, strictly-future, overlap, and tenancy are all backend
+     *      judgments.
+     *   2/3. Tenancy and time normalization live entirely behind the
+     *      verified credential on the server; this surface cannot express
+     *      either.
+     *   4. NOTHING is synthesized into frontend state on success: the
+     *      panel closes and startCalendarSettleRefresh() re-reads the
+     *      authoritative Schedule + Appointments pair - the new Open slot
+     *      renders ONLY from that response, and booking it then sends the
+     *      real server slot_id through the unchanged booking flow.
+     * ----------------------------------------------------------------- */
+
+    var AVAIL_INPUT_IDS = ["calendar-avail-day", "calendar-avail-start",
+      "calendar-avail-duration"];
+    /* The prefilled slot length (mirrors the backend's named
+     * PORTAL_DEFAULT_SLOT_MINUTES - Rule 4: one reviewable value here). */
+    var AVAIL_DEFAULT_DURATION = "30";
+
+    function setAvailControlsDisabled(disabled) {
+      for (var i = 0; i < AVAIL_INPUT_IDS.length; i++) {
+        var el = byId(AVAIL_INPUT_IDS[i]);
+        if (el) { el.disabled = disabled; }
+      }
+      var submitEl = byId("calendar-avail-submit");
+      if (submitEl) { submitEl.disabled = disabled; }
+    }
+
+    /*
+     * Purpose (4D-A): close AND WIPE the availability panel (the drawer /
+     * booking-panel rule): every typed value, the note, and the feedback
+     * are cleared and the controls re-enabled, so the panel always opens
+     * fresh and nothing lingers on a shared front-desk computer.
+     */
+    function closeCalendarAvail() {
+      var panel = byId("calendar-avail");
+      if (panel) { panel.hidden = true; }
+      var dayEl = byId("calendar-avail-day");
+      if (dayEl) { dayEl.value = ""; dayEl.disabled = false; }
+      var startEl = byId("calendar-avail-start");
+      if (startEl) { startEl.value = ""; startEl.disabled = false; }
+      var durationEl = byId("calendar-avail-duration");
+      if (durationEl) {
+        durationEl.value = AVAIL_DEFAULT_DURATION;
+        durationEl.disabled = false;
+      }
+      var submitEl = byId("calendar-avail-submit");
+      if (submitEl) { submitEl.disabled = false; }
+      setCalendarText("calendar-avail-note", "");
+      setCalendarText("calendar-avail-feedback", "");
+    }
+
+    /*
+     * Purpose (4D-A): open the availability panel fresh. Guards mirror
+     * openCalendarBook: not while a settled mutation awaits authoritative
+     * state (F6), and not while an availability POST is unresolved (the
+     * single-flight owner). One surface at a time over the same grid: the
+     * drawer and the booking panel close first. The date prefills to the
+     * FIRST DAY OF THE DISPLAYED WEEK from the backend-derived anchor
+     * (calendar.defaultStart shifted by the week offset - never the device
+     * date), with the office-local today as a browser-assistance min; both
+     * are convenience only - the strictly-future rule is server-enforced.
+     */
+    function openCalendarAvail() {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight - not even a panel */
+      }
+      if (calendar.availBusy !== null) {
+        return; /* an availability POST is still unresolved */
+      }
+      closeCalendarDrawer();
+      closeCalendarBook();
+      closeCalendarAvail();   /* always opens FRESH (the wipe-on-open rule) */
+      var panel = byId("calendar-avail");
+      if (panel) { panel.hidden = false; }
+      setCalendarText("calendar-avail-note", MESSAGES.avail_intro);
+      var dayEl = byId("calendar-avail-day");
+      if (dayEl && calendar.defaultStart !== null) {
+        var weekStart = calendar.weekOffset === 0
+          ? calendar.defaultStart
+          : shiftLocalDay(calendar.defaultStart, calendar.weekOffset * 7);
+        if (weekStart !== "") {
+          dayEl.value = weekStart;
+          /* min is ASSISTANCE only (constraint 1): the office-local today
+           * the backend default week declared. Server rules decide. */
+          dayEl.min = calendar.defaultStart;
+        }
+      }
+    }
+
+    /*
+     * Purpose (4D-A): submit ONE one-off availability POST through the
+     * EXISTING data owner, under the SAME mutation discipline the booking
+     * panel uses. The body carries ONLY the three typed fields; the
+     * required-presence precheck mirrors booking_fields_required (a
+     * plainly incomplete form never leaves the browser) while every rule
+     * beyond presence stays the backend's judgment - no availability-policy
+     * duplication in the browser.
+     */
+    function onCalendarAvailSubmit() {
+      if (calendar.settling > 0) {
+        return; /* F6: a settled mutation is still awaiting the truth */
+      }
+      if (calendar.availBusy !== null) {
+        return; /* at most ONE availability POST in flight */
+      }
+      var dayEl = byId("calendar-avail-day");
+      var startEl = byId("calendar-avail-start");
+      var durationEl = byId("calendar-avail-duration");
+      var day = String(dayEl ? dayEl.value : "").trim();
+      var start = String(startEl ? startEl.value : "").trim();
+      if (day === "" || start === "") {
+        setCalendarText("calendar-avail-feedback",
+          MESSAGES.avail_fields_required);
+        return;
+      }
+      var duration = parseInt(
+        String(durationEl ? durationEl.value : "").trim(), 10);
+      if (!isFinite(duration)) {
+        /* A broken select is refused loudly, never silently defaulted
+         * (Rule 4: no hidden fallback values). */
+        setCalendarText("calendar-avail-feedback",
+          MESSAGES.avail_fields_required);
+        return;
+      }
+      var token = ++calendar.actionSeq;
+      calendar.availBusy = token;
+      calendar.generation += 1;   /* a mutation begins */
+      var lifecycleAtIssue = calendar.lifecycle;
+      var generationAtIssue = calendar.generation;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      setAvailControlsDisabled(true);
+      setCalendarText("calendar-avail-feedback", "");
+      data.createOneOffAvailability(day, start, duration)
+        .then(function (outcome) {
+          /* Only the promise that OWNS the token may release it (the F4
+           * release rule, applied to the dedicated owner). */
+          if (calendar.availBusy === token) {
+            calendar.availBusy = null;
+          }
+          settleCalendarAvail(lifecycleAtIssue, generationAtIssue,
+            wipeEpochAtIssue, outcome);
+        });
+    }
+
+    /*
+     * Purpose (4D-A): THE settling point for a one-off availability POST -
+     * the settleCalendarBooking guard order applied to this panel.
+     *   1. WIPED while in flight: render nothing, fire nothing.
+     *   2. Session loss (the F9 classifier): wipe and hand back.
+     *   3. NOT ON SCREEN (F3): nothing now - openCalendar reads
+     *      authoritatively on the next visit.
+     *   4. STALE lifecycle or generation: a superseded attempt never
+     *      writes feedback, but when the server MAY have moved (F7) the
+     *      visible calendar is corrected with one authoritative re-read.
+     *   5. Current, PROVEN no-op (bad_request - the strict transport model
+     *      or the service prevalidation refused before any insert): the
+     *      form stays open with its typed values and says so GENERICALLY
+     *      (raw backend detail never renders). If the panel was closed
+     *      meanwhile, there is nothing to correct and nothing to say.
+     *   6. Every other current outcome closes the panel, records the
+     *      honest message, and re-reads the week authoritatively: success
+     *      because the new Open slot must arrive through the REAL data
+     *      source (constraint 4 - never synthesized); conflict / ambiguity
+     *      because the truth may have moved - and a lost response may
+     *      still mean a committed insert, so failure is NEVER claimed with
+     *      certainty (Rule 16).
+     */
+    function settleCalendarAvail(lifecycleAtIssue, generationAtIssue,
+        wipeEpochAtIssue, outcome) {
+      if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+        return; /* wiped by reset/sign-out - stay wiped */
+      }
+      if (isSessionLossOutcome(outcome)) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (!calendar.active) {
+        return; /* F3: no background work behind another page */
+      }
+      if (lifecycleAtIssue !== calendar.lifecycle ||
+          generationAtIssue !== calendar.generation) {
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        }
+        return;
+      }
+      if (!outcome.ok && outcome.state === "bad_request") {
+        var panel = byId("calendar-avail");
+        if (panel && !panel.hidden) {
+          setAvailControlsDisabled(false);
+          setCalendarText("calendar-avail-feedback",
+            MESSAGES.avail_rejected);
+        }
+        return;
+      }
+      var message;
+      if (outcome.ok) {
+        message = MESSAGES.avail_created;
+      } else if (outcome.state === "conflict") {
+        message = MESSAGES.avail_conflict;
+      } else {
+        message = MESSAGES.avail_uncertain;
+      }
+      closeCalendarAvail();
+      calendar.pendingFeedback = message;
+      startCalendarSettleRefresh();
+    }
 
     /*
      * Purpose (P2-A): the FIRST click of Cancel arms THIS appointment (no
@@ -3373,6 +3626,7 @@
       }
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
+      closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
       calendar.weekOffset -= 1;
       loadCalendar();
     }
@@ -3383,6 +3637,7 @@
       }
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
+      closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
       calendar.weekOffset += 1;
       loadCalendar();
     }
@@ -3419,6 +3674,7 @@
       calendar.timezoneName = "";
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: re-entry is a page reset */
+      closeCalendarAvail();  /* 4D-A: the same page-reset rule */
       setCalendarNavDisabled(true);
       setCalendarText("calendar-range-label", "");
       setCalendarText("calendar-timezone-note", "");
@@ -3713,6 +3969,9 @@
        * settles it first). actionSeq stays monotonic and is never reset,
        * so old and new tokens can never collide. */
       calendar.noteBusy = null;
+      /* 4D-A: the SAME true-wipe rule for the availability owner - only
+       * this reset boundary may declare the in-flight POST irrelevant. */
+      calendar.availBusy = null;
       /* SLICE 4C: the wipe clears the picker source and selection - no
        * office's open-slot times may linger behind the login view, and a
        * post-reset drawer can never submit a pre-reset slot id. */
@@ -3740,6 +3999,10 @@
       /* SLICE 3: the booking panel carries TYPED patient contact details -
        * the same rule applies, with the same urgency. */
       closeCalendarBook();
+      /* 4D-A: the availability panel carries no patient data, but a wipe
+       * clears EVERY typed value and open surface - nothing may linger
+       * behind the login view on a shared front-desk computer. */
+      closeCalendarAvail();
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -4046,6 +4309,20 @@
       var calBookClose = byId("calendar-book-close");
       if (calBookClose) {
         calBookClose.addEventListener("click", closeCalendarBook);
+      }
+      /* PHASE 3A Slice 4D-A: one-off availability panel controls
+       * (null-tolerant, the frozen-suite construction rule). */
+      var calAvailOpen = byId("calendar-avail-open");
+      if (calAvailOpen) {
+        calAvailOpen.addEventListener("click", openCalendarAvail);
+      }
+      var calAvailClose = byId("calendar-avail-close");
+      if (calAvailClose) {
+        calAvailClose.addEventListener("click", closeCalendarAvail);
+      }
+      var calAvailSubmit = byId("calendar-avail-submit");
+      if (calAvailSubmit) {
+        calAvailSubmit.addEventListener("click", onCalendarAvailSubmit);
       }
       /* PHASE 3A Slice 4C: drawer reschedule picker controls
        * (null-tolerant, the frozen-suite construction rule). */

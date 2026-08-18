@@ -16,7 +16,7 @@
        asset carries the SAME deterministic token so production can never
        mix old and new UI code (the 4B1 F2 rule, extended). Unmodified
        assets (core, calendar, app) deliberately carry no token. -->
-  <link rel="stylesheet" href="/static/portal/portal.css?v=4c1-picker-overlay-v1" />
+  <link rel="stylesheet" href="/static/portal/portal.css?v=4da-one-off-avail-v1" />
 </head>
 <body>
   <main class="portal-wrap">
@@ -233,6 +233,11 @@
                   type="button">Next week</button>
           <button id="calendar-refresh" class="portal-button portal-button-secondary"
                   type="button">Refresh</button>
+          <!-- PHASE 3A Slice 4D-A: the receptionist affordance for opening a
+               single one-off time. Always visible with the toolbar, so an
+               EMPTY future week still presents an obvious action. -->
+          <button id="calendar-avail-open" class="portal-button portal-button-secondary"
+                  type="button">Add availability</button>
         </div>
         <!-- The office timezone is stated ONCE here, at calendar level. It is
              deliberately not repeated inside every block. -->
@@ -379,6 +384,47 @@
             <p id="calendar-book-feedback" class="portal-muted"
                aria-live="polite"></p>
           </aside>
+          <!-- PHASE 3A Slice 4D-A: one-off availability panel. Staff opens a
+               SINGLE future time using office-local semantics; the server
+               stays authoritative for timezone normalization, DST validity,
+               the strictly-future rule, tenancy, and conflicts - the date
+               min and required fields here are assistance, never
+               eligibility. Creation inserts nothing into the grid directly:
+               the new Open slot arrives only through the normal
+               authoritative Schedule re-read, and booking it then uses the
+               EXISTING staff booking panel with its real server slot_id.
+               It reuses the drawer frame classes wholesale (one panel
+               framework, not three). No notification of any kind is sent. -->
+          <aside id="calendar-avail" class="portal-calendar-drawer"
+                 aria-label="Add availability" hidden>
+            <div class="portal-calendar-drawer-head">
+              <h3 id="calendar-avail-title"
+                  class="portal-calendar-drawer-title">Add availability</h3>
+              <button id="calendar-avail-close"
+                      class="portal-button portal-button-secondary"
+                      type="button">Close</button>
+            </div>
+            <p id="calendar-avail-note" class="portal-muted"></p>
+            <label class="portal-label" for="calendar-avail-day">Date</label>
+            <input class="portal-input" id="calendar-avail-day" type="date"
+                   autocomplete="off">
+            <label class="portal-label" for="calendar-avail-start">Start time</label>
+            <input class="portal-input" id="calendar-avail-start" type="time"
+                   autocomplete="off">
+            <label class="portal-label" for="calendar-avail-duration">Length</label>
+            <select class="portal-input" id="calendar-avail-duration">
+              <option value="15">15 minutes</option>
+              <option value="30" selected>30 minutes</option>
+              <option value="45">45 minutes</option>
+              <option value="60">60 minutes</option>
+              <option value="90">90 minutes</option>
+              <option value="120">120 minutes</option>
+            </select>
+            <button id="calendar-avail-submit" class="portal-button"
+                    type="button">Add availability</button>
+            <p id="calendar-avail-feedback" class="portal-muted"
+               aria-live="polite"></p>
+          </aside>
         </div>
       </section>
 
@@ -507,9 +553,9 @@
        matching contract on first load after deployment. Bump this token
        whenever portal-data.js changes its response contract - the static
        audit pins it so an incompatible change cannot ship without one. -->
-  <script src="/static/portal/portal-data.js?v=4c1-picker-overlay-v1"></script>
-  <script src="/static/portal/portal-calendar.js?v=4c1-picker-overlay-v1"></script>
-  <script src="/static/portal/portal-pages.js?v=4c1-picker-overlay-v1"></script>
+  <script src="/static/portal/portal-data.js?v=4da-one-off-avail-v1"></script>
+  <script src="/static/portal/portal-calendar.js?v=4da-one-off-avail-v1"></script>
+  <script src="/static/portal/portal-pages.js?v=4da-one-off-avail-v1"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>

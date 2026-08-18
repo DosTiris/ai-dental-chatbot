@@ -850,6 +850,25 @@
             "/block-all-open",
           undefined, isValidBlockAllOpenBody);
       },
+      /* PHASE 3A Slice 4D-A - POST /portal/schedule/slots/one-off: create
+       * ONE one-off available slot on an office-local day. The path derives
+       * from the ONE schedule literal (no second /portal/ literal), and
+       * EXACTLY the three approved body fields are sent - the backend's
+       * strict model rejects anything else with 422, including any tenant,
+       * status, provider, service, raw-datetime, or client-clock field.
+       * Eligibility is entirely SERVER-enforced (timezone validity, DST
+       * refusal, the strictly-future rule against the server clock,
+       * overlap, tenancy); browser-side checks are assistance only. The
+       * success body is ONE SlotView judged by the SAME exact-key validator
+       * the block/unblock surfaces use (one output-boundary owner) - and
+       * the pages deliberately never render it: the created slot reaches
+       * the grid ONLY through the authoritative /portal/schedule re-read. */
+      createOneOffAvailability: function (day, startTime, durationMinutes) {
+        return authorizedSend("POST", SCHEDULE_URL + "/slots/one-off",
+          { day: day, start_time: startTime,
+            duration_minutes: durationMinutes },
+          isValidScheduleSlotBody);
+      },
       /* PHASE 3A Slice 3 - POST /portal/schedule/slots/<id>/book: book ONE
        * authoritative slot for a patient the office is speaking with. The
        * path derives from the ONE schedule literal with a URI-encoded slot
