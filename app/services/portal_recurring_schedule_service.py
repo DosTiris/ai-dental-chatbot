@@ -69,6 +69,7 @@ from app.services.portal_schedule_service import (
     PUBLISH_INVALID,
     PUBLISH_OVERLAP,
     PUBLISH_OK,
+    PUBLISH_CLOSED_DAY,   # 4D-B: operational closed-day refusal vocabulary
 )
 from app.calendar_models import SlotStatus
 
@@ -817,7 +818,8 @@ def apply_recurring_config(
     days_out: List[Dict[str, Any]] = []
     totals = {"published_days": 0, "published_slots": 0, "closure_blocked_days": 0,
               "blocked_slots": 0, "existing_inventory_skipped_days": 0,
-              "weekly_closed_days": 0, "dst_skipped_days": 0}
+              "weekly_closed_days": 0, "dst_skipped_days": 0,
+              "operationally_closed_days": 0}
 
     cur = start_day
     while cur <= end_day:
@@ -850,6 +852,10 @@ def apply_recurring_config(
                 totals["existing_inventory_skipped_days"] += 1
             elif outcome["outcome"] == "dst_skipped":
                 totals["dst_skipped_days"] += 1
+            elif outcome["outcome"] == "operationally_closed_skipped":
+                # 4D-B: a live closed_days restriction outranked recurring
+                # materialization on this date (zero inserts there).
+                totals["operationally_closed_days"] += 1
         else:
             # WEEKLY-CLOSED day: never publishes, never blocks (C1).
             start_utc, end_utc = calendar_settings_service.local_day_utc_window(
@@ -896,6 +902,14 @@ def _apply_open_day(db: Session, client_id, snap: "_Snapshot", cur: date,
             return {"outcome": "dst_skipped", "reason": result.detail}
         if result.reason == PUBLISH_OVERLAP:
             return {"outcome": "existing_inventory_skipped"}  # publish already rolled back
+        if result.reason == PUBLISH_CLOSED_DAY:
+            # 4D-B: the date is OPERATIONALLY closed (settings.calendar.
+            # closed_days) - a live restriction that outranks recurring
+            # materialization. Publish already rolled back with zero
+            # inserts; report it honestly rather than pretending "published"
+            # with an empty list. The configured recurring closures list is
+            # a DIFFERENT concept and is untouched by this outcome.
+            return {"outcome": "operationally_closed_skipped"}
         return {"outcome": "published", "published_count": len(result.slots)}
     except Exception:
         db.rollback()                              # F5: release lock before propagating

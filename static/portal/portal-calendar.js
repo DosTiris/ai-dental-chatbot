@@ -1006,7 +1006,7 @@
       return element;
     }
 
-    function buildColumn(dayText, dayEntries, window) {
+    function buildColumn(dayText, dayEntries, window, isClosed) {
       var column = doc.createElement("div");
       column.className = "portal-calendar-col";
 
@@ -1015,6 +1015,15 @@
       var parts = dayHeaderParts(dayText);
       head.appendChild(span("portal-calendar-dayhead-weekday", parts.weekday));
       head.appendChild(span("portal-calendar-dayhead-date", parts.date));
+      if (isClosed === true) {
+        /* Slice 4D-B: the "Office closed" badge - rendered EXCLUSIVELY
+         * from the backend closed_days truth handed in by buildGrid (this
+         * renderer stays pure: no network, no policy, no inference). Blocked
+         * and booked rows still render normally below - a closed day's
+         * remaining appointments stay visible. */
+        head.appendChild(span(
+          "portal-calendar-dayhead-closed portal-muted", "Office closed"));
+      }
       column.appendChild(head);
 
       var canvas = doc.createElement("div");
@@ -1216,9 +1225,21 @@
         var bandCount = 0;
         var appointmentCount = 0;
         var historyCount = 0;
+        /* Slice 4D-B: the OPERATIONAL closed dates come ONLY from the
+         * validated schedule envelope's closed_days - never inferred from
+         * blocked rows, empty days, or anything else (the authoritative-
+         * badge rule). Tolerant map build; the data layer already refused
+         * any malformed envelope before it could reach here. */
+        var closedDaySet = {};
+        if (Array.isArray(scheduleBody.closed_days)) {
+          for (var cd = 0; cd < scheduleBody.closed_days.length; cd++) {
+            closedDaySet[String(scheduleBody.closed_days[cd])] = true;
+          }
+        }
         for (var d = 0; d < columns.length; d++) {
           var dayEntries = byDay[columns[d]];
-          days.appendChild(buildColumn(columns[d], dayEntries, window));
+          days.appendChild(buildColumn(columns[d], dayEntries, window,
+            closedDaySet[columns[d]] === true));
           for (var e = 0; e < dayEntries.length; e++) {
             if (dayEntries[e].kind === KIND_APPOINTMENT) {
               appointmentCount += 1;

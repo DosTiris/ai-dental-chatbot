@@ -440,9 +440,14 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
    * reviewed drawer builder from the calendar action set, never declared
    * in markup. Still an exact pin - an unreviewed button can never slip
    * in. */
+  /* Slice 4D-B adds three reviewed controls: the "Close day" toolbar
+   * button and the Close/Reopen panel's close + submit. The submit's
+   * resting label "Close or reopen" names a DAY-state action (the panel
+   * mutates closure state and never an appointment), so the forbidden
+   * appointment-vocabulary pin above remains satisfied. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 14,
-    "expected exactly the fourteen reviewed controls, found " + buttons.length);
+  assert(buttons.length === 17,
+    "expected exactly the seventeen reviewed controls, found " + buttons.length);
 });
 
 /* PHASE 3A Slice 3: the booking submit must go through the existing data
@@ -641,7 +646,7 @@ test("audit: the 4D-A assets carry the exact deterministic cache-bust tokens", (
    * but stay pinned WITH the bundle (the 4C rule: a stale cached member of
    * this set must never pair with a fresh one across the deployment
    * boundary). */
-  const TOKEN = "4da-one-off-avail-v1";
+  const TOKEN = "4db-close-day-v1";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',

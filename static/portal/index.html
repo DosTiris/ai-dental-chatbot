@@ -16,7 +16,7 @@
        asset carries the SAME deterministic token so production can never
        mix old and new UI code (the 4B1 F2 rule, extended). Unmodified
        assets (core, calendar, app) deliberately carry no token. -->
-  <link rel="stylesheet" href="/static/portal/portal.css?v=4da-one-off-avail-v1" />
+  <link rel="stylesheet" href="/static/portal/portal.css?v=4db-close-day-v1" />
 </head>
 <body>
   <main class="portal-wrap">
@@ -238,6 +238,10 @@
                EMPTY future week still presents an obvious action. -->
           <button id="calendar-avail-open" class="portal-button portal-button-secondary"
                   type="button">Add availability</button>
+          <!-- PHASE 3A Slice 4D-B: close (or reopen) one office day from the
+               Calendar itself - no fake appointments. -->
+          <button id="calendar-close-open" class="portal-button portal-button-secondary"
+                  type="button">Close day</button>
         </div>
         <!-- The office timezone is stated ONCE here, at calendar level. It is
              deliberately not repeated inside every block. -->
@@ -425,6 +429,32 @@
             <p id="calendar-avail-feedback" class="portal-muted"
                aria-live="polite"></p>
           </aside>
+          <!-- PHASE 3A Slice 4D-B: the Close/Reopen day panel. ONE typed
+               office-local date; the submit is a TWO-STEP confirmation (the
+               first click shows the explicit consequence - including the
+               booked-appointment count for a close - and relabels the
+               button; the second click performs). min= is browser
+               assistance only; every rule is a backend judgment, and the
+               "Office closed" badge renders only from the authoritative
+               re-read. -->
+          <aside id="calendar-close" class="portal-calendar-drawer"
+                 aria-label="Close or reopen day" hidden>
+            <div class="portal-calendar-drawer-head">
+              <h3 id="calendar-close-title"
+                  class="portal-calendar-drawer-title">Close or reopen day</h3>
+              <button id="calendar-close-close"
+                      class="portal-button portal-button-secondary"
+                      type="button">Close</button>
+            </div>
+            <p id="calendar-close-note" class="portal-muted"></p>
+            <label class="portal-label" for="calendar-close-day">Date</label>
+            <input class="portal-input" id="calendar-close-day" type="date"
+                   autocomplete="off">
+            <button id="calendar-close-submit" class="portal-button"
+                    type="button">Close or reopen</button>
+            <p id="calendar-close-feedback" class="portal-muted"
+               aria-live="polite"></p>
+          </aside>
         </div>
       </section>
 
@@ -553,9 +583,9 @@
        matching contract on first load after deployment. Bump this token
        whenever portal-data.js changes its response contract - the static
        audit pins it so an incompatible change cannot ship without one. -->
-  <script src="/static/portal/portal-data.js?v=4da-one-off-avail-v1"></script>
-  <script src="/static/portal/portal-calendar.js?v=4da-one-off-avail-v1"></script>
-  <script src="/static/portal/portal-pages.js?v=4da-one-off-avail-v1"></script>
+  <script src="/static/portal/portal-data.js?v=4db-close-day-v1"></script>
+  <script src="/static/portal/portal-calendar.js?v=4db-close-day-v1"></script>
+  <script src="/static/portal/portal-pages.js?v=4db-close-day-v1"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>

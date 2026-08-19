@@ -53,6 +53,9 @@ from app.repositories import appointment_repository
 # observed by this route.
 from app.services import calendar_settings_service
 from app.services import portal_schedule_service
+# Slice 4D-B: the operational closed-day read owner (closed_days slice for
+# the schedule envelope; all mutation rules live in the service layer).
+from app.services import closure_authority
 from app.services import slot_management_service
 from app.services.calendar_settings_service import ensure_utc
 
@@ -89,11 +92,16 @@ class PortalScheduleSlotView(BaseModel):
 
 
 class PortalScheduleListView(BaseModel):
-    """The GET /portal/schedule envelope (frozen P3-C envelope shape)."""
+    """The GET /portal/schedule envelope (P3-C shape + the 4D-B addition):
+    closed_days is the OPERATIONAL closure slice for the requested window -
+    derived ONLY from settings.calendar.closed_days (never from blocked
+    rows, empty days, or recurring configuration), so the Calendar renders
+    "Office closed" exclusively from authoritative backend state."""
     timezone_name: str
     start_day: date
     end_day: date
     slots: List[PortalScheduleSlotView]
+    closed_days: List[date]
 
 
 class PublishDayRequest(BaseModel):
@@ -189,6 +197,11 @@ def portal_get_schedule(
         start_day=start_day,
         end_day=end_day,
         slots=[_slot_view(s) for s in rows],
+        # 4D-B: the operational closed dates INSIDE the requested window,
+        # from the live authority only (a read snapshot is fine for a GET -
+        # mutation-side judgments re-read fresh under the day lock).
+        closed_days=closure_authority.closed_days_in_range(
+            identity.client.settings, start_day, end_day),
     )
 
 
@@ -219,6 +232,10 @@ def portal_publish_day(
     )
     if not result.ok:
         if result.reason == portal_schedule_service.PUBLISH_OVERLAP:
+            raise HTTPException(status_code=409, detail=result.detail)
+        if result.reason == portal_schedule_service.PUBLISH_CLOSED_DAY:
+            # 4D-B: the day is operationally closed - a state conflict
+            # (409), zero inserts, judged fresh under the day lock.
             raise HTTPException(status_code=409, detail=result.detail)
         raise HTTPException(status_code=422, detail=result.detail)
     return [_slot_view(s) for s in result.slots]
@@ -372,6 +389,10 @@ def portal_create_one_off_availability(
     if not result.ok:
         if result.reason == portal_schedule_service.PUBLISH_OVERLAP:
             raise HTTPException(status_code=409, detail=result.detail)
+        if result.reason == portal_schedule_service.PUBLISH_CLOSED_DAY:
+            # 4D-B: creation on an operationally closed day is a state
+            # conflict (409) - the single under-lock gate refused it.
+            raise HTTPException(status_code=409, detail=result.detail)
         raise HTTPException(status_code=422, detail=result.detail)
     # G1/G2 fail-closed (the staff-booking convention): only a success
     # carrying EXACTLY ONE created row may reach the response projection.
@@ -379,3 +400,99 @@ def portal_create_one_off_availability(
         raise HTTPException(status_code=500,
                             detail=UNEXPECTED_ONE_OFF_RESULT_DETAIL)
     return _slot_view(result.slots[0])
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3A SLICE 4D-B - Calendar-native CLOSE DAY / REOPEN DAY (transport)
+# ---------------------------------------------------------------------------
+
+class CloseDayView(BaseModel):
+    """The close_day response: whether the day was ALREADY closed
+    (idempotent), how many open/held rows THIS call blocked, and the day's
+    still-booked windows soonest-first (times only, never patient data) -
+    the explicit Rule 16 "closing will not cancel these" evidence."""
+    day: date
+    already_closed: bool
+    blocked_count: int
+    booked_remaining: List[BookedWindowView]
+
+
+class ReopenDayView(BaseModel):
+    """The reopen_day response: whether the date was actually closed
+    (idempotent remove), plus the informational recurring flag - True when
+    the SAME date is also configured in the recurring closures list, so the
+    office learns a future Recurring Apply may close it again. Reopen never
+    unblocks any slot; the wording for that lives in the frontend."""
+    day: date
+    was_closed: bool
+    recurring_configured: bool
+
+
+@router.post("/schedule/days/{day}/close", response_model=CloseDayView)
+def portal_close_day(
+    day: date,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: Slice 4D-B - mark an office-local date operationally closed
+        from the Calendar, WITHOUT a fake appointment: one atomic
+        transaction persists the closed_days entry AND blocks the day's
+        current open/held inventory through the one shared bulk transition;
+        booked appointments are untouched and returned for the staff
+        warning. Every rule lives in portal_schedule_service.close_day.
+    Authorization: require_portal_identity - the SAME availability-control
+        permission publish/block-all/one-off use (approved 4D-B ruling; no
+        new role model). Tenant binding from the verified credential ONLY.
+    Failures: 422 CLOSE_INVALID (past office-local date; closed-days cap) -
+        zero mutation; 401 every credential failure (indistinguishable);
+        503 unconfigured server auth; database errors propagate after the
+        combined rollback (fail closed - no partially closed state).
+    Database effects: on success, the surgical closed_days write plus the
+        day's slot transitions, committed ONCE; on any refusal, nothing.
+    """
+    settings = calendar_settings_service.load_calendar_settings(identity.client)
+    result = portal_schedule_service.close_day(
+        db, identity.client.id, settings, day)
+    if not result.ok:
+        raise HTTPException(status_code=422, detail=result.detail)
+    return CloseDayView(
+        day=day,
+        already_closed=result.already_closed,
+        blocked_count=result.blocked_count,
+        booked_remaining=[
+            BookedWindowView(start_datetime=start, end_datetime=end)
+            for start, end in result.booked_remaining
+        ],
+    )
+
+
+@router.post("/schedule/days/{day}/reopen", response_model=ReopenDayView)
+def portal_reopen_day(
+    day: date,
+    identity: PortalIdentity = Depends(require_portal_identity),
+    db: Session = Depends(get_db),
+):
+    """
+    Purpose: Slice 4D-B - remove the operational closed_days restriction
+        for an office-local date. NOTHING else changes: no slot is read,
+        locked, or unblocked (blocked rows carry no provenance - the
+        approved Reopen ruling), and the recurring configuration is never
+        modified. Idempotent: reopening a not-closed date reports
+        was_closed=false.
+    Authorization: require_portal_identity (same as close).
+    Failures: 401/503 as on every portal endpoint; database errors
+        propagate after rollback.
+    Database effects: at most one surgical closed_days write, ONE commit;
+        ZERO appointment_slots statements.
+    """
+    settings = calendar_settings_service.load_calendar_settings(identity.client)
+    result = portal_schedule_service.reopen_day(
+        db, identity.client.id, settings, day)
+    if not result.ok:
+        raise HTTPException(status_code=422, detail=result.detail)
+    return ReopenDayView(
+        day=day,
+        was_closed=result.was_closed,
+        recurring_configured=result.recurring_configured,
+    )

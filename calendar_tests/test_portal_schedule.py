@@ -62,7 +62,10 @@ APPROVED_SLOT_FIELDS = {
     "slot_id", "start_datetime", "end_datetime", "status",
     "provider_name", "service_key",
 }
-APPROVED_ENVELOPE_FIELDS = {"timezone_name", "start_day", "end_day", "slots"}
+# Slice 4D-B envelope amendment: the schedule read carries the window's
+# OPERATIONAL closed dates (from settings.calendar.closed_days only).
+APPROVED_ENVELOPE_FIELDS = {"timezone_name", "start_day", "end_day", "slots",
+                            "closed_days"}
 APPROVED_BULK_FIELDS = {"day", "blocked_count", "booked_remaining"}
 APPROVED_BOOKED_WINDOW_FIELDS = {"start_datetime", "end_datetime"}
 # Markers that must NEVER appear anywhere in a schedule response body.

@@ -96,6 +96,10 @@ from app.services.calendar_settings_service import (
 # calendar_settings_service.client_now is genuinely observed by the one-off
 # strictly-future rule below. The names imported above stay untouched.
 from app.services import calendar_settings_service
+# Slice 4D-B: the OPERATIONAL closed-day owner (settings.calendar.closed_days
+# parsing/membership/add/remove + the surgical write). Imported as a module;
+# acyclic by design (closure_authority imports no service module).
+from app.services import closure_authority
 from app.services.slot_management_service import apply_block
 
 # --- Named limits (contract SS5-B, D10 - Rule 4: no magic numbers) ---------
@@ -119,11 +123,22 @@ WALL_AMBIGUOUS = "ambiguous"        # fall-back repeated interval
 PUBLISH_OK = "ok"
 PUBLISH_INVALID = "invalid"         # -> HTTP 422; detail says which rule
 PUBLISH_OVERLAP = "overlap"         # -> HTTP 409; zero inserts
+PUBLISH_CLOSED_DAY = "closed_day"   # -> HTTP 409; day operationally closed
+                                    #    (Slice 4D-B; zero inserts; judged
+                                    #    FRESH under the day advisory lock)
 
 # The ONE 409 wording for every overlap refusal (probe-resistant: it never
 # reveals WHICH existing slot or status collided).
 OVERLAP_DETAIL = (
     "One or more requested slots overlap existing slots on that day."
+)
+
+# The ONE 409 wording for every operationally-closed-day creation refusal
+# (Slice 4D-B). Same caller-safe register as OVERLAP_DETAIL: it names the
+# state and the remedy, never internals.
+CLOSED_DAY_DETAIL = (
+    "That day is marked closed for the office. Reopen the day before "
+    "adding availability."
 )
 
 
@@ -425,6 +440,22 @@ def publish_day_slots(
         # appointment_slots read for this operation.
         acquire_schedule_day_lock(db, client_id, local_day)
 
+        # SLICE 4D-B: the OPERATIONAL closed-day judgment - the single
+        # authoritative creation gate for normal publish, the 4D-A one-off,
+        # and any recurring-Apply materialization that reaches this owner.
+        # Judged FIRST (authoritative state outranks caller revalidations),
+        # UNDER the lock (a creator that waited here while a Close Day
+        # committed must see that closure - the anti-TOCTOU shape), and
+        # from a FRESH row read (never the request-time settings snapshot,
+        # which can be stale). Consults closed_days ONLY - the recurring
+        # closures list stays Apply-time configuration per the frozen P4-B
+        # contract.
+        fresh_settings = closure_authority.read_settings_fresh(db, client_id)
+        if closure_authority.is_date_closed(fresh_settings, local_day):
+            db.rollback()  # zero inserts; releases the advisory lock
+            return PublishResult(False, PUBLISH_CLOSED_DAY,
+                                 detail=CLOSED_DAY_DETAIL)
+
         # SLICE 4D-A v1.0.1 (audit F1): the under-lock revalidation runs
         # HERE - the lock is held, nothing has been read or written for
         # this operation yet, so a refusal provably inserts nothing and
@@ -488,28 +519,56 @@ def block_all_open(
     try:
         # SS2: first schedule-mutation DB statement.
         acquire_schedule_day_lock(db, client_id, local_day)
-
-        day_start_utc, day_end_utc = local_day_utc_window(
-            local_day, settings.timezone_name)
-        rows = appointment_repository.get_slots_for_update_between(
-            db, client_id, day_start_utc, day_end_utc)
-
-        blocked_count = 0
-        booked_remaining: List[Tuple[datetime, datetime]] = []
-        for row in rows:
-            if row.status in (SlotStatus.AVAILABLE, SlotStatus.HELD):
-                apply_block(row)
-                blocked_count += 1
-            elif row.status == SlotStatus.BOOKED:
-                booked_remaining.append(
-                    (ensure_utc(row.start_datetime), ensure_utc(row.end_datetime)))
-            # blocked / cancelled: byte-untouched.
+        result = _block_all_open_locked(db, client_id, settings, local_day)
         db.commit()
-        booked_remaining.sort(key=lambda pair: pair[0])
-        return BulkBlockResult(blocked_count, booked_remaining)
+        return result
     except Exception:
         db.rollback()
         raise
+
+
+def _block_all_open_locked(
+    db: Session,
+    client_id: uuid.UUID,
+    settings: CalendarSettings,
+    local_day: date,
+) -> BulkBlockResult:
+    """
+    Purpose (Slice 4D-B extraction - approved GO shape): the ONE bulk
+        block-transition body, shared VERBATIM by the public block_all_open
+        above and by close_day below, so exactly one row-transition engine
+        exists. Byte-equivalent to the pre-4D-B block_all_open interior: row
+        locks via get_slots_for_update_between, available/held -> blocked
+        through the ONE shared apply_block rule (bulk block outranks holds -
+        D4), booked rows collected untouched (times only), blocked/cancelled
+        rows byte-untouched.
+    Locking contract: the caller ALREADY HOLDS the tenant/day advisory lock
+        and OWNS the transaction - this helper acquires no advisory lock and
+        never commits or rolls back, which is exactly what lets close_day be
+        one atomic transaction with no nested advisory acquisition.
+    Returns: BulkBlockResult(blocked_count, booked_remaining) with the
+        booked windows sorted soonest-first (Rule 16: staff SEES that
+        appointments still stand).
+    Database effects: SELECT ... FOR UPDATE on the day's slot rows plus the
+        in-place status transitions. Commit/rollback belong to the caller.
+    """
+    day_start_utc, day_end_utc = local_day_utc_window(
+        local_day, settings.timezone_name)
+    rows = appointment_repository.get_slots_for_update_between(
+        db, client_id, day_start_utc, day_end_utc)
+
+    blocked_count = 0
+    booked_remaining: List[Tuple[datetime, datetime]] = []
+    for row in rows:
+        if row.status in (SlotStatus.AVAILABLE, SlotStatus.HELD):
+            apply_block(row)
+            blocked_count += 1
+        elif row.status == SlotStatus.BOOKED:
+            booked_remaining.append(
+                (ensure_utc(row.start_datetime), ensure_utc(row.end_datetime)))
+        # blocked / cancelled: byte-untouched.
+    booked_remaining.sort(key=lambda pair: pair[0])
+    return BulkBlockResult(blocked_count, booked_remaining)
 
 
 # ---------------------------------------------------------------------------
@@ -692,3 +751,190 @@ def create_one_off_slot(
         canonical_start, canonical_close, duration_minutes,
         under_lock_check=under_lock_check,
     )
+
+
+# ---------------------------------------------------------------------------
+# PHASE 3A SLICE 4D-B - Calendar-native CLOSE DAY / REOPEN DAY
+# ---------------------------------------------------------------------------
+# The receptionist marks an office-local date operationally closed WITHOUT a
+# fake appointment: close_day persists the date into the LIVE authority
+# (settings.calendar.closed_days, owned by closure_authority) AND blocks the
+# date's current open/held inventory through the ONE shared bulk transition
+# (_block_all_open_locked) - in ONE transaction, ONE commit, under the SAME
+# tenant/day advisory lock every inventory mutation uses. Booked appointments
+# are never touched: they are collected and returned so staff SEES them
+# (Rule 16). reopen_day removes the live restriction ONLY - existing blocked
+# rows carry no provenance (manual block vs closure block is
+# indistinguishable by design of the frozen slot model), so reopening never
+# unblocks anything; recovery is explicit (per-slot Unblock, one-off
+# availability, or publish - all of which the reopened date now accepts).
+#
+# LOCK ORDER (documented once, obeyed everywhere): tenant/day ADVISORY lock
+# FIRST, clients ROW lock SECOND. publish_day_slots' closed-day gate takes
+# only the advisory lock plus a plain fresh read (same-day serialization
+# comes from the advisory lock both sides hold), so no path anywhere takes
+# the row lock before the advisory lock - no deadlock ordering exists.
+#
+# CLOSE-DAY DATE RULE: today or a future office-local date; a genuinely past
+# date refuses server-side (browser min= is assistance only). "Today" is the
+# SERVER-authoritative office clock (calendar_settings_service.client_now
+# through the module seam), judged under the lock. Closing today blocks
+# whatever open/held inventory still exists; booked rows remain booked.
+#
+# DISTINCT FROM RECURRING CLOSURES (approved ruling): the P4-B list
+# settings.calendar.recurring.closures stays desired CONFIGURATION,
+# materialized only by Preview/Apply. close_day/reopen_day never read or
+# write it - except reopen_day's read-only informational flag telling staff
+# a future Apply may close the date again.
+
+# Named 4D-B refusal wording (Rule 4).
+CLOSE_DAY_PAST_DETAIL = "Only today or a future day can be closed."
+
+# Closed close/reopen outcome vocabulary (the PublishResult convention).
+CLOSE_OK = "ok"
+CLOSE_INVALID = "invalid"           # -> HTTP 422; detail says which rule
+
+
+@dataclass
+class CloseDayResult:
+    """The close_day outcome: ok/refusal plus - on success - whether the day
+    was ALREADY closed (idempotent path), how many open/held rows this call
+    blocked, and the day's still-booked windows soonest-first (times only,
+    never patient data)."""
+    ok: bool
+    reason: str
+    detail: Optional[str] = None
+    already_closed: bool = False
+    blocked_count: int = 0
+    booked_remaining: List[Tuple[datetime, datetime]] = field(
+        default_factory=list)
+
+
+@dataclass
+class ReopenDayResult:
+    """The reopen_day outcome: whether the date was actually closed
+    (idempotent remove), and whether the SAME date is also configured in the
+    recurring closures list - informational only, so the office learns a
+    future Recurring Apply may close the date again."""
+    ok: bool
+    reason: str
+    detail: Optional[str] = None
+    was_closed: bool = False
+    recurring_configured: bool = False
+
+
+def close_day(
+    db: Session,
+    client_id: uuid.UUID,
+    settings: CalendarSettings,
+    local_day: date,
+) -> CloseDayResult:
+    """
+    Purpose: Mark an office-local date operationally closed - the durable
+        closed_days entry AND the bulk block of its current open/held
+        inventory - ATOMICALLY (one transaction, one commit; the 4D-B GO's
+        mandatory shape). Idempotent: closing an already-closed day re-runs
+        only the block core (which heals any open rows) and reports
+        already_closed=True.
+    Inputs:  session; AUTHENTICATED tenant id (route-resolved from the
+        verified portal identity - never a request body); the request-level
+        settings snapshot (timezone/clock source); the office-local date.
+    Returns: CloseDayResult. Refusals carry CLOSE_INVALID + caller-safe
+        wording and mutate NOTHING (rollback releases both locks).
+    Database effects: advisory day lock; clients row lock (FOR UPDATE);
+        at most one surgical closed_days jsonb write; the day's slot-row
+        locks + available/held->blocked transitions; ONE commit. Any error
+        rolls back the COMBINED mutation - no partially-closed state exists.
+    Possible failures: past office-local date (CLOSE_DAY_PAST_DETAIL);
+        closed-days cap (closure_authority.CLOSED_DAYS_CAP_DETAIL);
+        vanished tenant row (loud RuntimeError); database errors propagate
+        after rollback (Rule 16).
+    """
+    try:
+        # Documented lock order: ADVISORY FIRST...
+        acquire_schedule_day_lock(db, client_id, local_day)
+        # ...clients ROW lock SECOND - and the settings read is FRESH under
+        # that lock (never the request-time snapshot). A legacy NULL
+        # settings value is legal here; a VANISHED row raises loudly inside
+        # the owner (never guessed).
+        fresh_settings = closure_authority.lock_settings_for_update(
+            db, client_id)
+
+        # Server-authoritative office-local date rule, judged UNDER the
+        # lock: today may be closed; a genuinely past date may not.
+        today_local = calendar_settings_service.client_now(settings).date()
+        if local_day < today_local:
+            db.rollback()  # releases both locks; zero mutation
+            return CloseDayResult(False, CLOSE_INVALID,
+                                  detail=CLOSE_DAY_PAST_DETAIL)
+
+        closed = closure_authority.read_closed_days(fresh_settings)
+        try:
+            new_closed, already_closed = closure_authority.add_closed_day(
+                closed, local_day)
+        except closure_authority.ClosedDaysCapError as cap:
+            db.rollback()  # zero mutation
+            return CloseDayResult(False, CLOSE_INVALID, detail=str(cap))
+
+        if not already_closed:
+            closure_authority.write_closed_days_locked(
+                db, client_id, new_closed)
+
+        # The ONE shared bulk transition (no second engine): open/held ->
+        # blocked, booked collected untouched. Runs even on the idempotent
+        # path so a retried Close heals any rows a failed attempt left open.
+        block = _block_all_open_locked(db, client_id, settings, local_day)
+
+        db.commit()  # the SINGLE commit - closure + inventory together
+        return CloseDayResult(True, CLOSE_OK,
+                              already_closed=already_closed,
+                              blocked_count=block.blocked_count,
+                              booked_remaining=block.booked_remaining)
+    except Exception:
+        db.rollback()  # the COMBINED mutation rolls back as one
+        raise
+
+
+def reopen_day(
+    db: Session,
+    client_id: uuid.UUID,
+    settings: CalendarSettings,
+    local_day: date,
+) -> ReopenDayResult:
+    """
+    Purpose: Remove the operational closed_days restriction for an
+        office-local date - and NOTHING else. No slot row is read, locked,
+        or mutated: blocked rows have no provenance, so unblocking is never
+        inferred (the approved Reopen ruling). The date becomes eligible
+        for creation again (publish / one-off / recurring Apply); existing
+        blocked windows remain blocked until staff explicitly unblocks or
+        adds non-conflicting availability.
+    Returns: ReopenDayResult with was_closed (idempotent remove) and
+        recurring_configured - True when the SAME date is also configured
+        in the recurring closures list, so the caller can warn that a
+        future Recurring Apply may close it again (informational only; the
+        recurring configuration is never modified).
+    Database effects: advisory day lock; clients row lock; at most one
+        surgical closed_days write; ONE commit. ZERO appointment_slots
+        statements of any kind.
+    Possible failures: vanished tenant row (loud RuntimeError); database
+        errors propagate after rollback (Rule 16).
+    """
+    try:
+        acquire_schedule_day_lock(db, client_id, local_day)   # advisory FIRST
+        fresh_settings = closure_authority.lock_settings_for_update(
+            db, client_id)                                    # row SECOND
+        closed = closure_authority.read_closed_days(fresh_settings)
+        new_closed, was_closed = closure_authority.remove_closed_day(
+            closed, local_day)
+        recurring_configured = closure_authority.date_in_recurring_closures(
+            fresh_settings, local_day)
+        if was_closed:
+            closure_authority.write_closed_days_locked(
+                db, client_id, new_closed)
+        db.commit()
+        return ReopenDayResult(True, CLOSE_OK, was_closed=was_closed,
+                               recurring_configured=recurring_configured)
+    except Exception:
+        db.rollback()
+        raise

@@ -137,6 +137,26 @@
       "The portal could not accept that availability. Please review the date and time and try again.",
     avail_uncertain:
       "The portal did not confirm whether the availability was added. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4D-B: Close day / Reopen day. Wording rules: closing
+     * NEVER claims cancellation of anything (booked appointments are
+     * preserved by the backend and said so), reopening ALWAYS says blocked
+     * times remain blocked (no fabricated recovery), day_uncertain never
+     * claims failure (Rule 16), and day_rejected stays GENERIC (raw
+     * backend detail never renders through this surface). */
+    day_intro:
+      "Close or reopen one office day. Existing appointments are never cancelled.",
+    day_field_required: "Date is required.",
+    day_reopen_arm:
+      "Reopening removes the closure. Previously blocked times remain blocked. Click Confirm reopen to proceed.",
+    day_closed_done: "Day closed. Existing appointments remain booked.",
+    day_reopened_done:
+      "Day reopened. Previously blocked times remain blocked. Add or unblock availability as needed.",
+    day_reopen_recurring_note:
+      " This date is also configured as a recurring closure. A future Recurring Apply may close it again.",
+    day_rejected:
+      "The portal could not accept that day change. Please review the date and try again.",
+    day_uncertain:
+      "The portal did not confirm whether the day change went through. Showing the latest calendar - please check it before trying again.",
     /* PHASE 3A Slice 4B2: office-internal notes. No channel claims (a note
      * is never sent anywhere) and no patient-visibility ambiguity. */
     note_empty: "No internal notes",
@@ -598,6 +618,17 @@
        * resetContent (the F4 principle - exactly the bookBusy/noteBusy
        * rule). */
       availBusy: null,
+      /* PHASE 3A Slice 4D-B - Close/Reopen day state. dayBusy is the
+       * DEDICATED single-flight owner for the one close-or-reopen POST
+       * (minted from the same monotonic actionSeq source; released only by
+       * the owning promise; wiped only by resetContent). dayArm is the
+       * P2-A two-step confirmation: {day, mode} after the first click,
+       * null otherwise. closedDays holds the LAST consistency-checked
+       * week's OPERATIONAL closed dates verbatim from the validated
+       * schedule envelope - the ONLY closure source this page reads. */
+      dayBusy: null,
+      dayArm: null,
+      closedDays: [],
       /* SLICE 4C - reschedule picker state. scheduleSlots holds REFERENCES
        * to the slot rows of the LAST consistency-checked week read (the
        * same authoritative response the grid was built from - never
@@ -709,7 +740,19 @@
      * (Rule 3). The calendar module performs no request of its own; this
      * file remains the only caller of the data owner. */
     var calendarRenderer = null;
+    /* Slice 4D-B: the renderer factory's PURE office-local day owner
+     * (createMiaPortalCalendar.helpers.localDayOf), captured so the
+     * close-day arm text counts booked rows by the SAME conversion the
+     * grid renders with (Rule 3: one owner) - never device-timezone math
+     * and never a second converter. Null-tolerant like the factory. */
+    var calendarLocalDayOf = null;
     if (typeof globalScope.createMiaPortalCalendar === "function") {
+      if (globalScope.createMiaPortalCalendar.helpers &&
+          typeof globalScope.createMiaPortalCalendar.helpers.localDayOf ===
+            "function") {
+        calendarLocalDayOf = globalScope.createMiaPortalCalendar.helpers
+          .localDayOf;
+      }
       calendarRenderer = globalScope.createMiaPortalCalendar({
         documentRef: doc,
         formatInTimeZone: formatInTimeZone,
@@ -2364,6 +2407,7 @@
        * booking panel closes the drawer. */
       closeCalendarBook();
       closeCalendarAvail();   /* 4D-A: the same one-surface rule */
+      closeCalendarDay();     /* 4D-B: same rule */
       if (!appointment || calendarRenderer === null) {
         return;
       }
@@ -2795,6 +2839,7 @@
       closeCalendarDrawer();
       closeCalendarBook();
       closeCalendarAvail();
+      closeCalendarDay();     /* 4D-B: the same exclusion */
       /* ISO-8601 UTC instants compare lexicographically in time order, so
        * the choices always read earliest-first whatever the band held. */
       var ordered = slots.slice().sort(function (left, right) {
@@ -3060,6 +3105,7 @@
       }
       closeCalendarDrawer();
       closeCalendarBook();
+      closeCalendarDay();     /* 4D-B: one surface at a time */
       closeCalendarAvail();   /* always opens FRESH (the wipe-on-open rule) */
       var panel = byId("calendar-avail");
       if (panel) { panel.hidden = false; }
@@ -3194,6 +3240,242 @@
         message = MESSAGES.avail_uncertain;
       }
       closeCalendarAvail();
+      calendar.pendingFeedback = message;
+      startCalendarSettleRefresh();
+    }
+
+    /* -------------------------------------------------------------------
+     * PHASE 3A SLICE 4D-B - Calendar-native Close day / Reopen day.
+     *
+     * The receptionist marks ONE office-local date operationally closed -
+     * or removes that restriction - from the Calendar itself. The panel
+     * follows the 4D-A availability lifecycle verbatim (dedicated
+     * single-flight owner calendar.dayBusy, mutation generation bump,
+     * lifecycle/wipe capture, F6 settling, F9 session-loss classifier)
+     * plus the P2-A TWO-STEP confirmation: the FIRST submit click arms the
+     * action and shows the explicit consequence - including the already-
+     * loaded booked-appointment count for a close - and only the SECOND
+     * click sends the POST.
+     *
+     * AUTHORITY BOUNDARIES:
+     *   * The browser sends ONE typed office-local date and nothing else.
+     *     Past-date, cap, tenancy, blocking, and atomicity are backend
+     *     judgments; the input min= is assistance only.
+     *   * Mode is chosen by MEMBERSHIP in calendar.closedDays - the
+     *     validated envelope's operational list - never by inference from
+     *     blocked or empty days.
+     *   * NOTHING is synthesized on success: the panel closes, the honest
+     *     message is recorded, and startCalendarSettleRefresh() re-reads
+     *     the authoritative pair; the "Office closed" badge appears ONLY
+     *     from that re-read's closed_days.
+     *   * Closing never claims cancellation; reopening always says blocked
+     *     times remain blocked (the approved Reopen wording).
+     * ----------------------------------------------------------------- */
+
+    /* The submit button's resting label (restored on every wipe). */
+    var DAY_SUBMIT_DEFAULT_LABEL = "Close or reopen";
+
+    function setDayControlsDisabled(disabled) {
+      var dayEl = byId("calendar-close-day");
+      if (dayEl) { dayEl.disabled = disabled; }
+      var submitEl = byId("calendar-close-submit");
+      if (submitEl) { submitEl.disabled = disabled; }
+    }
+
+    /*
+     * Purpose (4D-B): close AND WIPE the day panel (the 4D-A wipe rule):
+     * typed date, note, feedback, the armed two-step state, and the submit
+     * label all reset, so the panel always opens fresh and a stale arm can
+     * never confirm a different day or mode.
+     */
+    function closeCalendarDay() {
+      var panel = byId("calendar-close");
+      if (panel) { panel.hidden = true; }
+      var dayEl = byId("calendar-close-day");
+      if (dayEl) { dayEl.value = ""; dayEl.disabled = false; }
+      var submitEl = byId("calendar-close-submit");
+      if (submitEl) {
+        submitEl.disabled = false;
+        submitEl.textContent = DAY_SUBMIT_DEFAULT_LABEL;
+      }
+      calendar.dayArm = null;
+      setCalendarText("calendar-close-note", "");
+      setCalendarText("calendar-close-feedback", "");
+    }
+
+    /*
+     * Purpose (4D-B): open the day panel fresh - the openCalendarAvail
+     * guard set (F6 settling, the dedicated in-flight owner) and the same
+     * one-surface rule over the grid. The date prefills to the displayed
+     * week's first day from the backend-derived anchor with the
+     * office-local today as browser-assistance min - the past-date rule is
+     * server-enforced.
+     */
+    function openCalendarDay() {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight - not even a panel */
+      }
+      if (calendar.dayBusy !== null) {
+        return; /* a close/reopen POST is still unresolved */
+      }
+      closeCalendarDrawer();
+      closeCalendarBook();
+      closeCalendarAvail();
+      closeCalendarDay();     /* always opens FRESH (the wipe-on-open rule) */
+      var panel = byId("calendar-close");
+      if (panel) { panel.hidden = false; }
+      setCalendarText("calendar-close-note", MESSAGES.day_intro);
+      var dayEl = byId("calendar-close-day");
+      if (dayEl && calendar.defaultStart !== null) {
+        var weekStart = calendar.weekOffset === 0
+          ? calendar.defaultStart
+          : shiftLocalDay(calendar.defaultStart, calendar.weekOffset * 7);
+        if (weekStart !== "") {
+          dayEl.value = weekStart;
+          dayEl.min = calendar.defaultStart;  /* assistance only */
+        }
+      }
+    }
+
+    /*
+     * Purpose (4D-B): the explicit CLOSE consequence for the arm step -
+     * the already-loaded booked count for the typed date, derived from the
+     * LAST consistency-checked week's slot rows through the renderer's OWN
+     * office-local day owner (calendarRenderer.localDayOf - never device-
+     * timezone math, never a second converter). Informational only: the
+     * authoritative count returns with the POST response.
+     */
+    function closeDayArmText(day) {
+      var count = 0;
+      if (calendarLocalDayOf !== null) {
+        for (var i = 0; i < calendar.scheduleSlots.length; i++) {
+          var row = calendar.scheduleSlots[i];
+          if (row && row.status === "booked" &&
+              calendarLocalDayOf(
+                row.start_datetime, calendar.timezoneName) === day) {
+            count += 1;
+          }
+        }
+      }
+      if (count === 0) {
+        return "No appointments are booked on this day. Closing it will " +
+          "stop remaining availability. Click Confirm close to proceed.";
+      }
+      var noun = count === 1 ? "appointment is" : "appointments are";
+      return count + " " + noun + " already booked. Closing this day will " +
+        "stop remaining availability but will not cancel these " +
+        "appointments. Click Confirm close to proceed.";
+    }
+
+    /*
+     * Purpose (4D-B): the two-step submit. Click ONE arms {day, mode} -
+     * mode chosen by closedDays membership - shows the explicit
+     * consequence, and relabels the button; click TWO with an UNCHANGED
+     * day+mode performs the POST under the full mutation discipline. A
+     * changed date (or a week refresh that changed membership) RE-ARMS
+     * instead of firing - a stale confirmation can never act on the wrong
+     * day or in the wrong direction.
+     */
+    function onCalendarDaySubmit() {
+      if (calendar.settling > 0) {
+        return; /* F6: a settled mutation is still awaiting the truth */
+      }
+      if (calendar.dayBusy !== null) {
+        return; /* at most ONE close/reopen POST in flight */
+      }
+      var dayEl = byId("calendar-close-day");
+      var day = String(dayEl ? dayEl.value : "").trim();
+      if (day === "") {
+        setCalendarText("calendar-close-feedback",
+          MESSAGES.day_field_required);
+        return;
+      }
+      var mode = calendar.closedDays.indexOf(day) !== -1 ? "reopen" : "close";
+      var armed = calendar.dayArm;
+      if (armed === null || armed.day !== day || armed.mode !== mode) {
+        calendar.dayArm = { day: day, mode: mode };
+        var submitEl = byId("calendar-close-submit");
+        if (submitEl) {
+          submitEl.textContent =
+            mode === "reopen" ? "Confirm reopen" : "Confirm close";
+        }
+        setCalendarText("calendar-close-feedback",
+          mode === "reopen" ? MESSAGES.day_reopen_arm : closeDayArmText(day));
+        return;
+      }
+      calendar.dayArm = null;
+      var token = ++calendar.actionSeq;
+      calendar.dayBusy = token;
+      calendar.generation += 1;   /* a mutation begins */
+      var lifecycleAtIssue = calendar.lifecycle;
+      var generationAtIssue = calendar.generation;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      setDayControlsDisabled(true);
+      setCalendarText("calendar-close-feedback", "");
+      var call = mode === "reopen" ? data.reopenDay : data.closeDay;
+      call(day)
+        .then(function (outcome) {
+          if (calendar.dayBusy === token) {
+            calendar.dayBusy = null;  /* only the owning promise releases */
+          }
+          settleCalendarDay(lifecycleAtIssue, generationAtIssue,
+            wipeEpochAtIssue, mode, outcome);
+        });
+    }
+
+    /*
+     * Purpose (4D-B): THE settling point for a close/reopen POST - the
+     * settleCalendarAvail guard order verbatim. bad_request keeps the
+     * panel open with the GENERIC wording (raw backend detail never
+     * renders); every other current outcome closes the panel, records the
+     * honest message - success wording never claims cancellation (close)
+     * and always says blocked times remain blocked (reopen, plus the
+     * recurring-configured note when the validated response reports it) -
+     * and re-reads the week authoritatively, so the badge appears (or
+     * disappears) ONLY from backend truth.
+     */
+    function settleCalendarDay(lifecycleAtIssue, generationAtIssue,
+        wipeEpochAtIssue, mode, outcome) {
+      if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+        return; /* wiped by reset/sign-out - stay wiped */
+      }
+      if (isSessionLossOutcome(outcome)) {
+        resetContent();
+        onSessionLost(outcome.state);
+        return;
+      }
+      if (!calendar.active) {
+        return; /* F3: no background work behind another page */
+      }
+      if (lifecycleAtIssue !== calendar.lifecycle ||
+          generationAtIssue !== calendar.generation) {
+        if (mutationMayHaveChangedState(outcome)) {
+          startCalendarSettleRefresh();
+        }
+        return;
+      }
+      if (!outcome.ok && outcome.state === "bad_request") {
+        var panel = byId("calendar-close");
+        if (panel && !panel.hidden) {
+          setDayControlsDisabled(false);
+          setCalendarText("calendar-close-feedback", MESSAGES.day_rejected);
+        }
+        return;
+      }
+      var message;
+      if (outcome.ok) {
+        if (mode === "reopen") {
+          message = MESSAGES.day_reopened_done;
+          if (outcome.data && outcome.data.recurring_configured === true) {
+            message += MESSAGES.day_reopen_recurring_note;
+          }
+        } else {
+          message = MESSAGES.day_closed_done;
+        }
+      } else {
+        message = MESSAGES.day_uncertain;
+      }
+      closeCalendarDay();
       calendar.pendingFeedback = message;
       startCalendarSettleRefresh();
     }
@@ -3465,6 +3747,7 @@
         calendar.timezoneName = "";
         /* SLICE 4C: a refused pair is never a picker source either. */
         calendar.scheduleSlots = [];
+        calendar.closedDays = [];  /* 4D-B: nor a closure-badge source */
         setCalendarText("calendar-range-label", "");
         setCalendarText("calendar-timezone-note", "");
         setCalendarText("calendar-state", MESSAGES.calendar_range_mismatch);
@@ -3480,6 +3763,11 @@
        * slot rows - the same authoritative inventory the grid painted. */
       calendar.scheduleSlots = Array.isArray(scheduleBody.slots)
         ? scheduleBody.slots : [];
+      /* Slice 4D-B: adopt the week's OPERATIONAL closed dates from the
+       * SAME validated envelope the grid was built from - the exclusive
+       * "Office closed" source (never inferred, never synthesized). */
+      calendar.closedDays = Array.isArray(scheduleBody.closed_days)
+        ? scheduleBody.closed_days : [];
       if (calendar.weekOffset === 0) {
         calendar.defaultStart = scheduleBody.start_day;
       }
@@ -3627,6 +3915,7 @@
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
+      closeCalendarDay();    /* 4D-B: same - and a stale arm must not survive */
       calendar.weekOffset -= 1;
       loadCalendar();
     }
@@ -3638,6 +3927,7 @@
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
+      closeCalendarDay();    /* 4D-B: same - and a stale arm must not survive */
       calendar.weekOffset += 1;
       loadCalendar();
     }
@@ -3675,6 +3965,7 @@
       closeCalendarDrawer();
       closeCalendarBook();   /* Slice 3: re-entry is a page reset */
       closeCalendarAvail();  /* 4D-A: the same page-reset rule */
+      closeCalendarDay();    /* 4D-B: the same page-reset rule */
       setCalendarNavDisabled(true);
       setCalendarText("calendar-range-label", "");
       setCalendarText("calendar-timezone-note", "");
@@ -3972,6 +4263,11 @@
       /* 4D-A: the SAME true-wipe rule for the availability owner - only
        * this reset boundary may declare the in-flight POST irrelevant. */
       calendar.availBusy = null;
+      /* 4D-B: the SAME rule for the close/reopen owner, its two-step arm,
+       * and the closure-badge source. */
+      calendar.dayBusy = null;
+      calendar.dayArm = null;
+      calendar.closedDays = [];
       /* SLICE 4C: the wipe clears the picker source and selection - no
        * office's open-slot times may linger behind the login view, and a
        * post-reset drawer can never submit a pre-reset slot id. */
@@ -4003,6 +4299,8 @@
        * clears EVERY typed value and open surface - nothing may linger
        * behind the login view on a shared front-desk computer. */
       closeCalendarAvail();
+      /* 4D-B: the day panel and its two-step arm obey the same wipe. */
+      closeCalendarDay();
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -4323,6 +4621,20 @@
       var calAvailSubmit = byId("calendar-avail-submit");
       if (calAvailSubmit) {
         calAvailSubmit.addEventListener("click", onCalendarAvailSubmit);
+      }
+      /* PHASE 3A Slice 4D-B: Close/Reopen day panel controls
+       * (null-tolerant, the frozen-suite construction rule). */
+      var calDayOpen = byId("calendar-close-open");
+      if (calDayOpen) {
+        calDayOpen.addEventListener("click", openCalendarDay);
+      }
+      var calDayClose = byId("calendar-close-close");
+      if (calDayClose) {
+        calDayClose.addEventListener("click", closeCalendarDay);
+      }
+      var calDaySubmit = byId("calendar-close-submit");
+      if (calDaySubmit) {
+        calDaySubmit.addEventListener("click", onCalendarDaySubmit);
       }
       /* PHASE 3A Slice 4C: drawer reschedule picker controls
        * (null-tolerant, the frozen-suite construction rule). */

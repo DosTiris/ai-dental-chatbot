@@ -156,7 +156,11 @@ const PAGE_ELEMENT_IDS = [
   "calendar-avail-open", "calendar-avail", "calendar-avail-title",
   "calendar-avail-note", "calendar-avail-day", "calendar-avail-start",
   "calendar-avail-duration", "calendar-avail-submit",
-  "calendar-avail-close", "calendar-avail-feedback"
+  "calendar-avail-close", "calendar-avail-feedback",
+  /* PHASE 3A Slice 4D-B: Close/Reopen day panel id contract. */
+  "calendar-close-open", "calendar-close", "calendar-close-title",
+  "calendar-close-note", "calendar-close-day", "calendar-close-submit",
+  "calendar-close-close", "calendar-close-feedback"
 ];
 
 function makeDocument() {
@@ -179,7 +183,8 @@ function makeFakeData() {
     "setAppointmentInternalNote" /* PHASE 3A Slice 4B2 */,
     "restoreAppointment", "rescheduleAppointment" /* PHASE 3A Slice 4C */,
     "restoreAppointmentToSlot" /* SLICE 4C v1.0.1 mode pin F1 */,
-    "createOneOffAvailability" /* PHASE 3A Slice 4D-A */];
+    "createOneOffAvailability" /* PHASE 3A Slice 4D-A */,
+    "closeDay", "reopenDay" /* PHASE 3A Slice 4D-B */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -219,6 +224,8 @@ function makeFakeData() {
       next("restoreAppointmentToSlot", { appointmentId, slotId }),
     createOneOffAvailability: (day, startTime, durationMinutes) =>
       next("createOneOffAvailability", { day, startTime, durationMinutes }),
+    closeDay: (day) => next("closeDay", day),
+    reopenDay: (day) => next("reopenDay", day),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -6583,4 +6590,360 @@ test("4D-A: F6 - while a settled mutation awaits authoritative state, the panel 
   openAvail(f);
   assertEqual(availPanel(f.doc).hidden, false,
     "and opens normally once truth has landed");
+});
+
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-B - Calendar-native Close day / Reopen day.
+ * ======================================================================== */
+
+const DAY_INTRO =
+  "Close or reopen one office day. Existing appointments are never cancelled.";
+const DAY_FIELD_REQUIRED = "Date is required.";
+const DAY_REOPEN_ARM =
+  "Reopening removes the closure. Previously blocked times remain blocked. Click Confirm reopen to proceed.";
+const DAY_CLOSED_DONE = "Day closed. Existing appointments remain booked.";
+const DAY_REOPENED_DONE =
+  "Day reopened. Previously blocked times remain blocked. Add or unblock availability as needed.";
+const DAY_RECURRING_NOTE =
+  " This date is also configured as a recurring closure. A future Recurring Apply may close it again.";
+const DAY_REJECTED =
+  "The portal could not accept that day change. Please review the date and try again.";
+const DAY_UNCERTAIN =
+  "The portal did not confirm whether the day change went through. Showing the latest calendar - please check it before trying again.";
+
+function dayPanel(doc) { return doc._elements["calendar-close"]; }
+function dayFeedback(doc) {
+  return doc._elements["calendar-close-feedback"].textContent;
+}
+function daySubmitLabel(doc) {
+  return doc._elements["calendar-close-submit"].textContent;
+}
+function openDay(f) { f.doc._elements["calendar-close-open"].trigger("click"); }
+function submitDay(f) {
+  f.doc._elements["calendar-close-submit"].trigger("click");
+}
+function setDayForm(f, day) {
+  f.doc._elements["calendar-close-day"].value = day;
+}
+function closedBadgesIn(column) {
+  const head = column.children[0];
+  return head.children.filter(
+    (child) => String(child.className).indexOf(
+      "portal-calendar-dayhead-closed") !== -1);
+}
+function closeDayBody(overrides) {
+  return Object.assign({
+    day: "2026-08-24", already_closed: false,
+    blocked_count: 0, booked_remaining: []
+  }, overrides || {});
+}
+function reopenDayBody(overrides) {
+  return Object.assign({
+    day: "2026-08-24", was_closed: true, recurring_configured: false
+  }, overrides || {});
+}
+
+test("4D-B: the toolbar affordance opens the panel fresh with the intro, prefilled date, and NO network", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  const before = f.data.totalCalls();
+  openDay(f);
+  assertEqual(dayPanel(f.doc).hidden, false, "the panel opens");
+  assertEqual(f.doc._elements["calendar-close-note"].textContent, DAY_INTRO,
+    "with the never-cancels intro");
+  assertEqual(f.doc._elements["calendar-close-day"].value, WEEK_START,
+    "prefilled to the displayed week's first day from the backend anchor");
+  assertEqual(f.doc._elements["calendar-close-day"].min, WEEK_START,
+    "min is browser assistance only");
+  assertEqual(daySubmitLabel(f.doc), "Close or reopen",
+    "the resting submit label");
+  assertEqual(f.data.totalCalls(), before,
+    "opening the panel touches the network never");
+});
+
+test("4D-B: an empty date never leaves the browser", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "");
+  const before = f.data.totalCalls();
+  submitDay(f);
+  assertEqual(dayFeedback(f.doc), DAY_FIELD_REQUIRED, "the presence check");
+  assertEqual(f.data.totalCalls(), before, "and no request was issued");
+});
+
+test("4D-B: closing is TWO-STEP - the first click arms with the zero-booked consequence, only the second POSTs", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  const before = f.data.totalCalls();
+  submitDay(f);
+  assertEqual(f.data.totalCalls(), before, "the FIRST click issues nothing");
+  assertEqual(daySubmitLabel(f.doc), "Confirm close", "it arms instead");
+  assertEqual(dayFeedback(f.doc),
+    "No appointments are booked on this day. Closing it will stop " +
+    "remaining availability. Click Confirm close to proceed.",
+    "with the explicit zero-booked consequence");
+
+  f.data.queue("closeDay", { ok: true, data: closeDayBody() });
+  queueWeek(f, [], [], { closed_days: ["2026-08-24"] });
+  submitDay(f);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.closeDay.length, 1, "the SECOND click posts once");
+  assertEqual(f.data.calls.closeDay[0], "2026-08-24",
+    "exactly the typed office-local date - nothing else");
+  assertEqual(dayPanel(f.doc).hidden, true, "the panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent, DAY_CLOSED_DONE,
+    "the settled message never claims cancellation");
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "one authoritative settle re-read");
+});
+
+test("4D-B: the arm text carries the already-loaded BOOKED count for the chosen office-local day", async () => {
+  const f = makePages();
+  /* One BOOKED slot on Mon Aug 24 (14:00Z == 10:00 New York, same local
+   * day) plus one booked on ANOTHER day - only the chosen day counts,
+   * derived through the renderer's own localDayOf (never device time). */
+  queueWeek(f, [
+    slotFixture({ slot_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T14:30:00Z", status: "booked" }),
+    slotFixture({ slot_id: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      start_datetime: "2026-08-25T14:00:00Z",
+      end_datetime: "2026-08-25T14:30:00Z", status: "booked" })
+  ], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);
+  assertEqual(dayFeedback(f.doc),
+    "1 appointment is already booked. Closing this day will stop " +
+    "remaining availability but will not cancel these appointments. " +
+    "Click Confirm close to proceed.",
+    "the explicit confirmation names the count and the no-cancel promise");
+});
+
+test("4D-B: a changed date RE-ARMS instead of firing - a stale confirmation never acts", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);                       /* arms Aug 24 */
+  setDayForm(f, "2026-08-25");
+  const before = f.data.totalCalls();
+  submitDay(f);                       /* different day: must RE-arm */
+  assertEqual(f.data.totalCalls(), before, "no POST fired");
+  assertEqual(daySubmitLabel(f.doc), "Confirm close", "re-armed instead");
+});
+
+test("4D-B: a date inside closed_days arms REOPEN with the blocked-times wording, and the second click posts reopen", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-25"] });
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-25");
+  submitDay(f);
+  assertEqual(daySubmitLabel(f.doc), "Confirm reopen",
+    "membership in the validated closed_days chooses the mode");
+  assertEqual(dayFeedback(f.doc), DAY_REOPEN_ARM,
+    "and the arm says blocked times remain blocked");
+
+  f.data.queue("reopenDay", { ok: true, data: reopenDayBody({
+    day: "2026-08-25" }) });
+  queueWeek(f, [], []);
+  submitDay(f);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.reopenDay.length, 1, "one reopen POST");
+  assertEqual(f.data.calls.reopenDay[0], "2026-08-25", "the typed date");
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    DAY_REOPENED_DONE, "reopen wording promises no fabricated recovery");
+});
+
+test("4D-B: a recurring-configured reopen appends the future-Apply warning from the VALIDATED response", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-25"] });
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-25");
+  submitDay(f);
+  f.data.queue("reopenDay", { ok: true, data: reopenDayBody({
+    day: "2026-08-25", recurring_configured: true }) });
+  queueWeek(f, [], []);
+  submitDay(f);
+  await flush();
+  await flush();
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    DAY_REOPENED_DONE + DAY_RECURRING_NOTE,
+    "the informational recurring warning renders");
+});
+
+test("4D-B: the badge renders ONLY where the authoritative closed_days says so - blocked rows and empty days never infer one", async () => {
+  const f = makePages();
+  /* A fully BLOCKED Monday, an EMPTY Tuesday, and a closed_days entry for
+   * Wednesday only: exactly ONE badge, on Wednesday. */
+  queueWeek(f, [
+    slotFixture({ start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T14:30:00Z", status: "blocked" })
+  ], [], { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+
+  const cols = columns(f.doc);
+  assertEqual(closedBadgesIn(cols[0]).length, 0,
+    "an all-blocked day is NOT closed");
+  assertEqual(closedBadgesIn(cols[1]).length, 0, "an empty day is NOT closed");
+  assertEqual(closedBadgesIn(cols[2]).length, 1, "the closed day IS");
+  assertEqual(closedBadgesIn(cols[2])[0].textContent, "Office closed",
+    "with the reviewed wording");
+});
+
+test("4D-B: NOTHING is synthesized - an ok close whose re-read lacks the date renders NO badge", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);
+  f.data.queue("closeDay", { ok: true, data: closeDayBody() });
+  queueWeek(f, [], []);            /* the truth says: not closed */
+  submitDay(f);
+  await flush();
+  await flush();
+  const cols = columns(f.doc);
+  assertEqual(closedBadgesIn(cols[0]).length, 0,
+    "the frontend never invents a closure the backend did not state");
+});
+
+test("4D-B: bad_request keeps the panel open with the GENERIC wording and re-reads nothing", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);
+  f.data.queue("closeDay", { ok: false, state: "bad_request" });
+  submitDay(f);
+  await flush();
+
+  assertEqual(dayPanel(f.doc).hidden, false, "the panel stays open");
+  assertEqual(f.doc._elements["calendar-close-day"].value, "2026-08-24",
+    "with the typed date retained");
+  assertEqual(dayFeedback(f.doc), DAY_REJECTED,
+    "raw backend detail never renders");
+  assertEqual(f.data.calls.getSchedule.length, 1,
+    "a proven no-op re-reads nothing");
+  assertEqual(f.doc._elements["calendar-close-day"].disabled, false,
+    "controls re-enabled for the correction");
+});
+
+test("4D-B: an ambiguous outcome NEVER claims failure - it refreshes and says so", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);
+  f.data.queue("closeDay", { ok: false, state: "unavailable" });
+  queueWeek(f, [], []);
+  submitDay(f);
+  await flush();
+  await flush();
+  assertEqual(dayPanel(f.doc).hidden, true, "the panel closed");
+  assertEqual(f.doc._elements["calendar-state"].textContent, DAY_UNCERTAIN,
+    "uncertainty is stated, failure is never claimed (Rule 16)");
+  assertEqual(f.data.calls.getSchedule.length, 2, "and the truth re-read");
+});
+
+test("4D-B: session loss on the close wipes and hands back", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);
+  f.data.queue("closeDay", { ok: false, state: "unauthorized" });
+  submitDay(f);
+  await flush();
+  assertEqual(f.sessionLost.length, 1, "the session-loss hand-back fired");
+  assertEqual(f.sessionLost[0], "unauthorized", "with the honest state");
+});
+
+test("4D-B: at most ONE close/reopen POST is in flight - the dedicated owner refuses a duplicate", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);                            /* arm */
+  const deferred = f.data.queueDeferred("closeDay");
+  submitDay(f);                            /* fire */
+  submitDay(f);                            /* while unresolved */
+  assertEqual(f.data.calls.closeDay.length, 1,
+    "the single-flight owner refused the duplicate");
+  queueWeek(f, [], [], { closed_days: ["2026-08-24"] });
+  deferred.resolve({ ok: true, data: closeDayBody() });
+  await flush();
+  await flush();
+  assertEqual(dayPanel(f.doc).hidden, true, "then the settle proceeds");
+});
+
+test("4D-B: one surface at a time - the day panel excludes the availability panel in BOTH directions, and week navigation clears a stale arm", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  assertEqual(availPanel(f.doc).hidden, false, "avail open");
+  openDay(f);
+  assertEqual(availPanel(f.doc).hidden, true, "opening the day panel closes it");
+  assertEqual(dayPanel(f.doc).hidden, false, "day open");
+  openAvail(f);
+  assertEqual(dayPanel(f.doc).hidden, true, "and the reverse");
+
+  openDay(f);
+  setDayForm(f, "2026-08-24");
+  submitDay(f);                              /* armed */
+  assertEqual(daySubmitLabel(f.doc), "Confirm close", "armed");
+  queueWeek(f, [], [],
+    { start_day: "2026-08-31", end_day: "2026-09-06" },
+    { start_day: "2026-08-31", end_day: "2026-09-06" });
+  f.doc._elements["calendar-next"].trigger("click");
+  assertEqual(dayPanel(f.doc).hidden, true, "week navigation closes it");
+  await flush();
+  openDay(f);
+  assertEqual(daySubmitLabel(f.doc), "Close or reopen",
+    "and the stale arm did not survive - the label rests again");
 });

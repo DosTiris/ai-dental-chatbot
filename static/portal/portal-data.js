@@ -384,7 +384,7 @@
     /* The exact approved field sets (F2). Adding a field here is a
      * reviewed contract change - the Node bites pin these arrays. */
     var SCHEDULE_ENVELOPE_KEYS = ["timezone_name", "start_day", "end_day",
-      "slots"];
+      "slots", "closed_days"];
     var SCHEDULE_SLOT_KEYS = ["slot_id", "start_datetime", "end_datetime",
       "status", "provider_name", "service_key"];
     var SCHEDULE_BULK_KEYS = ["day", "blocked_count", "booked_remaining"];
@@ -457,7 +457,55 @@
         body.timezone_name !== "" &&
         isRealCalendarDate(body.start_day) &&
         isRealCalendarDate(body.end_day) &&
-        isValidScheduleSlotArray(body.slots);
+        isValidScheduleSlotArray(body.slots) &&
+        isValidClosedDaysArray(body.closed_days);
+    }
+
+    /* PHASE 3A Slice 4D-B: the OPERATIONAL closed dates of the requested
+     * window - the ONLY source the Calendar may render "Office closed"
+     * from (never inferred from blocked rows, empty days, or recurring
+     * configuration). Strictly a list of real calendar dates. */
+    function isValidClosedDaysArray(closedDays) {
+      if (!Array.isArray(closedDays)) {
+        return false;
+      }
+      for (var i = 0; i < closedDays.length; i++) {
+        if (!isRealCalendarDate(closedDays[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /* Slice 4D-B close/reopen response shapes - EXACT keys, fail closed. */
+    var CLOSE_DAY_KEYS = ["day", "already_closed", "blocked_count",
+      "booked_remaining"];
+    var REOPEN_DAY_KEYS = ["day", "was_closed", "recurring_configured"];
+
+    function isValidCloseDayBody(body) {
+      if (!hasExactKeys(body, CLOSE_DAY_KEYS) ||
+          !isRealCalendarDate(body.day) ||
+          typeof body.already_closed !== "boolean" ||
+          typeof body.blocked_count !== "number" ||
+          !isFinite(body.blocked_count) ||
+          body.blocked_count < 0 ||
+          Math.floor(body.blocked_count) !== body.blocked_count ||
+          !Array.isArray(body.booked_remaining)) {
+        return false;
+      }
+      for (var i = 0; i < body.booked_remaining.length; i++) {
+        if (!isValidBookedWindowMember(body.booked_remaining[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function isValidReopenDayBody(body) {
+      return hasExactKeys(body, REOPEN_DAY_KEYS) &&
+        isRealCalendarDate(body.day) &&
+        typeof body.was_closed === "boolean" &&
+        typeof body.recurring_configured === "boolean";
     }
 
     /* Publish returns the created SlotView array directly - the SAME
@@ -868,6 +916,24 @@
           { day: day, start_time: startTime,
             duration_minutes: durationMinutes },
           isValidScheduleSlotBody);
+      },
+      /* PHASE 3A Slice 4D-B - POST /portal/schedule/days/<day>/close: mark
+       * ONE office-local date operationally closed. The browser supplies
+       * the typed date and NOTHING else - the atomic closure + bulk block
+       * plus every rule (past-date, cap, tenancy) is a backend judgment.
+       * The path derives from the ONE schedule literal. */
+      closeDay: function (day) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/days/" + encodeURIComponent(day) + "/close",
+          undefined, isValidCloseDayBody);
+      },
+      /* Slice 4D-B - POST /portal/schedule/days/<day>/reopen: remove the
+       * operational closure ONLY. The backend never unblocks any slot;
+       * this method claims nothing more than the validated response. */
+      reopenDay: function (day) {
+        return authorizedSend("POST",
+          SCHEDULE_URL + "/days/" + encodeURIComponent(day) + "/reopen",
+          undefined, isValidReopenDayBody);
       },
       /* PHASE 3A Slice 3 - POST /portal/schedule/slots/<id>/book: book ONE
        * authoritative slot for a patient the office is speaking with. The

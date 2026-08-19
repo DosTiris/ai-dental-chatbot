@@ -492,7 +492,10 @@ function validScheduleBody(overrides) {
     timezone_name: "America/New_York",
     start_day: "2026-08-21",
     end_day: "2026-08-27",
-    slots: [validScheduleSlot()]
+    slots: [validScheduleSlot()],
+    /* Slice 4D-B: the envelope carries the window's operational closed
+     * dates; [] is the common (no closures) case. */
+    closed_days: []
   }, overrides || {});
 }
 
@@ -2076,4 +2079,102 @@ test("no session means NO restore-to-slot request at all", async () => {
   assertEqual((await env.data.restoreAppointmentToSlot("x", "s1")).state,
     "signed_out", "signed_out with zero requests");
   assertEqual(env.fetch.remaining(), 0, "no request was made");
+});
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-B - closeDay / reopenDay data owners + the closed_days
+ * envelope amendment: exact endpoints, exact-key validation, fail closed.
+ * ======================================================================== */
+
+test("4D-B: closeDay POSTs to the day path with NO body and validates the exact shape", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-28/close", method: "POST",
+      headerEquals: { "Authorization": "Bearer tok-a" } },
+    { status: 200, json: { day: "2026-08-28", already_closed: false,
+      blocked_count: 2, booked_remaining: [
+        { start_datetime: "2026-08-28T15:00:00Z",
+          end_datetime: "2026-08-28T15:30:00Z" }] } }
+  );
+  const outcome = await env.data.closeDay("2026-08-28");
+  assert(outcome.ok, "valid close body accepted");
+  assertEqual(outcome.data.blocked_count, 2, "with the blocked count");
+
+  /* Fail closed: an extra key, a negative count, and a leaked patient
+   * field are each refused. */
+  const bad = [
+    { day: "2026-08-28", already_closed: false, blocked_count: 1,
+      booked_remaining: [], settings: {} },
+    { day: "2026-08-28", already_closed: false, blocked_count: -1,
+      booked_remaining: [] },
+    { day: "2026-08-28", already_closed: "yes", blocked_count: 0,
+      booked_remaining: [] }
+  ];
+  for (const body of bad) {
+    const env2 = makeData();
+    seedSession(env2);
+    env2.fetch.expect(
+      { urlEquals: "/portal/schedule/days/2026-08-28/close",
+        method: "POST" },
+      { status: 200, json: body });
+    const refused = await env2.data.closeDay("2026-08-28");
+    assertEqual(refused.state, "invalid_response",
+      "close body variant fails closed");
+  }
+});
+
+test("4D-B: reopenDay POSTs to the day path and validates the exact three-field shape", async () => {
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-28/reopen", method: "POST" },
+    { status: 200, json: { day: "2026-08-28", was_closed: true,
+      recurring_configured: true } }
+  );
+  const outcome = await env.data.reopenDay("2026-08-28");
+  assert(outcome.ok, "valid reopen body accepted");
+  assertEqual(outcome.data.recurring_configured, true,
+    "the informational recurring flag arrives verbatim");
+
+  const env2 = makeData();
+  seedSession(env2);
+  env2.fetch.expect(
+    { urlEquals: "/portal/schedule/days/2026-08-28/reopen", method: "POST" },
+    { status: 200, json: { day: "2026-08-28", was_closed: true,
+      recurring_configured: true, blocked_count: 0 } });
+  assertEqual((await env2.data.reopenDay("2026-08-28")).state,
+    "invalid_response", "an extra key fails closed");
+});
+
+test("4D-B: the schedule envelope REQUIRES a well-formed closed_days list", async () => {
+  /* Missing key: the pre-4D-B envelope is refused (the amendment is
+   * load-bearing, not decorative). */
+  const missing = validScheduleBody();
+  delete missing.closed_days;
+  for (const body of [
+    missing,
+    validScheduleBody({ closed_days: "2026-08-28" }),
+    validScheduleBody({ closed_days: ["2026-13-40"] }),
+    validScheduleBody({ closed_days: [42] })
+  ]) {
+    const env = makeData();
+    seedSession(env);
+    env.fetch.expect(
+      { urlEquals: "/portal/schedule", method: "GET" },
+      { status: 200, json: body });
+    const outcome = await env.data.getSchedule({});
+    assertEqual(outcome.state, "invalid_response",
+      "a malformed closed_days envelope fails closed");
+  }
+
+  const env = makeData();
+  seedSession(env);
+  env.fetch.expect(
+    { urlEquals: "/portal/schedule", method: "GET" },
+    { status: 200, json: validScheduleBody({
+      closed_days: ["2026-08-28", "2026-09-04"] }) });
+  const outcome = await env.data.getSchedule({});
+  assert(outcome.ok, "a populated closed_days list is accepted verbatim");
+  assertEqual(outcome.data.closed_days.length, 2, "both dates arrive");
 });
