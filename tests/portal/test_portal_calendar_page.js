@@ -6947,3 +6947,192 @@ test("4D-B: one surface at a time - the day panel excludes the availability pane
   assertEqual(daySubmitLabel(f.doc), "Close or reopen",
     "and the stale arm did not survive - the label rests again");
 });
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-B.1 - closed-day presentation + Add Availability UX.
+ * ======================================================================== */
+
+const AVAIL_CLOSED_DAY =
+  "This day is closed. Reopen the day before adding availability.";
+
+function closedColumn(column) {
+  return String(column.className).indexOf("portal-calendar-col-closed") !== -1;
+}
+
+test("4D-B.1: a closed_days date gets the column treatment AND the badge; open days get neither", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+
+  const cols = columns(f.doc);
+  assertEqual(closedColumn(cols[2]), true,
+    "the authoritative closed date carries the column class");
+  assertEqual(closedBadgesIn(cols[2]).length, 1, "and the badge");
+  assertEqual(closedBadgesIn(cols[2])[0].textContent, "Office closed",
+    "with the reviewed wording");
+  for (const i of [0, 1, 3, 4, 5, 6]) {
+    assertEqual(closedColumn(cols[i]), false,
+      "an open day column carries NO closed treatment (col " + i + ")");
+  }
+});
+
+test("4D-B.1: an empty day and a blocked-only day are NEVER inferred closed", async () => {
+  const f = makePages();
+  /* Monday fully blocked, Tuesday empty, no closed_days at all. */
+  queueWeek(f, [
+    slotFixture({ start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T14:30:00Z", status: "blocked" })
+  ], []);
+  openCalendar(f);
+  await flush();
+
+  const cols = columns(f.doc);
+  assertEqual(closedColumn(cols[0]), false, "blocked-only is not closed");
+  assertEqual(closedBadgesIn(cols[0]).length, 0, "no badge either");
+  assertEqual(closedColumn(cols[1]), false, "empty is not closed");
+  assertEqual(closedBadgesIn(cols[1]).length, 0, "no badge either");
+});
+
+test("4D-B.1: a configured-but-unapplied Recurring closure produces NO closed treatment (closed_days only)", async () => {
+  /* The envelope is the ONLY closure carrier the frontend sees; recurring
+   * configuration never reaches it unapplied. An empty closed_days with
+   * inventory present must therefore render zero closed treatments. */
+  const f = makePages();
+  queueWeek(f, [
+    slotFixture({ start_datetime: "2026-08-24T14:00:00Z",
+      end_datetime: "2026-08-24T14:30:00Z", status: "available" })
+  ], [], { closed_days: [] });
+  openCalendar(f);
+  await flush();
+  for (const col of columns(f.doc)) {
+    assertEqual(closedColumn(col), false, "no column treatment anywhere");
+    assertEqual(closedBadgesIn(col).length, 0, "no badge anywhere");
+  }
+});
+
+test("4D-B.1: appointments on a closed day stay normal interactive controls above the treatment", async () => {
+  const f = makePages();
+  queueWeek(f,
+    [slotFixture({ slot_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      start_datetime: "2026-08-26T14:00:00Z",
+      end_datetime: "2026-08-26T14:30:00Z", status: "booked" })],
+    [appointmentFixture({ id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      start_datetime: "2026-08-26T14:00:00Z",
+      end_datetime: "2026-08-26T14:30:00Z" })],
+    { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+
+  const cols = columns(f.doc);
+  assertEqual(closedColumn(cols[2]), true, "the day is closed-treated");
+  const appts = blocksIn(cols[2]);
+  assertEqual(appts.length, 1, "the appointment still renders normally");
+  appts[0].trigger("click");
+  assertEqual(f.doc._elements["calendar-drawer"].hidden, false,
+    "and remains a live click target opening the drawer");
+});
+
+test("4D-B.1: Add Availability on a LOADED closed date refuses locally - zero POSTs, panel open, values kept", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-26", "10:00", "30");
+  const before = f.data.totalCalls();
+  submitAvail(f);
+  assertEqual(f.data.totalCalls(), before, "ZERO network requests");
+  assertEqual(availPanel(f.doc).hidden, false, "the panel stays open");
+  assertEqual(f.doc._elements["calendar-avail-day"].value, "2026-08-26",
+    "the typed date is preserved");
+  assertEqual(f.doc._elements["calendar-avail-start"].value, "10:00",
+    "the typed time is preserved");
+  assertEqual(availFeedback(f.doc), AVAIL_CLOSED_DAY,
+    "with the explicit closed-day explanation");
+});
+
+test("4D-B.1: changing from the closed date to an open date clears the refusal and the normal flow proceeds", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-26", "10:00", "30");
+  submitAvail(f);
+  assertEqual(availFeedback(f.doc), AVAIL_CLOSED_DAY, "refused locally");
+
+  setAvailForm(f, "2026-08-27", "10:00", "30");
+  f.data.queue("createOneOffAvailability", { ok: true, data: slotFixture({
+    start_datetime: "2026-08-27T14:00:00Z",
+    end_datetime: "2026-08-27T14:30:00Z" }) });
+  queueWeek(f, [], [], { closed_days: ["2026-08-26"] });
+  submitAvail(f);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.createOneOffAvailability.length, 1,
+    "the open date POSTs normally - the stale refusal did not stick");
+  assertEqual(f.data.calls.createOneOffAvailability[0].day, "2026-08-27",
+    "with the corrected date");
+});
+
+test("4D-B.1: a stale-window backend conflict on a NOW-closed date surfaces the closed-day explanation after the authoritative refresh", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);                 /* Friday looks open at load */
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-28", "10:00", "30");
+  f.data.queue("createOneOffAvailability",
+    { ok: false, state: "conflict" }); /* the backend gate refused */
+  queueWeek(f, [], [], { closed_days: ["2026-08-28"] });  /* the truth */
+  submitAvail(f);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.getSchedule.length, 2,
+    "the existing authoritative conflict refresh ran");
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    AVAIL_CLOSED_DAY,
+    "the explanation is the explicit closed-day wording, never lost");
+});
+
+test("4D-B.1: a NORMAL overlap conflict keeps the existing generic wording - never mislabeled closed", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-28", "10:00", "30");
+  f.data.queue("createOneOffAvailability", { ok: false, state: "conflict" });
+  queueWeek(f, [], []);                 /* refreshed truth: NOT closed */
+  submitAvail(f);
+  await flush();
+  await flush();
+  assertEqual(f.doc._elements["calendar-state"].textContent,
+    "That time overlaps existing schedule slots. Showing the latest calendar.",
+    "the existing honest overlap wording is unchanged");
+});
+
+test("4D-B.1: the ordinary 4D-A open-date acceptance path is unchanged", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  openAvail(f);
+  setAvailForm(f, "2026-08-27", "09:30", "30");
+  f.data.queue("createOneOffAvailability", { ok: true, data: slotFixture({
+    start_datetime: "2026-08-27T13:30:00Z",
+    end_datetime: "2026-08-27T14:00:00Z" }) });
+  queueWeek(f, [], []);
+  submitAvail(f);
+  await flush();
+  await flush();
+  assertEqual(f.data.calls.createOneOffAvailability.length, 1, "one POST");
+  assertEqual(availPanel(f.doc).hidden, true, "panel closed on success");
+  assertEqual(f.data.calls.getSchedule.length, 2, "authoritative settle");
+});

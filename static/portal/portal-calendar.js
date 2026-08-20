@@ -1008,7 +1008,14 @@
 
     function buildColumn(dayText, dayEntries, window, isClosed) {
       var column = doc.createElement("div");
-      column.className = "portal-calendar-col";
+      /* Slice 4D-B.1: the closed-day COLUMN treatment - a class only,
+       * driven by the SAME authoritative closed_days flag as the badge
+       * (never inferred from blocked/empty content). Styling lives in
+       * portal.css; geometry, layering, and every interaction are
+       * untouched here. */
+      column.className = isClosed === true
+        ? "portal-calendar-col portal-calendar-col-closed"
+        : "portal-calendar-col";
 
       var head = doc.createElement("div");
       head.className = "portal-calendar-dayhead";

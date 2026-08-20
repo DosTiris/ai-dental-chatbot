@@ -949,3 +949,49 @@ button.portal-calendar-band {
     box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.18);
   }
 }
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-B.1 - operationally closed day presentation.
+ *
+ * Hierarchy (contract): appointments strongest -> "Office closed" pill
+ * obvious-but-secondary -> column tint subtle context -> ordinary bands.
+ * Neutral grays only - a scheduling state, never an error state. The
+ * column tint paints the CANVAS BACKGROUND of the closed column, which
+ * renders BEHIND every absolutely positioned layer (bands, history,
+ * blocks, appointments), so nothing above it loses contrast, geometry, or
+ * click targets. Driven exclusively by the portal-calendar-col-closed /
+ * portal-calendar-dayhead-closed classes the renderer sets from the
+ * authoritative closed_days flag.
+ * ======================================================================== */
+
+.portal-calendar-dayhead-closed {
+  display: inline-block;
+  padding: 0 7px;
+  border: 1px solid #cdd3da;
+  border-radius: 999px;
+  background: #eef1f4;
+  color: #5b6570;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.portal-calendar-col-closed .portal-calendar-canvas {
+  /* A light neutral tint with a very faint diagonal stripe - visible as
+   * context, invisible as noise. */
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(93, 104, 116, 0.045) 0,
+      rgba(93, 104, 116, 0.045) 6px,
+      rgba(93, 104, 116, 0) 6px,
+      rgba(93, 104, 116, 0) 14px),
+    #f4f6f8;
+}
+
+.portal-calendar-col-closed .portal-calendar-dayhead {
+  background: #f4f6f8;
+}

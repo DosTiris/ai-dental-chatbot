@@ -137,6 +137,15 @@
       "The portal could not accept that availability. Please review the date and time and try again.",
     avail_uncertain:
       "The portal did not confirm whether the availability was added. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4D-B.1: the explicit closed-day explanation for Add
+     * Availability. Shown (a) by the LOCAL pre-refusal when the loaded
+     * authoritative closed_days already proves the typed date is closed
+     * (zero POST - UX assistance only, the backend gate stays the
+     * authority), and (b) after a backend conflict WHEN AND ONLY WHEN the
+     * authoritative settle re-read proves the date is now closed - a
+     * normal overlap conflict is never mislabeled. */
+    avail_closed_day:
+      "This day is closed. Reopen the day before adding availability.",
     /* PHASE 3A Slice 4D-B: Close day / Reopen day. Wording rules: closing
      * NEVER claims cancellation of anything (booked appointments are
      * preserved by the backend and said so), reopening ALWAYS says blocked
@@ -629,6 +638,13 @@
       dayBusy: null,
       dayArm: null,
       closedDays: [],
+      /* 4D-B.1: the office-local date of an availability POST that
+       * settled CONFLICT, held ONLY until the authoritative refresh
+       * renders its message - if the refreshed closed_days contains this
+       * date, the generic conflict wording is upgraded to the explicit
+       * closed-day explanation. Judged EXCLUSIVELY from the validated
+       * re-read (never from the 409 itself, never from device dates). */
+      pendingAvailConflictDay: "",
       /* SLICE 4C - reschedule picker state. scheduleSlots holds REFERENCES
        * to the slot rows of the LAST consistency-checked week read (the
        * same authoritative response the grid was built from - never
@@ -3159,6 +3175,20 @@
           MESSAGES.avail_fields_required);
         return;
       }
+      /* 4D-B.1 LOCAL pre-refusal: when the CURRENTLY LOADED authoritative
+       * window already proves the typed date is operationally closed
+       * (calendar.closedDays - the validated schedule envelope, the ONLY
+       * closure source this page reads), refuse HERE: zero POST, the
+       * panel stays open, every typed value is preserved, and the
+       * explicit explanation renders. This is UX assistance ONLY - the
+       * under-lock backend gate remains the authority for every race and
+       * stale-window case, exactly as 4D-B shipped it. Changing the date
+       * re-runs this check per submit, so a stale refusal clears itself. */
+      if (calendar.closedDays.indexOf(day) !== -1) {
+        setCalendarText("calendar-avail-feedback",
+          MESSAGES.avail_closed_day);
+        return;
+      }
       var token = ++calendar.actionSeq;
       calendar.availBusy = token;
       calendar.generation += 1;   /* a mutation begins */
@@ -3175,7 +3205,7 @@
             calendar.availBusy = null;
           }
           settleCalendarAvail(lifecycleAtIssue, generationAtIssue,
-            wipeEpochAtIssue, outcome);
+            wipeEpochAtIssue, day, outcome);
         });
     }
 
@@ -3203,7 +3233,7 @@
      *      certainty (Rule 16).
      */
     function settleCalendarAvail(lifecycleAtIssue, generationAtIssue,
-        wipeEpochAtIssue, outcome) {
+        wipeEpochAtIssue, submittedDay, outcome) {
       if (wipeEpochAtIssue !== calendar.wipeEpoch) {
         return; /* wiped by reset/sign-out - stay wiped */
       }
@@ -3236,6 +3266,13 @@
         message = MESSAGES.avail_created;
       } else if (outcome.state === "conflict") {
         message = MESSAGES.avail_conflict;
+        /* 4D-B.1: a conflict on a date the AUTHORITATIVE refresh proves
+         * closed deserves the explicit closed-day explanation instead of
+         * the generic wording. The judgment is deferred to the refresh
+         * consumer (renderCalendarPage) which reads the re-validated
+         * closed_days - never guessed from the 409 itself, so a normal
+         * overlap conflict keeps its existing honest message. */
+        calendar.pendingAvailConflictDay = submittedDay;
       } else {
         message = MESSAGES.avail_uncertain;
       }
@@ -3801,6 +3838,22 @@
       if (refreshed !== null) {
         openCalendarDrawer(refreshed);
       }
+      /* 4D-B.1: the deferred closed-day judgment for an availability
+       * CONFLICT. Consumed exactly once, here, where the freshly
+       * VALIDATED closed_days for this window is already adopted: when it
+       * proves the submitted date is now operationally closed, the
+       * generic conflict wording upgrades to the explicit closed-day
+       * explanation; otherwise (a normal overlap) the existing honest
+       * wording stands. The explanation is therefore never silently
+       * discarded by the refresh. */
+      if (calendar.pendingAvailConflictDay !== "") {
+        if (calendar.pendingFeedback === MESSAGES.avail_conflict &&
+            calendar.closedDays.indexOf(
+              calendar.pendingAvailConflictDay) !== -1) {
+          calendar.pendingFeedback = MESSAGES.avail_closed_day;
+        }
+        calendar.pendingAvailConflictDay = "";
+      }
       /* A settled mutation message survives its own refresh. It is shown
        * inside the panel when the panel is open, and at calendar level
        * when the appointment is gone - so the outcome is never lost. */
@@ -3956,6 +4009,7 @@
        * The arm is UI state scoped to one panel visit, so it DOES clear. */
       calendar.armed = {};
       calendar.pendingFeedback = "";
+      calendar.pendingAvailConflictDay = "";   /* 4D-B.1: same reset rule */
       calendar.settling = 0;
       calendar.weekOffset = 0;
       calendar.defaultStart = null;
@@ -4277,6 +4331,7 @@
       calendar.rescheduleMode = null;
       calendar.armed = {};
       calendar.pendingFeedback = "";
+      calendar.pendingAvailConflictDay = "";   /* 4D-B.1: same wipe rule */
       calendar.settling = 0;
       calendar.weekOffset = 0;
       calendar.defaultStart = null;

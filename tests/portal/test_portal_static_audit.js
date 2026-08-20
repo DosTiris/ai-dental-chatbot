@@ -646,7 +646,7 @@ test("audit: the 4D-A assets carry the exact deterministic cache-bust tokens", (
    * but stay pinned WITH the bundle (the 4C rule: a stale cached member of
    * this set must never pair with a fresh one across the deployment
    * boundary). */
-  const TOKEN = "4db-close-day-v1";
+  const TOKEN = "4db1-close-polish-v1";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',
@@ -727,3 +727,31 @@ test("audit: every shipped portal and portal-test file is pure CRLF (worktree co
   const summary = await h.runRegisteredTests("test_portal_static_audit");
   process.exitCode = summary.failed === 0 ? 0 : 1;
 })();
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-B.1 - closed-day polish pins.
+ * ======================================================================== */
+
+test("audit 4D-B.1: the day toolbar control says exactly Close/reopen day", () => {
+  const html = read("index.html");
+  assert(html.includes('id="calendar-close-open"'),
+    "the day toolbar control exists");
+  const match = html.match(
+    /id="calendar-close-open"[^>]*>([^<]*)<\/button>/);
+  assert(match !== null, "the control has readable label markup");
+  assert(match[1].trim() === "Close/reopen day",
+    "label must be exactly 'Close/reopen day', found '" +
+    (match ? match[1].trim() : "") + "'");
+});
+
+test("audit 4D-B.1: the closed-day styling stays neutral - no danger palette", () => {
+  const css = read("portal.css");
+  const start = css.indexOf("SLICE 4D-B.1");
+  assert(start !== -1, "the 4D-B.1 styling block exists");
+  const block = css.slice(start);
+  for (const forbidden of ["red", "#d9534f", "#dc3545", "#c00", "crimson",
+    "danger"]) {
+    assert(!block.toLowerCase().includes(forbidden),
+      "closed-day styling must not use danger styling: " + forbidden);
+  }
+});
