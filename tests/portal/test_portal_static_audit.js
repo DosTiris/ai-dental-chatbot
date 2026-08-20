@@ -778,10 +778,10 @@ test("audit 4D-C: the planned-closure terminology and Save/Apply copy are pinned
   assert(html.includes("Planned closures &mdash; take effect on Apply"),
     "the exact planned-closures heading is present");
   assert(html.includes(
-    "Saving updates the recurring plan only. It does not change the times offered for booking. Apply attempts to materialize the saved plan across the booking horizon. Days that already contain scheduled inventory may be skipped, and booked appointments are never changed."),
+    "Save updates your weekly plan, but it does not change the calendar yet. Apply uses the saved plan to update the calendar. If a day already has times on it, that day may be skipped. Existing appointments are never changed."),
     "the Save/Apply explanation is present verbatim");
   assert(html.includes(
-    "Planned closures are different from Close/reopen day. Close/reopen day takes effect immediately."),
+    "Planned closures are days you want closed when you press Apply. Close/reopen day closes or reopens one day right away."),
     "the 4D-B distinction is present verbatim");
 });
 
