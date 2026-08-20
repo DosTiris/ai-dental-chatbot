@@ -166,6 +166,13 @@
       "The portal could not accept that day change. Please review the date and try again.",
     day_uncertain:
       "The portal did not confirm whether the day change went through. Showing the latest calendar - please check it before trying again.",
+    /* PHASE 3A Slice 4D-C: the read-only Weekly schedule panel. A failed
+     * GET NEVER synthesizes configuration - the generic wording renders
+     * and nothing else. weekly_none is the approved empty state. */
+    weekly_loading: "Loading weekly schedule...",
+    weekly_error:
+      "The weekly schedule could not be loaded. Please try again.",
+    weekly_none: "None planned.",
     /* PHASE 3A Slice 4B2: office-internal notes. No channel claims (a note
      * is never sent anywhere) and no patient-visibility ambiguity. */
     note_empty: "No internal notes",
@@ -645,6 +652,10 @@
        * closed-day explanation. Judged EXCLUSIVELY from the validated
        * re-read (never from the 409 itself, never from device dates). */
       pendingAvailConflictDay: "",
+      /* 4D-C: the in-flight recurring GET owner for the READ-ONLY Weekly
+       * schedule panel. A close/reopen invalidates it, so a late response
+       * can never populate a wiped or re-opened panel. */
+      weeklyReq: null,
       /* SLICE 4C - reschedule picker state. scheduleSlots holds REFERENCES
        * to the slot rows of the LAST consistency-checked week read (the
        * same authoritative response the grid was built from - never
@@ -2424,6 +2435,7 @@
       closeCalendarBook();
       closeCalendarAvail();   /* 4D-A: the same one-surface rule */
       closeCalendarDay();     /* 4D-B: same rule */
+      closeCalendarWeekly();  /* 4D-C: same rule */
       if (!appointment || calendarRenderer === null) {
         return;
       }
@@ -2856,6 +2868,7 @@
       closeCalendarBook();
       closeCalendarAvail();
       closeCalendarDay();     /* 4D-B: the same exclusion */
+      closeCalendarWeekly();  /* 4D-C: the same exclusion */
       /* ISO-8601 UTC instants compare lexicographically in time order, so
        * the choices always read earliest-first whatever the band held. */
       var ordered = slots.slice().sort(function (left, right) {
@@ -3122,6 +3135,7 @@
       closeCalendarDrawer();
       closeCalendarBook();
       closeCalendarDay();     /* 4D-B: one surface at a time */
+      closeCalendarWeekly();  /* 4D-C: one surface at a time */
       closeCalendarAvail();   /* always opens FRESH (the wipe-on-open rule) */
       var panel = byId("calendar-avail");
       if (panel) { panel.hidden = false; }
@@ -3358,6 +3372,7 @@
       closeCalendarDrawer();
       closeCalendarBook();
       closeCalendarAvail();
+      closeCalendarWeekly();  /* 4D-C: one surface at a time */
       closeCalendarDay();     /* always opens FRESH (the wipe-on-open rule) */
       var panel = byId("calendar-close");
       if (panel) { panel.hidden = false; }
@@ -3515,6 +3530,132 @@
       closeCalendarDay();
       calendar.pendingFeedback = message;
       startCalendarSettleRefresh();
+    }
+
+    /* -------------------------------------------------------------------
+     * PHASE 3A SLICE 4D-C - Weekly schedule (READ-ONLY).
+     *
+     * A Calendar-native view of the recurring PLAN: slot length, the
+     * seven weekly day rows, and the planned recurring closures - straight
+     * from the EXISTING authoritative recurring GET owner
+     * (data.getRecurringSchedule), never inferred from slot rows or the
+     * rendered grid. This surface performs ZERO PUTs, ZERO POSTs, ZERO
+     * mutations of any kind, and reproduces NO editing/Save/Preview/Apply
+     * control: the Recurring page stays the one canonical mutation
+     * surface, reached through openRecurring (the same owner the nav
+     * button uses). Save-vs-Apply meaning and the distinction from the
+     * immediate Close/reopen day control are stated verbatim in the panel
+     * markup. Frozen semantics everywhere: this panel changes nothing.
+     * ----------------------------------------------------------------- */
+
+    var WEEKLY_DAY_ROWS = [
+      ["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"],
+      ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"],
+      ["sun", "Sunday"]];
+
+    /*
+     * Purpose (4D-C): close AND WIPE the Weekly schedule panel; a pending
+     * GET becomes stale (weeklyReq invalidated) so a late response can
+     * never write into a closed panel.
+     */
+    function closeCalendarWeekly() {
+      var panel = byId("calendar-weekly");
+      if (panel) { panel.hidden = true; }
+      calendar.weeklyReq = null;
+      setCalendarText("calendar-weekly-note", "");
+      setCalendarText("calendar-weekly-slot", "");
+      setCalendarText("calendar-weekly-hours", "");
+      setCalendarText("calendar-weekly-closures", "");
+    }
+
+    /*
+     * Purpose (4D-C): render the VALIDATED recurring config verbatim.
+     * Weekly rows read only weekly_hours (open -> "start to end", else
+     * "Closed"); closures render each configured entry ({date} or
+     * {start,end} range) or the approved empty state. Nothing here reads
+     * slot rows, appointments, or closed_days - recurring truth comes
+     * from the recurring GET alone.
+     */
+    function renderWeeklySummary(body) {
+      setCalendarText("calendar-weekly-note", "");
+      setCalendarText("calendar-weekly-slot",
+        "Slot length: " + body.slot_minutes + " minutes");
+      var lines = [];
+      for (var i = 0; i < WEEKLY_DAY_ROWS.length; i++) {
+        var key = WEEKLY_DAY_ROWS[i][0];
+        var label = WEEKLY_DAY_ROWS[i][1];
+        var dayCfg = body.weekly_hours ? body.weekly_hours[key] : null;
+        if (dayCfg && dayCfg.open === true) {
+          lines.push(label + " - " + String(dayCfg.start) + " to " +
+            String(dayCfg.end));
+        } else {
+          lines.push(label + " - Closed");
+        }
+      }
+      setCalendarText("calendar-weekly-hours", lines.join("\n"));
+      var closures = Array.isArray(body.closures) ? body.closures : [];
+      if (closures.length === 0) {
+        setCalendarText("calendar-weekly-closures", MESSAGES.weekly_none);
+        return;
+      }
+      var items = [];
+      for (var c = 0; c < closures.length; c++) {
+        var entry = closures[c];
+        if (entry && typeof entry.date === "string") {
+          items.push(entry.date);
+        } else if (entry && typeof entry.start === "string" &&
+                   typeof entry.end === "string") {
+          items.push(entry.start + " to " + entry.end);
+        }
+      }
+      setCalendarText("calendar-weekly-closures", items.join("\n"));
+    }
+
+    /*
+     * Purpose (4D-C): open the panel FRESH under the one-surface rule and
+     * issue the ONE authoritative recurring GET. The response is guarded
+     * by the standard capture set (wipe epoch, session loss, page
+     * activity, lifecycle) PLUS the dedicated weeklyReq owner; a failure
+     * renders the generic wording and synthesizes NOTHING.
+     */
+    function openCalendarWeekly() {
+      if (calendar.settling > 0) {
+        return; /* F6: authoritative state is in flight */
+      }
+      closeCalendarDrawer();
+      closeCalendarBook();
+      closeCalendarAvail();
+      closeCalendarDay();
+      closeCalendarWeekly();  /* always opens FRESH */
+      var panel = byId("calendar-weekly");
+      if (panel) { panel.hidden = false; }
+      setCalendarText("calendar-weekly-note", MESSAGES.weekly_loading);
+      var token = ++calendar.actionSeq;
+      calendar.weeklyReq = token;
+      var lifecycleAtIssue = calendar.lifecycle;
+      var wipeEpochAtIssue = calendar.wipeEpoch;
+      data.getRecurringSchedule()
+        .then(function (outcome) {
+          if (wipeEpochAtIssue !== calendar.wipeEpoch) {
+            return; /* wiped - stay wiped */
+          }
+          if (isSessionLossOutcome(outcome)) {
+            resetContent();
+            onSessionLost(outcome.state);
+            return;
+          }
+          if (!calendar.active ||
+              lifecycleAtIssue !== calendar.lifecycle ||
+              calendar.weeklyReq !== token) {
+            return; /* page left, week re-entered, or panel closed */
+          }
+          calendar.weeklyReq = null;
+          if (!outcome.ok) {
+            setCalendarText("calendar-weekly-note", MESSAGES.weekly_error);
+            return;
+          }
+          renderWeeklySummary(outcome.data);
+        });
     }
 
     /*
@@ -3969,6 +4110,7 @@
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
       closeCalendarDay();    /* 4D-B: same - and a stale arm must not survive */
+      closeCalendarWeekly(); /* 4D-C: a week move restarts the view fresh */
       calendar.weekOffset -= 1;
       loadCalendar();
     }
@@ -3981,6 +4123,7 @@
       closeCalendarBook();   /* Slice 3: no panel survives leaving the week */
       closeCalendarAvail();  /* 4D-A: its date default belongs to this week */
       closeCalendarDay();    /* 4D-B: same - and a stale arm must not survive */
+      closeCalendarWeekly(); /* 4D-C: a week move restarts the view fresh */
       calendar.weekOffset += 1;
       loadCalendar();
     }
@@ -4020,6 +4163,7 @@
       closeCalendarBook();   /* Slice 3: re-entry is a page reset */
       closeCalendarAvail();  /* 4D-A: the same page-reset rule */
       closeCalendarDay();    /* 4D-B: the same page-reset rule */
+      closeCalendarWeekly(); /* 4D-C: the same page-reset rule */
       setCalendarNavDisabled(true);
       setCalendarText("calendar-range-label", "");
       setCalendarText("calendar-timezone-note", "");
@@ -4356,6 +4500,8 @@
       closeCalendarAvail();
       /* 4D-B: the day panel and its two-step arm obey the same wipe. */
       closeCalendarDay();
+      /* 4D-C: the read-only weekly panel obeys the same wipe. */
+      closeCalendarWeekly();
     }
 
     /* Enter (or re-enter after a fresh sign-in): always lands on a fresh
@@ -4690,6 +4836,20 @@
       var calDaySubmit = byId("calendar-close-submit");
       if (calDaySubmit) {
         calDaySubmit.addEventListener("click", onCalendarDaySubmit);
+      }
+      /* PHASE 3A Slice 4D-C: Weekly schedule (read-only) controls. The
+       * settings CTA calls the SAME page owner the nav button uses. */
+      var calWeeklyOpen = byId("calendar-weekly-open");
+      if (calWeeklyOpen) {
+        calWeeklyOpen.addEventListener("click", openCalendarWeekly);
+      }
+      var calWeeklyClose = byId("calendar-weekly-close");
+      if (calWeeklyClose) {
+        calWeeklyClose.addEventListener("click", closeCalendarWeekly);
+      }
+      var calWeeklySettings = byId("calendar-weekly-settings");
+      if (calWeeklySettings) {
+        calWeeklySettings.addEventListener("click", openRecurring);
       }
       /* PHASE 3A Slice 4C: drawer reschedule picker controls
        * (null-tolerant, the frozen-suite construction rule). */

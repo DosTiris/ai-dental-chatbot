@@ -445,9 +445,12 @@ test("audit: the calendar surface renders no unauthorized action vocabulary", ()
    * resting label "Close or reopen" names a DAY-state action (the panel
    * mutates closure state and never an appointment), so the forbidden
    * appointment-vocabulary pin above remains satisfied. */
+  /* Slice 4D-C adds three reviewed controls: the "Weekly schedule" toolbar
+   * button and the read-only panel's close + "Open Recurring settings"
+   * navigation CTA. None of them mutates anything. */
   const buttons = section.match(/<button/g) || [];
-  assert(buttons.length === 17,
-    "expected exactly the seventeen reviewed controls, found " + buttons.length);
+  assert(buttons.length === 20,
+    "expected exactly the twenty reviewed controls, found " + buttons.length);
 });
 
 /* PHASE 3A Slice 3: the booking submit must go through the existing data
@@ -646,7 +649,7 @@ test("audit: the 4D-A assets carry the exact deterministic cache-bust tokens", (
    * but stay pinned WITH the bundle (the 4C rule: a stale cached member of
    * this set must never pair with a fresh one across the deployment
    * boundary). */
-  const TOKEN = "4db1-close-polish-v1";
+  const TOKEN = "4dc-weekly-view-v1";
   for (const versioned of [
     '<script src="/static/portal/portal-data.js?v=' + TOKEN + '"></script>',
     '<script src="/static/portal/portal-calendar.js?v=' + TOKEN + '"></script>',
@@ -753,5 +756,47 @@ test("audit 4D-B.1: the closed-day styling stays neutral - no danger palette", (
     "danger"]) {
     assert(!block.toLowerCase().includes(forbidden),
       "closed-day styling must not use danger styling: " + forbidden);
+  }
+});
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-C - Weekly schedule (read-only) pins.
+ * ======================================================================== */
+
+test("audit 4D-C: the toolbar control says exactly Weekly schedule", () => {
+  const html = read("index.html");
+  const match = html.match(
+    /id="calendar-weekly-open"[^>]*>([^<]*)<\/button>/);
+  assert(match !== null, "the Weekly schedule control exists");
+  assert(match[1].trim() === "Weekly schedule",
+    "label must be exactly 'Weekly schedule', found '" +
+    match[1].trim() + "'");
+});
+
+test("audit 4D-C: the planned-closure terminology and Save/Apply copy are pinned verbatim", () => {
+  const html = read("index.html");
+  assert(html.includes("Planned closures &mdash; take effect on Apply"),
+    "the exact planned-closures heading is present");
+  assert(html.includes(
+    "Saving updates the recurring plan only. It does not change the times offered for booking. Apply attempts to materialize the saved plan across the booking horizon. Days that already contain scheduled inventory may be skipped, and booked appointments are never changed."),
+    "the Save/Apply explanation is present verbatim");
+  assert(html.includes(
+    "Planned closures are different from Close/reopen day. Close/reopen day takes effect immediately."),
+    "the 4D-B distinction is present verbatim");
+});
+
+test("audit 4D-C: the Weekly schedule panel reproduces NO mutation controls", () => {
+  const html = read("index.html");
+  const start = html.indexOf('id="calendar-weekly"');
+  assert(start !== -1, "the panel exists");
+  const end = html.indexOf("</aside>", start);
+  const block = html.slice(start, end);
+  const buttons = block.match(/<button/g) || [];
+  assert(buttons.length === 2,
+    "exactly two controls (Close + navigation CTA), found " + buttons.length);
+  for (const forbidden of [">Save<", ">Preview<", ">Apply<",
+    'id="recurring-save"', 'id="recurring-preview"', 'id="recurring-apply"']) {
+    assert(!block.includes(forbidden),
+      "the read-only panel must not reproduce: " + forbidden);
   }
 });

@@ -995,3 +995,8 @@ button.portal-calendar-band {
 .portal-calendar-col-closed .portal-calendar-dayhead {
   background: #f4f6f8;
 }
+
+/* PHASE 3A SLICE 4D-C - Weekly schedule read-only summary: the day and
+ * closure lines render as newline-joined text; pre-line is the ONE property
+ * existing styles lack for that. Nothing else is styled here. */
+.portal-calendar-weekly-lines { white-space: pre-line; }

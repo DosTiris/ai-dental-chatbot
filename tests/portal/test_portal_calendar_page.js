@@ -66,6 +66,18 @@ function makeElement(tag) {
     children: [],
     listeners: {},
     classList: makeClassList(),
+    /* 4D-C harness completion: the recurring page renderer (reached by the
+     * Weekly panel's navigation CTA through the SAME openRecurring owner
+     * the nav uses) sets attributes on built elements; the fake accepts
+     * them like a browser element would. */
+    attributes: {},
+    setAttribute: function (name, value) {
+      this.attributes[String(name)] = String(value);
+    },
+    getAttribute: function (name) {
+      const v = this.attributes[String(name)];
+      return v === undefined ? null : v;
+    },
     /* Geometry is applied through CSSOM property assignment (never a parsed
      * style attribute), so the fake mirrors that with a plain style bag. */
     style: {},
@@ -160,7 +172,12 @@ const PAGE_ELEMENT_IDS = [
   /* PHASE 3A Slice 4D-B: Close/Reopen day panel id contract. */
   "calendar-close-open", "calendar-close", "calendar-close-title",
   "calendar-close-note", "calendar-close-day", "calendar-close-submit",
-  "calendar-close-close", "calendar-close-feedback"
+  "calendar-close-close", "calendar-close-feedback",
+  /* PHASE 3A Slice 4D-C: Weekly schedule (read-only) id contract. */
+  "calendar-weekly-open", "calendar-weekly", "calendar-weekly-title",
+  "calendar-weekly-note", "calendar-weekly-slot", "calendar-weekly-hours",
+  "calendar-weekly-closures", "calendar-weekly-close",
+  "calendar-weekly-settings"
 ];
 
 function makeDocument() {
@@ -184,7 +201,8 @@ function makeFakeData() {
     "restoreAppointment", "rescheduleAppointment" /* PHASE 3A Slice 4C */,
     "restoreAppointmentToSlot" /* SLICE 4C v1.0.1 mode pin F1 */,
     "createOneOffAvailability" /* PHASE 3A Slice 4D-A */,
-    "closeDay", "reopenDay" /* PHASE 3A Slice 4D-B */];
+    "closeDay", "reopenDay" /* PHASE 3A Slice 4D-B */,
+    "getRecurringSchedule" /* PHASE 3A Slice 4D-C (read-only) */];
   const queues = {};
   const calls = {};
   for (const name of names) { queues[name] = []; calls[name] = []; }
@@ -226,6 +244,7 @@ function makeFakeData() {
       next("createOneOffAvailability", { day, startTime, durationMinutes }),
     closeDay: (day) => next("closeDay", day),
     reopenDay: (day) => next("reopenDay", day),
+    getRecurringSchedule: () => next("getRecurringSchedule", null),
     queue: (name, outcome) => queues[name].push({ outcome }),
     queueDeferred: (name) => {
       let resolve;
@@ -7135,4 +7154,224 @@ test("4D-B.1: the ordinary 4D-A open-date acceptance path is unchanged", async (
   assertEqual(f.data.calls.createOneOffAvailability.length, 1, "one POST");
   assertEqual(availPanel(f.doc).hidden, true, "panel closed on success");
   assertEqual(f.data.calls.getSchedule.length, 2, "authoritative settle");
+});
+
+/* ==========================================================================
+ * PHASE 3A SLICE 4D-C - Weekly schedule (read-only).
+ * ======================================================================== */
+
+const WEEKLY_LOADING = "Loading weekly schedule...";
+const WEEKLY_ERROR = "The weekly schedule could not be loaded. Please try again.";
+const WEEKLY_NONE = "None planned.";
+
+function weeklyPanel(doc) { return doc._elements["calendar-weekly"]; }
+function openWeekly(f) {
+  f.doc._elements["calendar-weekly-open"].trigger("click");
+}
+function recurringFixture(overrides) {
+  const weekly = {};
+  for (const k of ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]) {
+    weekly[k] = { open: false };
+  }
+  weekly.mon = { open: true, start: "09:00", end: "17:00" };
+  weekly.fri = { open: true, start: "08:30", end: "12:00" };
+  return Object.assign({
+    weekly_hours: weekly, slot_minutes: 30, closures: [],
+    schedule_config_updated_at: "2026-08-20T12:00:00.000000Z"
+  }, overrides || {});
+}
+
+test("4D-C: the Weekly schedule affordance exists on an EMPTY week and opening performs only the recurring GET", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  assert(f.doc._elements["calendar-weekly-open"] !== undefined,
+    "the toolbar affordance exists with no inventory at all");
+  const before = f.data.totalCalls();
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  assertEqual(weeklyPanel(f.doc).hidden, false, "the panel opened");
+  assertEqual(f.data.totalCalls(), before + 1,
+    "EXACTLY ONE request - the existing recurring GET, nothing else");
+  assertEqual(f.data.calls.getRecurringSchedule.length, 1, "and it is the GET");
+  assertEqual(f.data.calls.closeDay.length, 0, "zero POSTs (close)");
+  assertEqual(f.data.calls.createOneOffAvailability.length, 0,
+    "zero POSTs (availability)");
+});
+
+test("4D-C: weekly hours, slot length, and planned closures render EXACTLY from the returned config", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture({
+    closures: [{ date: "2026-12-24" },
+               { start: "2026-12-28", end: "2026-12-31" }] }) });
+  openWeekly(f);
+  await flush();
+
+  assertEqual(f.doc._elements["calendar-weekly-slot"].textContent,
+    "Slot length: 30 minutes", "slot duration from config");
+  const hours = f.doc._elements["calendar-weekly-hours"].textContent;
+  assert(hours.includes("Monday - 09:00 to 17:00"), "open Monday rendered");
+  assert(hours.includes("Friday - 08:30 to 12:00"), "open Friday rendered");
+  assert(hours.includes("Tuesday - Closed"), "closed weekday rendered");
+  assert(hours.includes("Sunday - Closed"), "Sunday row present");
+  const closures = f.doc._elements["calendar-weekly-closures"].textContent;
+  assert(closures.includes("2026-12-24"), "single closure rendered");
+  assert(closures.includes("2026-12-28 to 2026-12-31"), "range rendered");
+});
+
+test("4D-C: no planned closures renders the safe empty state", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  assertEqual(f.doc._elements["calendar-weekly-closures"].textContent,
+    WEEKLY_NONE, "the approved empty state");
+});
+
+test("4D-C: the panel NEVER infers recurring state from calendar rows - inventory changes nothing", async () => {
+  const f = makePages();
+  /* A week full of available/blocked/booked rows, but a recurring config
+   * that says everything except Monday is Closed: the panel must render
+   * the CONFIG, not the grid. */
+  queueWeek(f, [
+    slotFixture({ start_datetime: "2026-08-25T14:00:00Z",
+      end_datetime: "2026-08-25T14:30:00Z", status: "available" }),
+    slotFixture({ slot_id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      start_datetime: "2026-08-26T14:00:00Z",
+      end_datetime: "2026-08-26T14:30:00Z", status: "blocked" })
+  ], []);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  const hours = f.doc._elements["calendar-weekly-hours"].textContent;
+  assert(hours.includes("Tuesday - Closed"),
+    "Tuesday reads Closed from CONFIG even though Tuesday has an available row");
+  assert(hours.includes("Wednesday - Closed"),
+    "Wednesday reads Closed even though Wednesday has a blocked row");
+});
+
+test("4D-C: a failed GET synthesizes NOTHING - generic wording only", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getRecurringSchedule", { ok: false, state: "unavailable" });
+  openWeekly(f);
+  await flush();
+  assertEqual(f.doc._elements["calendar-weekly-note"].textContent,
+    WEEKLY_ERROR, "the generic wording renders");
+  assertEqual(f.doc._elements["calendar-weekly-hours"].textContent, "",
+    "no weekly rows were invented");
+  assertEqual(f.doc._elements["calendar-weekly-closures"].textContent, "",
+    "no closures were invented");
+});
+
+test("4D-C: session loss on the GET wipes and hands back", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getRecurringSchedule", { ok: false, state: "unauthorized" });
+  openWeekly(f);
+  await flush();
+  assertEqual(f.sessionLost.length, 1, "the session-loss hand-back fired");
+});
+
+test("4D-C: one surface at a time in BOTH directions, and reopening is FRESH", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  assertEqual(weeklyPanel(f.doc).hidden, false, "weekly open");
+  openAvail(f);
+  assertEqual(weeklyPanel(f.doc).hidden, true,
+    "opening Add availability closes it");
+  assertEqual(availPanel(f.doc).hidden, false, "avail open");
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  assertEqual(availPanel(f.doc).hidden, true, "and the reverse");
+  assertEqual(f.doc._elements["calendar-weekly-slot"].textContent,
+    "Slot length: 30 minutes", "reopen rendered FRESH from a fresh GET");
+  assertEqual(f.data.calls.getRecurringSchedule.length, 2,
+    "each open issued its own authoritative GET");
+});
+
+test("4D-C: week navigation clears the panel and a LATE stale GET response cannot repopulate it", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+
+  const deferred = f.data.queueDeferred("getRecurringSchedule");
+  openWeekly(f);
+  assertEqual(weeklyPanel(f.doc).hidden, false, "open, GET in flight");
+  queueWeek(f, [], [],
+    { start_day: "2026-08-31", end_day: "2026-09-06" },
+    { start_day: "2026-08-31", end_day: "2026-09-06" });
+  f.doc._elements["calendar-next"].trigger("click");
+  assertEqual(weeklyPanel(f.doc).hidden, true, "week move closed it");
+  await flush();
+  deferred.resolve({ ok: true, data: recurringFixture() });
+  await flush();
+  assertEqual(f.doc._elements["calendar-weekly-slot"].textContent, "",
+    "the late response wrote NOTHING into the wiped panel");
+});
+
+test("4D-C: Open Recurring settings navigates to the existing Recurring page owner", async () => {
+  const f = makePages();
+  queueWeek(f, [], []);
+  openCalendar(f);
+  await flush();
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  f.doc._elements["calendar-weekly-settings"].trigger("click");
+  await flush();
+  assertEqual(f.data.calls.getRecurringSchedule.length, 2,
+    "the EXISTING Recurring page owner loaded its own config - the same " +
+    "pathway the nav button uses");
+  /* Re-entering the Calendar afterwards starts FRESH: the page-reset rule
+   * closed the read-only panel. */
+  queueWeek(f, [], []);
+  f.doc._elements["nav-calendar"].trigger("click");
+  await flush();
+  assertEqual(weeklyPanel(f.doc).hidden, true,
+    "the Calendar re-entered with the read-only panel closed");
+});
+
+test("4D-C: 4D-B Close/reopen and the badge authority are untouched beside the new panel", async () => {
+  const f = makePages();
+  queueWeek(f, [], [], { closed_days: ["2026-08-26"] });
+  openCalendar(f);
+  await flush();
+  const cols = columns(f.doc);
+  assertEqual(closedBadgesIn(cols[2]).length, 1, "the 4D-B badge still renders");
+  openDay(f);
+  assertEqual(dayPanel(f.doc).hidden, false, "Close/reopen still opens");
+  f.data.queue("getRecurringSchedule", { ok: true, data: recurringFixture() });
+  openWeekly(f);
+  await flush();
+  assertEqual(dayPanel(f.doc).hidden, true, "one surface");
+  assertEqual(closedBadgesIn(columns(f.doc)[2]).length, 1,
+    "opening the weekly panel changed no badge - closed_days stays the " +
+    "only badge source");
 });

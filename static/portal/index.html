@@ -16,7 +16,7 @@
        asset carries the SAME deterministic token so production can never
        mix old and new UI code (the 4B1 F2 rule, extended). Unmodified
        assets (core, calendar, app) deliberately carry no token. -->
-  <link rel="stylesheet" href="/static/portal/portal.css?v=4db1-close-polish-v1" />
+  <link rel="stylesheet" href="/static/portal/portal.css?v=4dc-weekly-view-v1" />
 </head>
 <body>
   <main class="portal-wrap">
@@ -242,6 +242,10 @@
                Calendar itself - no fake appointments. -->
           <button id="calendar-close-open" class="portal-button portal-button-secondary"
                   type="button">Close/reopen day</button>
+          <!-- PHASE 3A Slice 4D-C: read-only Calendar-native view of the
+               recurring plan; navigation to the canonical Recurring page. -->
+          <button id="calendar-weekly-open" class="portal-button portal-button-secondary"
+                  type="button">Weekly schedule</button>
         </div>
         <!-- The office timezone is stated ONCE here, at calendar level. It is
              deliberately not repeated inside every block. -->
@@ -455,6 +459,32 @@
             <p id="calendar-close-feedback" class="portal-muted"
                aria-live="polite"></p>
           </aside>
+          <!-- PHASE 3A Slice 4D-C: the Weekly schedule panel. STRICTLY
+               READ-ONLY: it issues only the existing recurring GET, never a
+               PUT/POST, and reproduces NO editing, Save, Preview, or Apply
+               control - the Recurring page stays the canonical mutation
+               surface, reached by the one navigation CTA below. -->
+          <aside id="calendar-weekly" class="portal-calendar-drawer"
+                 aria-label="Weekly schedule" hidden>
+            <div class="portal-calendar-drawer-head">
+              <h3 id="calendar-weekly-title"
+                  class="portal-calendar-drawer-title">Weekly schedule</h3>
+              <button id="calendar-weekly-close"
+                      class="portal-button portal-button-secondary"
+                      type="button">Close</button>
+            </div>
+            <p id="calendar-weekly-note" class="portal-muted"
+               aria-live="polite"></p>
+            <p id="calendar-weekly-slot" class="portal-muted"></p>
+            <p id="calendar-weekly-hours" class="portal-calendar-weekly-lines"></p>
+            <h4 class="portal-label">Planned closures &mdash; take effect on Apply</h4>
+            <p id="calendar-weekly-closures"
+               class="portal-calendar-weekly-lines portal-muted"></p>
+            <p class="portal-muted">Saving updates the recurring plan only. It does not change the times offered for booking. Apply attempts to materialize the saved plan across the booking horizon. Days that already contain scheduled inventory may be skipped, and booked appointments are never changed.</p>
+            <p class="portal-muted">Planned closures are different from Close/reopen day. Close/reopen day takes effect immediately.</p>
+            <button id="calendar-weekly-settings" class="portal-button"
+                    type="button">Open Recurring settings</button>
+          </aside>
         </div>
       </section>
 
@@ -583,9 +613,9 @@
        matching contract on first load after deployment. Bump this token
        whenever portal-data.js changes its response contract - the static
        audit pins it so an incompatible change cannot ship without one. -->
-  <script src="/static/portal/portal-data.js?v=4db1-close-polish-v1"></script>
-  <script src="/static/portal/portal-calendar.js?v=4db1-close-polish-v1"></script>
-  <script src="/static/portal/portal-pages.js?v=4db1-close-polish-v1"></script>
+  <script src="/static/portal/portal-data.js?v=4dc-weekly-view-v1"></script>
+  <script src="/static/portal/portal-calendar.js?v=4dc-weekly-view-v1"></script>
+  <script src="/static/portal/portal-pages.js?v=4dc-weekly-view-v1"></script>
   <script src="/static/portal/portal-app.js"></script>
 </body>
 </html>
